@@ -1,7 +1,13 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getVersion } from '@tauri-apps/api/app'
 import toast, { Toaster } from 'react-hot-toast'
 import { UpdateNotification } from './UpdateNotification'
+import { checkForUpdates, installUpdate } from './updateApi'
+import { Table } from './components/Table'
+import { Html5Qrcode } from 'html5-qrcode'
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import * as XLSX from 'xlsx'
 
 // Helper component to display product images
 function ProductImage({ imagePath, alt }: { imagePath: string, alt: string }) {
@@ -59,9 +65,10 @@ function ProductImage({ imagePath, alt }: { imagePath: string, alt: string }) {
 }
 
 function App() {
-  const [currentView, setCurrentView] = useState<'setup' | 'login' | 'dashboard'>('setup')
+  const [currentView, setCurrentView] = useState<'setup' | 'login' | 'dashboard' | 'change-password'>('setup')
   const [loading, setLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState<any>(null)
+  const [showPasswordChange, setShowPasswordChange] = useState(false)
 
   useEffect(() => {
     initializeSystem()
@@ -118,10 +125,34 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {currentView === 'login' ? (
+      {showPasswordChange && currentUser ? (
+        <PasswordChangeModal
+          currentUser={currentUser}
+          onPasswordChanged={() => {
+            setShowPasswordChange(false)
+            setCurrentView('dashboard')
+          }}
+          onCancel={() => {
+            setShowPasswordChange(false)
+            setCurrentUser(null)
+            setCurrentView('login')
+          }}
+        />
+      ) : currentView === 'login' ? (
         <LoginView
           onLogin={() => setCurrentView('dashboard')}
-          onUserAuthenticated={setCurrentUser}
+          onUserAuthenticated={(user) => {
+            setCurrentUser(user)
+            if ((user as any)?.has_temporary_password) {
+              setShowPasswordChange(true)
+            } else {
+              setCurrentView('dashboard')
+            }
+          }}
+          onShowPasswordChange={(user) => {
+            setCurrentUser(user)
+            setShowPasswordChange(true)
+          }}
         />
       ) : (
         <DashboardView
@@ -161,9 +192,10 @@ function App() {
   )
 }
 
-function LoginView({ onLogin, onUserAuthenticated }: {
+function LoginView({ onLogin, onUserAuthenticated, onShowPasswordChange }: {
   onLogin: () => void
   onUserAuthenticated: (user: any) => void
+  onShowPasswordChange?: (user: any) => void
 }) {
   const [formData, setFormData] = useState({
     username: '',
@@ -197,6 +229,15 @@ function LoginView({ onLogin, onUserAuthenticated }: {
 
       if (user) {
         console.log('Login successful! User:', user)
+        // Check if user has temporary password and needs to change it
+        if ((user as any).has_temporary_password) {
+          // Show password change modal instead of logging in
+          onUserAuthenticated(user)
+          if (onShowPasswordChange) {
+            onShowPasswordChange(user)
+          }
+          return
+        }
         // Store user information for the session
         onUserAuthenticated(user)
         onLogin()
@@ -268,6 +309,124 @@ function LoginView({ onLogin, onUserAuthenticated }: {
             {loading ? 'Logging in...' : 'Login'}
           </button>
         </form>
+      </div>
+    </div>
+  )
+}
+
+// Password Change Modal for users with temporary passwords
+function PasswordChangeModal({ currentUser, onPasswordChanged, onCancel }: {
+  currentUser: any
+  onPasswordChanged: () => void
+  onCancel: () => void
+}) {
+  const [formData, setFormData] = useState({
+    newPassword: '',
+    confirmPassword: ''
+  })
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+
+    // Validation
+    if (formData.newPassword.length < 6) {
+      setError('Password must be at least 6 characters long')
+      return
+    }
+
+    if (formData.newPassword !== formData.confirmPassword) {
+      setError('Passwords do not match')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const newPasswordHash = btoa(formData.newPassword)
+      
+      await invoke('change_password', {
+        user_id: currentUser.id,
+        new_password_hash: newPasswordHash
+      })
+
+      toast.success('Password changed successfully! You can now access the system.')
+      onPasswordChanged()
+    } catch (error: any) {
+      console.error('Failed to change password:', error)
+      setError(`Failed to change password: ${error}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-xl p-8 w-full max-w-md">
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">Change Your Password</h2>
+          <p className="text-slate-600">
+            You're using a temporary password. Please set a new password to continue.
+          </p>
+        </div>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg mb-4">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <div className="mb-4">
+            <label className="block text-gray-700 mb-2 font-medium">New Password</label>
+            <input
+              type="password"
+              required
+              value={formData.newPassword}
+              onChange={(e) => setFormData({ ...formData, newPassword: e.target.value })}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Enter new password (min. 6 characters)"
+              minLength={6}
+            />
+          </div>
+
+          <div className="mb-6">
+            <label className="block text-gray-700 mb-2 font-medium">Confirm Password</label>
+            <input
+              type="password"
+              required
+              value={formData.confirmPassword}
+              onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Confirm new password"
+              minLength={6}
+            />
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loading ? 'Changing Password...' : 'Change Password'}
+            </button>
+            <button
+              type="button"
+              onClick={onCancel}
+              className="px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+
+        <div className="mt-4 p-3 bg-blue-50 rounded-lg">
+          <p className="text-sm text-blue-800">
+            <strong>Security Tip:</strong> Choose a strong password that you haven't used elsewhere.
+          </p>
+        </div>
       </div>
     </div>
   )
@@ -484,6 +643,30 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                 icon="📊"
                 label="Reports"
               />
+              <NavButton
+                active={currentSection === 'reports'}
+                onClick={() => setCurrentSection('reports')}
+                icon="📊"
+                label="Reports"
+              />
+              <NavButton
+                active={currentSection === 'settings'}
+                onClick={() => setCurrentSection('settings')}
+                icon="⚙️"
+                label="Settings"
+              />
+              <NavButton
+                active={currentSection === 'pending'}
+                onClick={() => setCurrentSection('pending')}
+                icon="📋"
+                label="Pending Items"
+              />
+              <NavButton
+                active={currentSection === 'kitchen'}
+                onClick={() => setCurrentSection('kitchen')}
+                icon="👨‍🍳"
+                label="Kitchen Orders"
+              />
             </>
           ) : isManager ? (
             // Manager - Operations Focus
@@ -517,6 +700,24 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                 onClick={() => setCurrentSection('reports')}
                 icon="📊"
                 label="Reports"
+              />
+              <NavButton
+                active={currentSection === 'reports'}
+                onClick={() => setCurrentSection('reports')}
+                icon="📊"
+                label="Reports"
+              />
+              <NavButton
+                active={currentSection === 'settings'}
+                onClick={() => setCurrentSection('settings')}
+                icon="⚙️"
+                label="Settings"
+              />
+              <NavButton
+                active={currentSection === 'pending'}
+                onClick={() => setCurrentSection('pending')}
+                icon="📋"
+                label="Pending Items"
               />
             </>
           ) : isSecretary ? (
@@ -552,6 +753,12 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                 icon="👥"
                 label="Staff Records"
               />
+              <NavButton
+                active={currentSection === 'pending'}
+                onClick={() => setCurrentSection('pending')}
+                icon="📋"
+                label="Pending Items"
+              />
             </>
           ) : (
             // Staff - Sales Only (Kitchen or Bar)
@@ -567,6 +774,12 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                 onClick={() => setCurrentSection('inventory')}
                 icon="📦"
                 label="Stock Check"
+              />
+              <NavButton
+                active={currentSection === 'pending'}
+                onClick={() => setCurrentSection('pending')}
+                icon="📋"
+                label="Pending Items"
               />
             </>
           )}
@@ -617,7 +830,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         case 'pos':
           return <StaffPOSInterface currentUser={currentUser} businessInfo={businessInfo} />
         case 'inventory':
-          return <StaffInventoryCheck />
+          return <StaffInventoryCheck currentUser={currentUser} />
         default:
           return <StaffPOSInterface currentUser={currentUser} businessInfo={businessInfo} />
       }
@@ -634,7 +847,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
       case 'sales':
         return <BusinessSales />
       case 'inventory':
-        return <BusinessInventory />
+        return <BusinessInventory currentUser={currentUser} />
       case 'staff':
         // Only SuperAdmin and Manager can manage staff
         if (isSuperAdmin || isManager) {
@@ -644,9 +857,21 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
       case 'reports':
         // Managers and above can see reports
         if (isSuperAdmin || isManager || isSecretary) {
-          return <BusinessReports />
+          return <ReportsDashboard currentUser={currentUser} businessInfo={businessInfo} />
         }
         return <AccessDenied />
+      case 'settings':
+        // SuperAdmin and Manager can access settings
+        if (isSuperAdmin || isManager) {
+          return <SettingsDashboard currentUser={currentUser} businessInfo={businessInfo} />
+        }
+        return <AccessDenied />
+      case 'pending':
+        // All roles can view pending items
+        return <PendingItemsDashboard currentUser={currentUser} businessInfo={businessInfo} />
+      case 'kitchen':
+        // All roles can view kitchen orders (kitchen staff, managers, etc.)
+        return <KitchenOrderQueue currentUser={currentUser} businessInfo={businessInfo} />
       default:
         return <BusinessDashboard currentUser={currentUser} />
     }
@@ -655,7 +880,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
   return (
     <div className="flex h-screen w-screen bg-slate-50 overflow-hidden">
       {renderSidebar()}
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 overflow-auto">
         {renderContent()}
       </div>
     </div>
@@ -665,10 +890,25 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
 function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (section: string) => void }) {
   const [syncStatus, setSyncStatus] = useState<any>(null)
   const [syncing, setSyncing] = useState(false)
+  const [updateInfo, setUpdateInfo] = useState<any>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [installingUpdate, setInstallingUpdate] = useState(false)
+  const [currentVersion, setCurrentVersion] = useState<string>('')
 
   useEffect(() => {
     checkSyncStatus()
+    loadCurrentVersion()
   }, [])
+
+  const loadCurrentVersion = async () => {
+    try {
+      const version = await getVersion()
+      setCurrentVersion(version)
+    } catch (error) {
+      console.error('Failed to get version:', error)
+      setCurrentVersion('Unknown')
+    }
+  }
 
   const checkSyncStatus = async () => {
     try {
@@ -794,6 +1034,58 @@ function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (se
     }
   }
 
+  const handleCheckForUpdates = async () => {
+    setCheckingUpdate(true)
+    try {
+      const info = await checkForUpdates()
+      setUpdateInfo(info)
+      if (info.available) {
+        toast.success(`Update available! Version ${info.version} is ready to install.`, {
+          duration: 5000,
+        })
+      } else {
+        toast.success('You are running the latest version!', {
+          duration: 3000,
+        })
+      }
+    } catch (error) {
+      console.error('Failed to check for updates:', error)
+      toast.error('Failed to check for updates. Make sure updater is enabled in configuration.')
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }
+
+  const handleInstallUpdate = async () => {
+    if (!updateInfo?.available) {
+      toast.error('No update available to install')
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Install update version ${updateInfo.version}?\n\n${updateInfo.body || ''}\n\nThe application will restart after installation.`
+    )
+
+    if (!confirmed) return
+
+    setInstallingUpdate(true)
+    try {
+      const result = await installUpdate()
+      if (result.success) {
+        toast.success('Update installed successfully! The application will restart...', {
+          duration: 5000,
+        })
+      } else {
+        toast.error(`Update installation failed: ${result.message}`)
+      }
+    } catch (error) {
+      console.error('Failed to install update:', error)
+      toast.error('Failed to install update. Check console for details.')
+    } finally {
+      setInstallingUpdate(false)
+    }
+  }
+
   return (
     <div className="flex-1 overflow-auto bg-slate-50">
       <div className="p-8 w-full">
@@ -856,6 +1148,74 @@ function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (se
               <span className="text-xl">📈</span>
               <span>System Reports</span>
           </button>
+          </div>
+        </div>
+
+        {/* Application Updates */}
+        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-8 w-full">
+          <h2 className="text-2xl font-bold text-slate-800 mb-6">🔄 Application Updates</h2>
+
+          {/* Current Version */}
+          <div className="mb-6 p-4 bg-slate-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-medium text-slate-700">Current Version</span>
+              <span className="px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
+                v{currentVersion || 'Loading...'}
+              </span>
+            </div>
+            {updateInfo?.available && (
+              <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium text-green-800">Update Available!</span>
+                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                    v{updateInfo.version}
+                  </span>
+                </div>
+                {updateInfo.body && (
+                  <p className="text-sm text-green-700 mt-2 whitespace-pre-wrap">{updateInfo.body}</p>
+                )}
+                {updateInfo.date && (
+                  <p className="text-xs text-green-600 mt-1">
+                    Released: {new Date(updateInfo.date).toLocaleDateString()}
+                  </p>
+                )}
+              </div>
+            )}
+            {updateInfo && !updateInfo.available && (
+              <p className="text-sm text-slate-600 mt-2">✅ You are running the latest version!</p>
+            )}
+          </div>
+
+          {/* Update Actions */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <button
+              onClick={handleCheckForUpdates}
+              disabled={checkingUpdate || installingUpdate}
+              className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
+            >
+              <span>{checkingUpdate ? '⏳' : '🔍'}</span>
+              <span>{checkingUpdate ? 'Checking...' : 'Check for Updates'}</span>
+            </button>
+
+            {updateInfo?.available && (
+              <button
+                onClick={handleInstallUpdate}
+                disabled={installingUpdate}
+                className="bg-green-600 hover:bg-green-700 disabled:bg-slate-400 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
+              >
+                <span>{installingUpdate ? '⏳' : '⬇️'}</span>
+                <span>{installingUpdate ? 'Installing...' : `Install v${updateInfo.version}`}</span>
+              </button>
+            )}
+          </div>
+
+          {/* Note */}
+          <div className="mt-6 border-t border-slate-200 pt-4">
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <p className="text-sm text-yellow-800">
+                <strong>⚠️ Note:</strong> Make sure the updater plugin is enabled in <code className="bg-yellow-100 px-1 rounded">tauri.conf.json</code> and your GitHub repository is configured correctly.
+              </p>
+            </div>
           </div>
         </div>
 
@@ -1089,6 +1449,25 @@ function ClientsManagement({
     }
   }
 
+  const deleteAllBusinesses = async () => {
+    if (!confirm('⚠️ WARNING: This will delete ALL businesses and all related data (products, sales, inventory). This action cannot be undone!\n\nAre you absolutely sure you want to proceed?')) {
+      return
+    }
+
+    if (!confirm('This is your last chance. All businesses will be permanently deleted. Continue?')) {
+      return
+    }
+
+    try {
+      await invoke('delete_all_businesses')
+      await loadClients()
+      toast.success('All businesses deleted successfully')
+    } catch (error) {
+      console.error('Failed to delete all businesses:', error)
+      toast.error('Failed to delete all businesses')
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex-1 overflow-auto bg-slate-50">
@@ -1110,13 +1489,23 @@ function ClientsManagement({
             <h1 className="text-3xl font-bold text-slate-800 mb-2">Client Businesses</h1>
             <p className="text-slate-600 text-lg">Manage all your client businesses ({clients.length} total)</p>
           </div>
-        <button
-            onClick={() => {}}
-            className="bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
-        >
-            ➕ Onboard New Client
-        </button>
-      </div>
+          <div className="flex gap-3">
+            {clients.length > 0 && (
+              <button
+                onClick={deleteAllBusinesses}
+                className="bg-red-600 hover:bg-red-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
+              >
+                🗑️ Delete All Businesses
+              </button>
+            )}
+            <button
+              onClick={onNavigateToOnboarding}
+              className="bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
+            >
+              ➕ Onboard New Client
+            </button>
+          </div>
+        </div>
 
         {clients.length === 0 ? (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-12 w-full">
@@ -1674,6 +2063,46 @@ function BusinessCreationSuccessModal({ business, onClose }: {
 }
 
 function SystemReports() {
+  const [loading, setLoading] = useState(true)
+  const [summary, setSummary] = useState<any>(null)
+  const [dateRange, setDateRange] = useState({
+    start: new Date(new Date().setDate(1)).toISOString().split('T')[0], // First day of month
+    end: new Date().toISOString().split('T')[0] // Today
+  })
+
+  useEffect(() => {
+    loadSummary()
+  }, [dateRange])
+
+  const loadSummary = async () => {
+    try {
+      setLoading(true)
+      const result = await invoke('get_system_revenue_summary', {
+        start_date: dateRange.start,
+        end_date: dateRange.end
+      }) as any
+      setSummary(result)
+    } catch (error) {
+      console.error('Failed to load system summary:', error)
+      toast.error('Failed to load system reports')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50">
+        <div className="p-8 w-full">
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <p className="text-slate-600">Loading system reports...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex-1 overflow-auto bg-slate-50">
       <div className="p-8 w-full">
@@ -1682,33 +2111,125 @@ function SystemReports() {
           <p className="text-slate-600 text-lg">View system-wide analytics and performance metrics</p>
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-12 w-full">
-          <div className="text-center">
-            <div className="text-7xl mb-6">📊</div>
-            <h2 className="text-3xl font-bold text-slate-800 mb-3">Analytics Dashboard</h2>
-            <p className="text-slate-600 mb-8 text-lg">Comprehensive insights across all your client businesses</p>
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8 w-full">
-              <div className="bg-slate-50 rounded-lg p-6 hover:bg-slate-100 transition-colors">
-                <div className="text-3xl mb-3">💰</div>
-                <h4 className="font-semibold text-slate-800 mb-2">Revenue Analytics</h4>
-                <p className="text-slate-600 text-sm">Track total system revenue and client performance</p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-6 hover:bg-slate-100 transition-colors">
-                <div className="text-3xl mb-3">📈</div>
-                <h4 className="font-semibold text-slate-800 mb-2">Growth Metrics</h4>
-                <p className="text-slate-600 text-sm">Monitor client acquisition and business expansion</p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-6 hover:bg-slate-100 transition-colors">
-                <div className="text-3xl mb-3">⚙️</div>
-                <h4 className="font-semibold text-slate-800 mb-2">System Health</h4>
-                <p className="text-slate-600 text-sm">Track software performance and client satisfaction</p>
-              </div>
+        {/* Date Range Filter */}
+        <div className="mb-6 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+          <div className="flex gap-4 items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700 mb-2">Start Date</label>
+              <input
+                type="date"
+                value={dateRange.start}
+                onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
+                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
             </div>
-            <button className="bg-blue-600 hover:bg-blue-700 text-white py-4 px-8 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg text-lg">
-              📊 View Full Reports
-        </button>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-slate-700 mb-2">End Date</label>
+              <input
+                type="date"
+                value={dateRange.end}
+                onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
+                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <button
+              onClick={loadSummary}
+              className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+            >
+              🔄 Refresh
+            </button>
           </div>
         </div>
+
+        {/* Summary Cards */}
+        {summary && (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+              <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-6 text-white">
+                <div className="text-3xl mb-2">💰</div>
+                <div className="text-2xl font-bold mb-1">₦{summary.total_revenue?.toLocaleString() || '0'}</div>
+                <div className="text-blue-100 text-sm">Total Revenue ({dateRange.start} to {dateRange.end})</div>
+              </div>
+              <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-6 text-white">
+                <div className="text-3xl mb-2">📊</div>
+                <div className="text-2xl font-bold mb-1">{summary.total_transactions || 0}</div>
+                <div className="text-green-100 text-sm">Total Transactions</div>
+              </div>
+              <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl shadow-lg p-6 text-white">
+                <div className="text-3xl mb-2">🏢</div>
+                <div className="text-2xl font-bold mb-1">{summary.total_businesses || 0}</div>
+                <div className="text-purple-100 text-sm">Active Clients</div>
+              </div>
+              <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl shadow-lg p-6 text-white">
+                <div className="text-3xl mb-2">📈</div>
+                <div className="text-2xl font-bold mb-1">₦{summary.average_revenue_per_business?.toLocaleString() || '0'}</div>
+                <div className="text-orange-100 text-sm">Avg Revenue per Client</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <h3 className="text-lg font-bold text-slate-800 mb-4">📅 Today's Revenue</h3>
+                <div className="text-3xl font-bold text-green-600">₦{summary.today_revenue?.toLocaleString() || '0'}</div>
+              </div>
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <h3 className="text-lg font-bold text-slate-800 mb-4">📆 This Month's Revenue</h3>
+                <div className="text-3xl font-bold text-blue-600">₦{summary.month_revenue?.toLocaleString() || '0'}</div>
+              </div>
+            </div>
+
+            {/* Client Performance */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-6 border-b border-slate-200">
+                <h2 className="text-xl font-bold text-slate-800">Client Performance</h2>
+                <p className="text-slate-600 text-sm mt-1">Revenue by client business</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Business</th>
+                      <th className="px-6 py-3 text-right text-xs font-medium text-slate-700 uppercase">Revenue</th>
+                      <th className="px-6 py-3 text-right text-xs font-medium text-slate-700 uppercase">Transactions</th>
+                      <th className="px-6 py-3 text-right text-xs font-medium text-slate-700 uppercase">Avg per Transaction</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {summary.business_revenue && summary.business_revenue.length > 0 ? (
+                      summary.business_revenue.map((business: any, index: number) => (
+                        <tr key={business.business_id} className="hover:bg-slate-50">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="flex items-center">
+                              <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center mr-3">
+                                <span className="text-blue-600 font-bold">{index + 1}</span>
+                              </div>
+                              <div className="font-medium text-slate-800">{business.business_name}</div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-right font-semibold text-slate-800">
+                            ₦{business.revenue?.toLocaleString() || '0'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-right text-slate-600">
+                            {business.transactions || 0}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-right text-slate-600">
+                            ₦{business.transactions > 0 ? (business.revenue / business.transactions).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '0'}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
+                          No revenue data available for the selected date range
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
@@ -2445,7 +2966,11 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         cost_price: productData.costPrice || productData.cost_price || 0,
         stock_quantity: productData.stockQuantity || productData.stock_quantity || 0,
         min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
-        barcode: productData.barcode || ''
+        fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
+        show_stock: productData.showStock || productData.show_stock || 0,
+        store_stock: productData.storeStock || productData.store_stock || 0,
+        barcode: productData.barcode || '',
+        serial_number: productData.serialNumber || productData.serial_number || ''
       }
       console.log('Creating product with data:', requestData)
       await invoke('create_product', {
@@ -2519,68 +3044,117 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
                 Showing {((currentPage - 1) * itemsPerPage) + 1} to {Math.min(currentPage * itemsPerPage, products.length)} of {products.length}
               </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Image</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Name</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Category</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Description</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Price</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Cost Price</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Stock</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Min Stock</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Barcode</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-slate-200">
-                  {products.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((product: any) => (
-                    <tr key={product.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center">
-                          {product.image_path ? (
-                            <ProductImage imagePath={product.image_path} alt={product.name} />
-                          ) : (
-                            <span className="text-2xl">
-                              {product.category === 'KITCHEN' ? '🍽️' : product.category === 'BAR' ? '🍺' : '🏨'}
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-semibold text-slate-900">{product.name}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
-                          {product.category}
+            <Table
+              columns={[
+                {
+                  key: 'image',
+                  header: 'Image',
+                  render: (product: any) => (
+                    <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center">
+                      {product.image_path ? (
+                        <ProductImage imagePath={product.image_path} alt={product.name} />
+                      ) : (
+                        <span className="text-2xl">
+                          {product.category === 'KITCHEN' ? '🍽️' : product.category === 'BAR' ? '🍺' : '🏨'}
                         </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="text-sm text-slate-600 max-w-xs truncate" title={product.description || ''}>
-                          {product.description || '-'}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-bold text-green-600">₦{product.price?.toFixed(2) || '0.00'}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-slate-600">₦{product.cost_price?.toFixed(2) || '0.00'}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-slate-900">{product.stock_quantity || 0}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-slate-600">{product.min_stock_level || 0}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-slate-500 font-mono">{product.barcode || '-'}</div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                      )}
+                    </div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'name',
+                  header: 'Name',
+                  render: (product: any) => (
+                    <div className="text-sm font-semibold text-slate-900">{product.name}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'category',
+                  header: 'Category',
+                  render: (product: any) => (
+                    <span className="px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
+                      {product.category}
+                    </span>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'description',
+                  header: 'Description',
+                  render: (product: any) => (
+                    <div className="text-sm text-slate-600 max-w-xs truncate" title={product.description || ''}>
+                      {product.description || '-'}
+                    </div>
+                  )
+                },
+                {
+                  key: 'price',
+                  header: 'Price',
+                  render: (product: any) => (
+                    <div className="text-sm font-bold text-green-600">₦{product.price?.toFixed(2) || '0.00'}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'cost_price',
+                  header: 'Cost Price',
+                  render: (product: any) => (
+                    <div className="text-sm text-slate-600">₦{product.cost_price?.toFixed(2) || '0.00'}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'fridge_stock',
+                  header: 'Fridge Stock',
+                  align: 'center',
+                  render: (product: any) => (
+                    <div className={`text-sm font-semibold ${(product.fridge_stock || 0) < 5 ? 'text-red-600' : 'text-slate-900'}`}>
+                      {product.fridge_stock || 0}
+                    </div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'show_stock',
+                  header: 'Show Stock',
+                  align: 'center',
+                  render: (product: any) => (
+                    <div className="text-sm font-semibold text-slate-900">{product.show_stock || 0}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'store_stock',
+                  header: 'Store Stock',
+                  align: 'center',
+                  render: (product: any) => (
+                    <div className="text-sm font-semibold text-slate-900">{product.store_stock || 0}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'min_stock_level',
+                  header: 'Min Stock',
+                  render: (product: any) => (
+                    <div className="text-sm text-slate-600">{product.min_stock_level || 0}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                },
+                {
+                  key: 'barcode',
+                  header: 'Barcode',
+                  render: (product: any) => (
+                    <div className="text-sm text-slate-500 font-mono">{product.barcode || '-'}</div>
+                  ),
+                  className: 'whitespace-nowrap'
+                }
+              ]}
+              data={products.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)}
+              rowKey={(product) => product.id}
+              emptyMessage="No products found"
+            />
             {/* Pagination */}
             {products.length > itemsPerPage && (
               <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between">
@@ -2706,7 +3280,11 @@ function AddProductModal({ onClose, onSave, businessModules, businessId }: {
     costPrice: '',
     stockQuantity: '',
     minStockLevel: '',
+    fridgeStock: '',
+    showStock: '',
+    storeStock: '',
     barcode: '',
+    serialNumber: '',
     imagePath: ''
   })
   const [imagePreview, setImagePreview] = useState<string | null>(null)
@@ -2717,8 +3295,11 @@ function AddProductModal({ onClose, onSave, businessModules, businessId }: {
       ...formData,
       price: parseFloat(formData.price),
       costPrice: parseFloat(formData.costPrice),
-      stockQuantity: parseInt(formData.stockQuantity),
-      minStockLevel: parseInt(formData.minStockLevel),
+      stockQuantity: parseInt(formData.stockQuantity) || 0,
+      minStockLevel: parseInt(formData.minStockLevel) || 0,
+      fridgeStock: parseInt(formData.fridgeStock) || 0,
+      showStock: parseInt(formData.showStock) || 0,
+      storeStock: parseInt(formData.storeStock) || 0,
       business_id: businessId,
       image_path: formData.imagePath
     })
@@ -2881,13 +3462,39 @@ function AddProductModal({ onClose, onSave, businessModules, businessId }: {
 
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">
-                Initial Stock *
+                Fridge Stock (for POS) *
               </label>
               <input
                 type="number"
                 required
-                value={formData.stockQuantity}
-                onChange={(e) => updateFormData('stockQuantity', e.target.value)}
+                value={formData.fridgeStock}
+                onChange={(e) => updateFormData('fridgeStock', e.target.value)}
+                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="0"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Show Stock (for display)
+              </label>
+              <input
+                type="number"
+                value={formData.showStock}
+                onChange={(e) => updateFormData('showStock', e.target.value)}
+                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="0"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Store Stock (warehouse)
+              </label>
+              <input
+                type="number"
+                value={formData.storeStock}
+                onChange={(e) => updateFormData('storeStock', e.target.value)}
                 className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="0"
               />
@@ -2910,13 +3517,62 @@ function AddProductModal({ onClose, onSave, businessModules, businessId }: {
               <label className="block text-sm font-medium text-slate-700 mb-2">
                 Barcode (Optional)
               </label>
-              <input
-                type="text"
-                value={formData.barcode}
-                onChange={(e) => updateFormData('barcode', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Scan or enter barcode"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={formData.barcode}
+                  onChange={(e) => updateFormData('barcode', e.target.value)}
+                  className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Scan or enter barcode"
+                  id="barcode-input"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Focus on barcode input and trigger scan mode
+                    const input = document.getElementById('barcode-input') as HTMLInputElement
+                    if (input) {
+                      input.focus()
+                      input.select()
+                    }
+                    toast('Ready to scan! Use your barcode scanner or type the code.', { duration: 3000 })
+                  }}
+                  className="px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+                >
+                  📷 Scan
+                </button>
+              </div>
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Serial Number (Optional)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={formData.serialNumber}
+                  onChange={(e) => updateFormData('serialNumber', e.target.value)}
+                  className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Scan or enter serial number"
+                  id="serial-input"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Focus on serial input and trigger scan mode
+                    const input = document.getElementById('serial-input') as HTMLInputElement
+                    if (input) {
+                      input.focus()
+                      input.select()
+                    }
+                    toast('Ready to scan! Use your barcode scanner or type the code.', { duration: 3000 })
+                  }}
+                  className="px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+                >
+                  📷 Scan
+                </button>
+              </div>
             </div>
 
             <div className="md:col-span-2">
@@ -2992,19 +3648,576 @@ function BusinessSales() {
   )
 }
 
-function BusinessInventory() {
+function KitchenOrderQueue({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [orders, setOrders] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [filter, setFilter] = useState<'all' | 'PENDING' | 'PREPARING' | 'READY' | 'COMPLETED'>('all')
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) {
+      loadOrders()
+      // Refresh every 5 seconds for real-time updates
+      const interval = setInterval(loadOrders, 5000)
+      return () => clearInterval(interval)
+    }
+  }, [businessId, filter])
+
+  const loadOrders = async () => {
+    try {
+      setLoading(true)
+      const status = filter === 'all' ? null : filter
+      const result = await invoke('get_kitchen_orders', {
+        business_id: businessId,
+        status: status
+      }) as any[]
+      setOrders(result || [])
+    } catch (error) {
+      console.error('Failed to load kitchen orders:', error)
+      toast.error('Failed to load kitchen orders')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const updateOrderStatus = async (orderId: number, status: string) => {
+    try {
+      await invoke('update_kitchen_order_status', {
+        order_id: orderId,
+        status: status,
+        prepared_by: currentUser?.id || null
+      })
+      toast.success(`Order status updated to ${status}`)
+      loadOrders()
+    } catch (error) {
+      console.error('Failed to update order status:', error)
+      toast.error('Failed to update order status')
+    }
+  }
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'PENDING':
+        return 'bg-yellow-100 text-yellow-800 border-yellow-300'
+      case 'PREPARING':
+        return 'bg-blue-100 text-blue-800 border-blue-300'
+      case 'READY':
+        return 'bg-green-100 text-green-800 border-green-300'
+      case 'COMPLETED':
+        return 'bg-slate-100 text-slate-800 border-slate-300'
+      default:
+        return 'bg-gray-100 text-gray-800 border-gray-300'
+    }
+  }
+
+  const formatTime = (dateString: string | null) => {
+    if (!dateString) return '-'
+    const date = new Date(dateString)
+    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+  }
+
+  const getElapsedTime = (_createdAt: string, elapsedMinutes: number | null) => {
+    if (!elapsedMinutes) return '-'
+    if (elapsedMinutes < 60) return `${Math.floor(elapsedMinutes)}m`
+    const hours = Math.floor(elapsedMinutes / 60)
+    const mins = Math.floor(elapsedMinutes % 60)
+    return `${hours}h ${mins}m`
+  }
+
+  // Group orders by status
+  const pendingOrders = orders.filter(o => o.status === 'PENDING')
+  const preparingOrders = orders.filter(o => o.status === 'PREPARING')
+  const readyOrders = orders.filter(o => o.status === 'READY')
+
+  if (loading && orders.length === 0) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50">
+        <div className="p-8 w-full">
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <p className="text-slate-600">Loading kitchen orders...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex-1 overflow-auto bg-slate-50">
       <div className="p-8 w-full">
-        <h1 className="text-3xl font-bold text-slate-800 mb-2">Inventory Management</h1>
-        <p className="text-slate-600 text-lg">Track stock levels and manage supplies</p>
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-12">
-          <div className="text-center">
-            <div className="text-6xl mb-4">📦</div>
-            <h2 className="text-2xl font-bold text-slate-800 mb-2">Stock Control</h2>
-            <p className="text-slate-600">Inventory management coming next</p>
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold text-slate-800 mb-2">Kitchen Order Queue</h1>
+          <p className="text-slate-600 text-lg">Manage and track kitchen orders in real-time</p>
+        </div>
+
+        {/* Filter Tabs */}
+        <div className="mb-6 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+          <div className="flex gap-2 overflow-x-auto">
+            {[
+              { value: 'all', label: 'All Orders', count: orders.length },
+              { value: 'PENDING', label: 'Pending', count: pendingOrders.length },
+              { value: 'PREPARING', label: 'Preparing', count: preparingOrders.length },
+              { value: 'READY', label: 'Ready', count: readyOrders.length },
+              { value: 'COMPLETED', label: 'Completed', count: orders.filter(o => o.status === 'COMPLETED').length },
+            ].map(tab => (
+              <button
+                key={tab.value}
+                onClick={() => setFilter(tab.value as any)}
+                className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-colors ${
+                  filter === tab.value
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {tab.label} ({tab.count})
+              </button>
+            ))}
           </div>
         </div>
+
+        {/* Kitchen Display View - Show active orders prominently */}
+        {(pendingOrders.length > 0 || preparingOrders.length > 0 || readyOrders.length > 0) && (
+          <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+            {pendingOrders.length > 0 && (
+              <div className="bg-yellow-50 border-2 border-yellow-300 rounded-xl p-4">
+                <div className="text-yellow-800 font-bold text-lg mb-2">⏳ Pending: {pendingOrders.length}</div>
+                <div className="text-sm text-yellow-600">Orders waiting to start</div>
+              </div>
+            )}
+            {preparingOrders.length > 0 && (
+              <div className="bg-blue-50 border-2 border-blue-300 rounded-xl p-4">
+                <div className="text-blue-800 font-bold text-lg mb-2">👨‍🍳 Preparing: {preparingOrders.length}</div>
+                <div className="text-sm text-blue-600">Orders being prepared</div>
+              </div>
+            )}
+            {readyOrders.length > 0 && (
+              <div className="bg-green-50 border-2 border-green-300 rounded-xl p-4">
+                <div className="text-green-800 font-bold text-lg mb-2">✅ Ready: {readyOrders.length}</div>
+                <div className="text-sm text-green-600">Orders ready for pickup</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Orders List */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          {orders.length === 0 ? (
+            <div className="p-12 text-center">
+              <div className="text-6xl mb-4">🍽️</div>
+              <h3 className="text-xl font-bold text-slate-800 mb-2">No Kitchen Orders</h3>
+              <p className="text-slate-600">Orders will appear here when KITCHEN category products are sold</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-200">
+              {orders.map(order => (
+                <div
+                  key={order.id}
+                  className={`p-6 hover:bg-slate-50 transition-colors ${
+                    order.status === 'READY' ? 'bg-green-50' :
+                    order.status === 'PREPARING' ? 'bg-blue-50' :
+                    order.status === 'PENDING' ? 'bg-yellow-50' : ''
+                  }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(order.status)}`}>
+                          {order.status}
+                        </span>
+                        <span className="text-slate-600 text-sm">Order #{order.sale_id}</span>
+                        <span className="text-slate-600 text-sm">•</span>
+                        <span className="text-slate-600 text-sm">{formatTime(order.created_at)}</span>
+                        {order.elapsed_minutes && (
+                          <>
+                            <span className="text-slate-600 text-sm">•</span>
+                            <span className="text-slate-600 text-sm">⏱️ {getElapsedTime(order.created_at, order.elapsed_minutes)}</span>
+                          </>
+                        )}
+                      </div>
+                      
+                      <h3 className="text-xl font-bold text-slate-800 mb-1">
+                        {order.product_name} × {order.quantity}
+                      </h3>
+                      
+                      {order.customer_name && (
+                        <p className="text-slate-600 text-sm mb-2">Customer: {order.customer_name}</p>
+                      )}
+                      
+                      <div className="flex gap-4 text-sm text-slate-600">
+                        <span>Total: ₦{order.total_amount?.toLocaleString() || '0'}</span>
+                        <span>•</span>
+                        <span>Payment: {order.payment_method}</span>
+                      </div>
+
+                      {order.notes && (
+                        <div className="mt-2 p-2 bg-slate-100 rounded text-sm text-slate-700">
+                          <strong>Notes:</strong> {order.notes}
+                        </div>
+                      )}
+
+                      {order.started_at && (
+                        <p className="text-xs text-slate-500 mt-2">Started: {formatTime(order.started_at)}</p>
+                      )}
+                      {order.ready_at && (
+                        <p className="text-xs text-slate-500">Ready: {formatTime(order.ready_at)}</p>
+                      )}
+                      {order.completed_at && (
+                        <p className="text-xs text-slate-500">Completed: {formatTime(order.completed_at)}</p>
+                      )}
+                    </div>
+
+                    <div className="ml-4 flex flex-col gap-2">
+                      {order.status === 'PENDING' && (
+                        <>
+                          <button
+                            onClick={() => updateOrderStatus(order.id, 'PREPARING')}
+                            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm whitespace-nowrap"
+                          >
+                            Start Preparing
+                          </button>
+                        </>
+                      )}
+                      {order.status === 'PREPARING' && (
+                        <>
+                          <button
+                            onClick={() => updateOrderStatus(order.id, 'READY')}
+                            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium text-sm whitespace-nowrap"
+                          >
+                            Mark Ready
+                          </button>
+                        </>
+                      )}
+                      {order.status === 'READY' && (
+                        <>
+                          <button
+                            onClick={() => updateOrderStatus(order.id, 'COMPLETED')}
+                            className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg font-medium text-sm whitespace-nowrap"
+                          >
+                            Mark Completed
+                          </button>
+                        </>
+                      )}
+                      {order.status === 'COMPLETED' && (
+                        <span className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg font-medium text-sm whitespace-nowrap text-center">
+                          ✓ Completed
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BusinessInventory({ currentUser }: { currentUser: any }) {
+  const [products, setProducts] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [editingProduct, setEditingProduct] = useState<any>(null)
+  const [transferModal, setTransferModal] = useState<any>(null)
+  const isAdmin = currentUser?.role === 'SuperAdmin'
+  const isSecretary = currentUser?.role === 'Secretary'
+  const canEditStore = isAdmin || isSecretary
+
+  useEffect(() => {
+    loadProducts()
+  }, [])
+
+  const loadProducts = async () => {
+    try {
+      setLoading(true)
+      const businessId = currentUser?.business_id
+      if (businessId) {
+        const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
+        setProducts(businessProducts)
+      }
+    } catch (error) {
+      console.error('Failed to load products:', error)
+      toast.error('Failed to load products')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleUpdateStoreStock = async (productId: number, newStock: number) => {
+    try {
+      await invoke('update_stock_type', {
+        productId,
+        stockType: 'store',
+        quantityChange: newStock,
+        userId: currentUser?.id || 1,
+        reason: 'Store stock update'
+      })
+      toast.success('Store stock updated successfully')
+      await loadProducts()
+      setEditingProduct(null)
+    } catch (error) {
+      console.error('Failed to update store stock:', error)
+      toast.error('Failed to update store stock')
+    }
+  }
+
+  const handleTransferStock = async (productId: number, from: string, to: string, quantity: number) => {
+    try {
+      await invoke('transfer_stock', {
+        productId,
+        from,
+        to,
+        quantity,
+        userId: currentUser?.id || 1
+      })
+      toast.success(`Stock transferred from ${from} to ${to} successfully`)
+      await loadProducts()
+      setTransferModal(null)
+    } catch (error) {
+      console.error('Failed to transfer stock:', error)
+      toast.error(`Failed to transfer stock: ${error}`)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-slate-600">Loading inventory...</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 overflow-auto bg-slate-50">
+      <div className="p-8 w-full">
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold text-slate-800 mb-2">Inventory Management</h1>
+          <p className="text-slate-600 text-lg">Manage fridge stock, show stock, and store stock</p>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="p-6 border-b border-slate-200">
+            <h2 className="text-xl font-bold text-slate-800">Stock Overview</h2>
+            <p className="text-sm text-slate-600 mt-1">Fridge stock is used for POS, show stock for display, store stock for warehouse</p>
+          </div>
+
+          <Table
+            columns={[
+              {
+                key: 'product',
+                header: 'Product',
+                render: (product: any) => {
+                  const fridgeStock = product.fridge_stock || 0
+                  const isLowFridgeStock = fridgeStock < 5
+                  return (
+                    <>
+                      <div className="font-semibold text-slate-800">{product.name}</div>
+                      <div className="text-xs text-slate-500">{product.category}</div>
+                      {isLowFridgeStock && (
+                        <span className="inline-block mt-1 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full font-bold">
+                          Low Fridge Stock
+                        </span>
+                      )}
+                    </>
+                  )
+                }
+              },
+              {
+                key: 'fridge_stock',
+                header: 'Fridge Stock',
+                align: 'center',
+                render: (product: any) => {
+                  const fridgeStock = product.fridge_stock || 0
+                  const isLowFridgeStock = fridgeStock < 5
+                  return (
+                    <div className={`font-bold ${isLowFridgeStock ? 'text-red-600' : 'text-slate-700'}`}>
+                      {fridgeStock}
+                    </div>
+                  )
+                }
+              },
+              {
+                key: 'show_stock',
+                header: 'Show Stock',
+                align: 'center',
+                render: (product: any) => (
+                  <div className="font-bold text-slate-700">{product.show_stock || 0}</div>
+                )
+              },
+              {
+                key: 'store_stock',
+                header: 'Store Stock',
+                align: 'center',
+                render: (product: any) => {
+                  const storeStock = product.store_stock || 0
+                  if (editingProduct?.id === product.id) {
+                    return (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          defaultValue={storeStock}
+                          onBlur={(e) => {
+                            const newStock = parseInt(e.target.value) || 0
+                            const change = newStock - storeStock
+                            if (change !== 0) {
+                              handleUpdateStoreStock(product.id, change)
+                            } else {
+                              setEditingProduct(null)
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const newStock = parseInt((e.target as HTMLInputElement).value) || 0
+                              const change = newStock - storeStock
+                              if (change !== 0) {
+                                handleUpdateStoreStock(product.id, change)
+                              } else {
+                                setEditingProduct(null)
+                              }
+                            } else if (e.key === 'Escape') {
+                              setEditingProduct(null)
+                            }
+                          }}
+                          className="w-20 px-2 py-1 border border-slate-300 rounded text-center"
+                          autoFocus
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </div>
+                    )
+                  }
+                  return (
+                    <div className="flex items-center justify-center gap-2">
+                      <div className="font-bold text-slate-700">{storeStock}</div>
+                      {canEditStore && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setEditingProduct(product)
+                          }}
+                          className="text-blue-600 hover:text-blue-700 text-xs"
+                        >
+                          ✏️ Edit
+                        </button>
+                      )}
+                    </div>
+                  )
+                }
+              },
+              {
+                key: 'actions',
+                header: 'Actions',
+                align: 'center',
+                render: (product: any) => {
+                  const storeStock = product.store_stock || 0
+                  if (!canEditStore || storeStock <= 0) return null
+                  return (
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setTransferModal({ product, from: 'store', to: 'fridge' })
+                        }}
+                        className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded font-medium"
+                      >
+                        ➡️ To Fridge
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setTransferModal({ product, from: 'store', to: 'show' })
+                        }}
+                        className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded font-medium"
+                      >
+                        ➡️ To Show
+                      </button>
+                    </div>
+                  )
+                }
+              }
+            ]}
+            data={products}
+            rowKey={(product) => product.id}
+            rowClassName={(product) => {
+              const fridgeStock = product.fridge_stock || 0
+              return fridgeStock < 5 ? 'bg-red-50' : ''
+            }}
+            emptyMessage="No products found"
+          />
+        </div>
+
+        {/* Transfer Stock Modal */}
+        {transferModal && (
+          <TransferStockModal
+            product={transferModal.product}
+            from={transferModal.from}
+            to={transferModal.to}
+            onTransfer={handleTransferStock}
+            onClose={() => setTransferModal(null)}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TransferStockModal({ product, from, to, onTransfer, onClose }: {
+  product: any
+  from: string
+  to: string
+  onTransfer: (productId: number, from: string, to: string, quantity: number) => void
+  onClose: () => void
+}) {
+  const [quantity, setQuantity] = useState(1)
+  const maxQuantity = from === 'store' ? (product.store_stock || 0) : 0
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (quantity > 0 && quantity <= maxQuantity) {
+      onTransfer(product.id, from, to, quantity)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+        <h2 className="text-2xl font-bold text-slate-800 mb-4">Transfer Stock</h2>
+        <p className="text-slate-600 mb-4">
+          Transfer from <strong>{from}</strong> to <strong>{to}</strong> for <strong>{product.name}</strong>
+        </p>
+        <form onSubmit={handleSubmit}>
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              Quantity (Max: {maxQuantity})
+            </label>
+            <input
+              type="number"
+              min="1"
+              max={maxQuantity}
+              value={quantity}
+              onChange={(e) => setQuantity(parseInt(e.target.value) || 1)}
+              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              required
+            />
+          </div>
+          <div className="flex space-x-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 py-3 px-4 rounded-lg font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium"
+            >
+              Transfer
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   )
@@ -3035,6 +4248,10 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
   const [processingPayment, setProcessingPayment] = useState(false)
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [saleLocation, setSaleLocation] = useState<'fridge' | 'show'>('fridge')
+  const [scanInput, setScanInput] = useState('')
+  const [isScanning, setIsScanning] = useState(false)
+  const scanInputRef = useRef<HTMLInputElement>(null)
 
   // Get business ID from user or business info
   const businessId = currentUser?.business_id || businessInfo?.id
@@ -3128,7 +4345,138 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
         unitPrice: product.price
       }])
     }
+    toast.success(`Added ${product.name} to cart`)
   }
+
+  // Handle barcode/serial number scan for cart
+  const handleScanInput = async (code: string) => {
+    if (!code || !code.trim()) return
+
+    try {
+      const product = await invoke('find_product_by_code', {
+        code: code.trim(),
+        businessId: businessId
+      }) as any
+
+      if (product) {
+        // Check stock availability
+        const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
+        if (stock <= 0) {
+          toast.error(`Product "${product.name}" is out of stock`)
+          return
+        }
+        addToCart(product)
+        setScanInput('')
+        if (scanInputRef.current) {
+          scanInputRef.current.focus()
+        }
+      } else {
+        toast.error(`Product not found for code: ${code}`)
+      }
+    } catch (error) {
+      console.error('Failed to find product:', error)
+      toast.error(`Failed to find product: ${error}`)
+    }
+  }
+
+  // Handle scan input change (for barcode scanner that types quickly)
+  useEffect(() => {
+    if (scanInput && scanInput.length > 3) {
+      // Debounce: wait a bit to see if more characters are coming
+      const timer = setTimeout(async () => {
+        if (!scanInput || !scanInput.trim()) return
+
+        try {
+          const product = await invoke('find_product_by_code', {
+            code: scanInput.trim(),
+            businessId: businessId
+          }) as any
+
+          if (product) {
+            // Check stock availability
+            const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
+            if (stock <= 0) {
+              toast.error(`Product "${product.name}" is out of stock`)
+              return
+            }
+            addToCart(product)
+            setScanInput('')
+            if (scanInputRef.current) {
+              scanInputRef.current.focus()
+            }
+          } else {
+            toast.error(`Product not found for code: ${scanInput}`)
+          }
+        } catch (error) {
+          console.error('Failed to find product:', error)
+          toast.error(`Failed to find product: ${error}`)
+        }
+      }, 300)
+      return () => clearTimeout(timer)
+    }
+  }, [scanInput, businessId, saleLocation])
+
+  const scannerRef = useRef<Html5Qrcode | null>(null)
+
+  // Start camera scanner
+  const startCameraScanner = async () => {
+    if (isScanning) {
+      stopCameraScanner()
+      return
+    }
+
+    try {
+      setIsScanning(true)
+      const html5QrCode = new Html5Qrcode("barcode-scanner")
+      scannerRef.current = html5QrCode
+      
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 }
+        },
+        (decodedText) => {
+          handleScanInput(decodedText)
+          html5QrCode.stop()
+          setIsScanning(false)
+          scannerRef.current = null
+        },
+        (_errorMessage) => {
+          // Ignore errors, just keep scanning
+        }
+      )
+    } catch (error) {
+      console.error('Failed to start camera:', error)
+      toast.error('Failed to start camera. Please check permissions.')
+      setIsScanning(false)
+      scannerRef.current = null
+    }
+  }
+
+  const stopCameraScanner = async () => {
+    try {
+      if (scannerRef.current) {
+        await scannerRef.current.stop()
+        scannerRef.current = null
+      }
+      setIsScanning(false)
+    } catch (error) {
+      // Ignore errors
+      setIsScanning(false)
+      scannerRef.current = null
+    }
+  }
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current.stop().catch(() => {})
+        scannerRef.current = null
+      }
+    }
+  }, [])
 
   const updateQuantity = (productId: number, newQuantity: number) => {
     if (newQuantity <= 0) {
@@ -3157,7 +4505,8 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
         })),
         payment_method: paymentMethod,
         staff_id: currentUser?.id || 1,
-        business_id: businessId || 1
+        business_id: businessId || 1,
+        location: saleLocation // Use selected location (fridge or show)
       }
 
       const result = await invoke('process_sale', { request: saleData }) as {
@@ -3188,14 +4537,27 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
   }
 
   // Filter products by selected category and search query
+  // Check for low stock and show notification
+  useEffect(() => {
+    const lowStockProducts = products.filter(p => (p.fridge_stock || 0) < 5 && (p.fridge_stock || 0) > 0)
+    if (lowStockProducts.length > 0) {
+      toast.error(`⚠️ Low Stock Alert: ${lowStockProducts.length} product(s) have less than 5 items in fridge stock!`, {
+        duration: 8000,
+      })
+    }
+  }, [products])
+
   const filteredProducts = React.useMemo(() => {
     console.log('POS: Filtering products. Total products:', products.length, 'Selected category:', selectedCategory, 'Search query:', searchQuery)
     const filtered = products.filter(product => {
+      // Filter based on selected location (fridge or show)
+      const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
+      const hasStock = stock > 0
       const matchesCategory = selectedCategory === 'ALL' || product.category === selectedCategory
       const matchesSearch = !searchQuery || 
         product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         (product.description && product.description.toLowerCase().includes(searchQuery.toLowerCase()))
-      const matches = matchesCategory && matchesSearch
+      const matches = hasStock && matchesCategory && matchesSearch
       if (!matches && products.length > 0) {
         console.log('POS: Product filtered out:', product.name, 'Category:', product.category, 'Selected:', selectedCategory, 'Matches category:', matchesCategory, 'Matches search:', matchesSearch)
       }
@@ -3231,10 +4593,39 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
       <div className="p-6 w-full max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-6">
-          <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-2">
-            Point of Sale
-          </h1>
-          <p className="text-slate-600 text-lg">Select products and process orders</p>
+          <div className="flex justify-between items-center mb-2">
+            <div>
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-2">
+                Point of Sale
+              </h1>
+              <p className="text-slate-600 text-lg">Select products and process orders</p>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+              <label className="block text-sm font-medium text-slate-700 mb-2">Sale Location</label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setSaleLocation('fridge')}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    saleLocation === 'fridge'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  🧊 Fridge
+                </button>
+                <button
+                  onClick={() => setSaleLocation('show')}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    saleLocation === 'show'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  🎨 Show
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -3323,60 +4714,133 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
                 </div>
               ) : (
                 <div className="overflow-y-auto max-h-[calc(100vh-400px)] pr-2">
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {filteredProducts.map(product => {
-                    const isKitchen = product.category === 'KITCHEN'
-                    const isBar = product.category === 'BAR'
-                    const isLowStock = product.stock_quantity <= product.min_stock_level
-                    
-                    return (
-                      <div
-                        key={product.id}
-                        onClick={() => addToCart(product)}
-                        className={`group relative rounded-xl p-4 cursor-pointer transition-all duration-300 transform hover:scale-105 hover:shadow-xl ${
-                          isKitchen
-                            ? 'bg-gradient-to-br from-orange-50 to-red-50 border-2 border-orange-200 hover:border-orange-400'
-                            : isBar
-                            ? 'bg-gradient-to-br from-amber-50 to-yellow-50 border-2 border-amber-200 hover:border-amber-400'
-                            : 'bg-gradient-to-br from-blue-50 to-purple-50 border-2 border-blue-200 hover:border-blue-400'
-                        }`}
-                      >
-                        {isLowStock && (
-                          <div className="absolute top-2 right-2 bg-red-500 text-white text-xs px-2 py-1 rounded-full font-bold">
-                            Low Stock
-                          </div>
-                        )}
-                        <div className="w-full h-32 mb-3 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center group-hover:scale-110 transition-transform">
-                          {product.image_path ? (
-                            <ProductImage imagePath={product.image_path} alt={product.name} />
-                          ) : (
-                            <div className="text-5xl">
-                              {isKitchen ? '🍽️' : isBar ? '🍺' : '🏨'}
+                  <Table
+                    columns={[
+                      {
+                        key: 'image',
+                        header: 'Image',
+                        render: (product: any) => {
+                          const isKitchen = product.category === 'KITCHEN'
+                          const isBar = product.category === 'BAR'
+                          return (
+                            <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center">
+                              {product.image_path ? (
+                                <ProductImage imagePath={product.image_path} alt={product.name} />
+                              ) : (
+                                <div className="text-2xl">
+                                  {isKitchen ? '🍽️' : isBar ? '🍺' : '🏨'}
+                                </div>
+                              )}
                             </div>
-                          )}
-                        </div>
-                        <div className="font-bold text-slate-800 text-sm mb-2 text-center line-clamp-2 min-h-[2.5rem]">
-                          {product.name}
-                        </div>
-                        <div className={`text-center font-extrabold text-lg ${
-                          isKitchen ? 'text-orange-600' : isBar ? 'text-amber-600' : 'text-blue-600'
-                        }`}>
-                          ₦{product.price.toLocaleString()}
-                        </div>
-                        {product.description && (
-                          <div className="text-xs text-slate-500 mt-2 text-center line-clamp-1">
-                            {product.description}
-                          </div>
-                        )}
-                        <div className="mt-3 text-center">
-                          <span className="text-xs px-2 py-1 bg-white rounded-full text-slate-600 font-medium">
-                            Stock: {product.stock_quantity || 0}
-                          </span>
-                        </div>
-                      </div>
-                    )
-                  })}
-                  </div>
+                          )
+                        },
+                        headerClassName: 'px-4 py-3',
+                        className: 'px-4 py-3'
+                      },
+                      {
+                        key: 'name',
+                        header: 'Product Name',
+                        render: (product: any) => {
+                          const fridgeStock = product.fridge_stock || 0
+                          const isLowStock = fridgeStock < 5
+                          return (
+                            <>
+                              <div className="font-semibold text-slate-800">{product.name}</div>
+                              {product.description && (
+                                <div className="text-xs text-slate-500 mt-1 line-clamp-1">{product.description}</div>
+                              )}
+                              {isLowStock && (
+                                <span className="inline-block mt-1 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full font-bold">
+                                  Low Stock
+                                </span>
+                              )}
+                            </>
+                          )
+                        },
+                        headerClassName: 'px-4 py-3',
+                        className: 'px-4 py-3'
+                      },
+                      {
+                        key: 'category',
+                        header: 'Category',
+                        render: (product: any) => {
+                          const isKitchen = product.category === 'KITCHEN'
+                          const isBar = product.category === 'BAR'
+                          return (
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              isKitchen ? 'bg-orange-100 text-orange-700' : 
+                              isBar ? 'bg-amber-100 text-amber-700' : 
+                              'bg-blue-100 text-blue-700'
+                            }`}>
+                              {product.category}
+                            </span>
+                          )
+                        },
+                        headerClassName: 'px-4 py-3',
+                        className: 'px-4 py-3'
+                      },
+                      {
+                        key: 'price',
+                        header: 'Price',
+                        render: (product: any) => {
+                          const isKitchen = product.category === 'KITCHEN'
+                          const isBar = product.category === 'BAR'
+                          return (
+                            <div className={`font-bold text-lg ${
+                              isKitchen ? 'text-orange-600' : isBar ? 'text-amber-600' : 'text-blue-600'
+                            }`}>
+                              ₦{product.price.toLocaleString()}
+                            </div>
+                          )
+                        },
+                        headerClassName: 'px-4 py-3',
+                        className: 'px-4 py-3'
+                      },
+                      {
+                        key: saleLocation === 'fridge' ? 'fridge_stock' : 'show_stock',
+                        header: saleLocation === 'fridge' ? 'Fridge Stock' : 'Show Stock',
+                        render: (product: any) => {
+                          const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
+                          const isLowStock = stock < 5
+                          return (
+                            <div className={`font-semibold ${
+                              isLowStock ? 'text-red-600' : 'text-slate-700'
+                            }`}>
+                              {stock}
+                            </div>
+                          )
+                        },
+                        headerClassName: 'px-4 py-3',
+                        className: 'px-4 py-3'
+                      },
+                      {
+                        key: 'action',
+                        header: 'Action',
+                        align: 'center',
+                        render: (product: any) => (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              addToCart(product)
+                            }}
+                            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                          >
+                            ➕ Add
+                          </button>
+                        ),
+                        headerClassName: 'px-4 py-3',
+                        className: 'px-4 py-3'
+                      }
+                    ]}
+                    data={filteredProducts}
+                    rowKey={(product) => product.id}
+                    rowClassName={(product) => {
+                      const fridgeStock = product.fridge_stock || 0
+                      return fridgeStock < 5 ? 'bg-red-50' : ''
+                    }}
+                    emptyMessage="No products found"
+                    headerClassName="bg-slate-50 border-b border-slate-200"
+                  />
                 </div>
               )}
             </div>
@@ -3392,6 +4856,46 @@ function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, bu
                 <span className="px-3 py-1 bg-blue-500 text-white rounded-full text-sm font-bold">
                   {cart.reduce((sum, item) => sum + item.quantity, 0)} items
                 </span>
+              )}
+            </div>
+
+            {/* Barcode Scanner Input */}
+            <div className="mb-4 bg-white rounded-xl p-4 shadow-md border border-slate-200">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                📷 Scan Barcode/Serial Number
+              </label>
+              <div className="flex gap-2">
+                <input
+                  ref={scanInputRef}
+                  type="text"
+                  value={scanInput}
+                  onChange={(e) => setScanInput(e.target.value)}
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter' && scanInput.trim()) {
+                      handleScanInput(scanInput)
+                    }
+                  }}
+                  placeholder="Scan or type barcode/serial"
+                  className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={startCameraScanner}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    isScanning
+                      ? 'bg-red-500 hover:bg-red-600 text-white'
+                      : 'bg-blue-500 hover:bg-blue-600 text-white'
+                  }`}
+                >
+                  {isScanning ? '⏹️ Stop' : '📷 Camera'}
+                </button>
+              </div>
+              {isScanning && (
+                <div className="mt-3">
+                  <div id="barcode-scanner" className="w-full rounded-lg overflow-hidden"></div>
+                  <p className="text-xs text-slate-500 mt-2 text-center">Point camera at barcode</p>
+                </div>
               )}
             </div>
 
@@ -3627,44 +5131,199 @@ function PaymentModal({ total, onPayment, onClose, processing }: {
   )
 }
 
-function StaffInventoryCheck() {
+function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
+  const [products, setProducts] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const businessId = currentUser?.business_id
+
+  useEffect(() => {
+    if (businessId) {
+      loadProducts()
+    } else {
+      setLoading(false)
+    }
+  }, [businessId])
+
+  const loadProducts = async () => {
+    try {
+      setLoading(true)
+      if (businessId) {
+        const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
+        setProducts(businessProducts)
+      }
+    } catch (error) {
+      console.error('Failed to load products:', error)
+      toast.error('Failed to load products')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-slate-600">Loading inventory...</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex-1 overflow-auto bg-slate-50">
       <div className="p-8 w-full">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-slate-800 mb-2">Stock Check</h1>
-          <p className="text-slate-600 text-lg">Check current inventory levels</p>
+          <p className="text-slate-600 text-lg">View fridge stock and show stock levels (Read-only)</p>
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {/* Sample inventory items */}
-            <div className="border border-slate-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-slate-800">Beer</span>
-                <span className="text-sm bg-green-100 text-green-800 px-2 py-1 rounded">In Stock</span>
-              </div>
-              <div className="text-2xl font-bold text-slate-800">45</div>
-              <div className="text-sm text-slate-600">Min: 10</div>
-            </div>
+        <Table
+          columns={[
+            {
+              key: 'name',
+              header: 'Product Name',
+              render: (product: any) => (
+                <>
+                  <div className="font-semibold text-slate-800">{product.name}</div>
+                  <div className="text-xs text-slate-500">{product.category}</div>
+                </>
+              )
+            },
+            {
+              key: 'fridge_stock',
+              header: 'Fridge Stock',
+              align: 'center',
+              render: (product: any) => {
+                const fridgeStock = product.fridge_stock || 0
+                const isLowStock = fridgeStock < 5
+                return (
+                  <div className={`font-bold text-lg ${isLowStock ? 'text-red-600' : 'text-slate-700'}`}>
+                    {fridgeStock}
+                  </div>
+                )
+              }
+            },
+            {
+              key: 'show_stock',
+              header: 'Show Stock',
+              align: 'center',
+              render: (product: any) => {
+                const showStock = product.show_stock || 0
+                return (
+                  <div className="font-bold text-lg text-slate-700">
+                    {showStock}
+                  </div>
+                )
+              }
+            }
+          ]}
+          data={products}
+          rowKey={(product) => product.id}
+          emptyMessage="No products found"
+        />
+      </div>
+    </div>
+  )
+}
 
-            <div className="border border-slate-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-slate-800">Wine</span>
-                <span className="text-sm bg-yellow-100 text-yellow-800 px-2 py-1 rounded">Low Stock</span>
-              </div>
-              <div className="text-2xl font-bold text-slate-800">8</div>
-              <div className="text-sm text-slate-600">Min: 10</div>
-            </div>
+// Placeholder component - replaced by ReportsDashboard which has full functionality
+// function BusinessReports() {
+//   return (
+//     <div className="flex-1 overflow-auto bg-slate-50">
+//       <div className="p-8 w-full">
+//         <h1 className="text-3xl font-bold text-slate-800 mb-2">Business Reports</h1>
+//         <p className="text-slate-600 text-lg">View sales reports and analytics</p>
+//         <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-12">
+//           <div className="text-center">
+//             <div className="text-6xl mb-4">📊</div>
+//             <h2 className="text-2xl font-bold text-slate-800 mb-2">Reports Dashboard</h2>
+//             <p className="text-slate-600">Business analytics and reporting coming next</p>
+//           </div>
+//         </div>
+//       </div>
+//     </div>
+//   )
+// }
 
-            <div className="border border-slate-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-slate-800">Cocktails</span>
-                <span className="text-sm bg-red-100 text-red-800 px-2 py-1 rounded">Out of Stock</span>
-              </div>
-              <div className="text-2xl font-bold text-slate-800">0</div>
-              <div className="text-sm text-slate-600">Min: 5</div>
+function SettingsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [activeTab, setActiveTab] = useState<'business' | 'email' | 'reports' | 'notifications' | 'system'>('business')
+  const isSuperAdmin = currentUser?.role === 'SuperAdmin'
+
+  return (
+    <div className="flex-1 overflow-auto bg-slate-50">
+      <div className="p-8 w-full max-w-7xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-slate-800 mb-2">⚙️ Settings</h1>
+          <p className="text-slate-600 text-lg">Configure your business settings</p>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 mb-6">
+          <div className="border-b border-slate-200">
+            <div className="flex space-x-1 p-2 overflow-x-auto">
+              <button
+                onClick={() => setActiveTab('business')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                  activeTab === 'business'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                🏢 Business Settings
+              </button>
+              <button
+                onClick={() => setActiveTab('email')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                  activeTab === 'email'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                📧 Email Settings
+              </button>
+              {isSuperAdmin && (
+                <button
+                  onClick={() => setActiveTab('reports')}
+                  className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                    activeTab === 'reports'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  📊 Report Permissions
+                </button>
+              )}
+              <button
+                onClick={() => setActiveTab('notifications')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                  activeTab === 'notifications'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                🔔 Notifications
+              </button>
+              {isSuperAdmin && (
+                <button
+                  onClick={() => setActiveTab('system')}
+                  className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                    activeTab === 'system'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  ⚙️ System Preferences
+                </button>
+              )}
             </div>
+          </div>
+
+          <div className="p-6">
+            {activeTab === 'business' && <BusinessSettings currentUser={currentUser} businessInfo={businessInfo} />}
+            {activeTab === 'email' && <EmailSettings currentUser={currentUser} businessInfo={businessInfo} />}
+            {activeTab === 'reports' && isSuperAdmin && <ReportPermissionsSettings currentUser={currentUser} businessInfo={businessInfo} />}
+            {activeTab === 'notifications' && <NotificationPreferences currentUser={currentUser} businessInfo={businessInfo} />}
+            {activeTab === 'system' && isSuperAdmin && <SystemPreferences currentUser={currentUser} businessInfo={businessInfo} />}
           </div>
         </div>
       </div>
@@ -3672,17 +5331,2143 @@ function StaffInventoryCheck() {
   )
 }
 
-function BusinessReports() {
+function BusinessSettings({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [businessData, setBusinessData] = useState({
+    name: '',
+    address: '',
+    phone: '',
+    email: '',
+    primary_color: '#3B82F6',
+    secondary_color: '#1E40AF',
+    logo_path: '',
+  })
+  const [logoPreview, setLogoPreview] = useState<string | null>(null)
+
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) {
+      loadBusinessData()
+    }
+  }, [businessId])
+
+  const loadBusinessData = async () => {
+    try {
+      setLoading(true)
+      const business = await invoke('get_business_by_id', { businessId: businessId }) as any
+      setBusinessData({
+        name: business.name || '',
+        address: business.address || '',
+        phone: business.phone || '',
+        email: business.email || '',
+        primary_color: business.primary_color || '#3B82F6',
+        secondary_color: business.secondary_color || '#1E40AF',
+        logo_path: business.logo_path || '',
+      })
+      if (business.logo_path) {
+        setLogoPreview(business.logo_path)
+      }
+    } catch (error) {
+      console.error('Failed to load business data:', error)
+      toast.error('Failed to load business information')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select an image file')
+      return
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Image size must be less than 5MB')
+      return
+    }
+
+    try {
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        setLogoPreview(e.target?.result as string)
+      }
+      reader.readAsDataURL(file)
+
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.onerror = reject
+        reader.readAsDataURL(file)
+      })
+
+      const logoPath = await invoke('save_business_logo', {
+        imageData: base64,
+        businessId: businessId
+      }) as string
+
+      setBusinessData(prev => ({ ...prev, logo_path: logoPath }))
+      toast.success('Logo uploaded successfully')
+    } catch (error) {
+      console.error('Failed to upload logo:', error)
+      toast.error('Failed to upload logo')
+    }
+  }
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+
+    try {
+      await invoke('update_business_settings', {
+        request: {
+          business_id: businessId,
+          ...businessData,
+        }
+      })
+      toast.success('Business settings saved successfully!')
+      await loadBusinessData()
+    } catch (error) {
+      console.error('Failed to save business settings:', error)
+      toast.error(`Failed to save business settings: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <p className="text-slate-600">Loading business settings...</p>
+      </div>
+    )
+  }
+
+  return (
+    <form onSubmit={handleSave} className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-slate-800 mb-4">Business Information</h2>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Business Name</label>
+            <input
+              type="text"
+              value={businessData.name}
+              onChange={(e) => setBusinessData(prev => ({ ...prev, name: e.target.value }))}
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Email</label>
+            <input
+              type="email"
+              value={businessData.email}
+              onChange={(e) => setBusinessData(prev => ({ ...prev, email: e.target.value }))}
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Phone</label>
+            <input
+              type="tel"
+              value={businessData.phone}
+              onChange={(e) => setBusinessData(prev => ({ ...prev, phone: e.target.value }))}
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Address</label>
+            <input
+              type="text"
+              value={businessData.address}
+              onChange={(e) => setBusinessData(prev => ({ ...prev, address: e.target.value }))}
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="text-2xl font-bold text-slate-800 mb-4">Branding</h2>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Logo</label>
+            <div className="flex items-center gap-4">
+              {logoPreview && (
+                <img
+                  src={logoPreview}
+                  alt="Business Logo"
+                  className="w-24 h-24 object-contain border border-slate-300 rounded-lg"
+                />
+              )}
+              <div>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleLogoUpload}
+                  className="hidden"
+                  id="logo-upload"
+                />
+                <label
+                  htmlFor="logo-upload"
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg cursor-pointer inline-block"
+                >
+                  {logoPreview ? 'Change Logo' : 'Upload Logo'}
+                </label>
+                <p className="text-xs text-slate-500 mt-1">Max 5MB, PNG/JPG</p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Primary Color</label>
+            <div className="flex items-center gap-3">
+              <input
+                type="color"
+                value={businessData.primary_color}
+                onChange={(e) => setBusinessData(prev => ({ ...prev, primary_color: e.target.value }))}
+                className="w-16 h-10 border border-slate-300 rounded cursor-pointer"
+              />
+              <input
+                type="text"
+                value={businessData.primary_color}
+                onChange={(e) => setBusinessData(prev => ({ ...prev, primary_color: e.target.value }))}
+                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="#3B82F6"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Secondary Color</label>
+            <div className="flex items-center gap-3">
+              <input
+                type="color"
+                value={businessData.secondary_color}
+                onChange={(e) => setBusinessData(prev => ({ ...prev, secondary_color: e.target.value }))}
+                className="w-16 h-10 border border-slate-300 rounded cursor-pointer"
+              />
+              <input
+                type="text"
+                value={businessData.secondary_color}
+                onChange={(e) => setBusinessData(prev => ({ ...prev, secondary_color: e.target.value }))}
+                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="#1E40AF"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded-lg p-4 mb-6">
+          <p className="text-sm text-slate-600 mb-2">Color Preview:</p>
+          <div className="flex gap-2">
+            <div
+              className="w-20 h-20 rounded-lg"
+              style={{ backgroundColor: businessData.primary_color }}
+            />
+            <div
+              className="w-20 h-20 rounded-lg"
+              style={{ backgroundColor: businessData.secondary_color }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          type="submit"
+          disabled={saving}
+          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving...' : 'Save Settings'}
+        </button>
+      </div>
+    </form>
+  )
+}
+
+function NotificationPreferences({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [preferences, setPreferences] = useState({
+    daily_reports_enabled: false,
+    low_stock_enabled: true,
+    pending_sales_enabled: true,
+    notification_roles: 'SuperAdmin,Manager',
+  })
+
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) {
+      loadPreferences()
+    }
+  }, [businessId])
+
+  const loadPreferences = async () => {
+    try {
+      setLoading(true)
+      const config = await invoke('get_email_config', { businessId }) as any
+      setPreferences({
+        daily_reports_enabled: config.daily_reports_enabled || false,
+        low_stock_enabled: config.low_stock_enabled !== false,
+        pending_sales_enabled: config.pending_sales_enabled !== false,
+        notification_roles: config.notification_roles || 'SuperAdmin,Manager',
+      })
+    } catch (error) {
+      console.error('Failed to load notification preferences:', error)
+      toast.error('Failed to load notification preferences')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+
+    try {
+      const config = await invoke('get_email_config', { businessId }) as any
+      await invoke('save_email_config', {
+        request: {
+          business_id: businessId,
+          ...config,
+          daily_reports_enabled: preferences.daily_reports_enabled,
+          low_stock_enabled: preferences.low_stock_enabled,
+          pending_sales_enabled: preferences.pending_sales_enabled,
+          notification_roles: preferences.notification_roles,
+        }
+      })
+      toast.success('Notification preferences saved successfully!')
+      await loadPreferences()
+    } catch (error) {
+      console.error('Failed to save notification preferences:', error)
+      toast.error(`Failed to save notification preferences: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <p className="text-slate-600">Loading notification preferences...</p>
+      </div>
+    )
+  }
+
+  return (
+    <form onSubmit={handleSave} className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-slate-800 mb-4">Email Notifications</h2>
+        
+        <div className="space-y-4">
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+            <div>
+              <p className="font-medium text-slate-800">Low Stock Alerts</p>
+              <p className="text-sm text-slate-600">Receive emails when products are running low</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={preferences.low_stock_enabled}
+                onChange={(e) => setPreferences(prev => ({ ...prev, low_stock_enabled: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+            <div>
+              <p className="font-medium text-slate-800">Pending Sales Notifications</p>
+              <p className="text-sm text-slate-600">Receive emails when sales are pending completion</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={preferences.pending_sales_enabled}
+                onChange={(e) => setPreferences(prev => ({ ...prev, pending_sales_enabled: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+            <div>
+              <p className="font-medium text-slate-800">Daily Sales Reports</p>
+              <p className="text-sm text-slate-600">Receive daily summary emails of sales performance</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={preferences.daily_reports_enabled}
+                onChange={(e) => setPreferences(prev => ({ ...prev, daily_reports_enabled: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="text-2xl font-bold text-slate-800 mb-4">Notification Recipients</h2>
+        <div className="p-4 bg-slate-50 rounded-lg">
+          <label className="block text-sm font-medium text-slate-700 mb-2">Roles to Receive Notifications</label>
+          <input
+            type="text"
+            value={preferences.notification_roles}
+            onChange={(e) => setPreferences(prev => ({ ...prev, notification_roles: e.target.value }))}
+            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="SuperAdmin,Manager"
+          />
+          <p className="text-xs text-slate-500 mt-1">Comma-separated list of roles (e.g., SuperAdmin,Manager,Secretary)</p>
+        </div>
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          type="submit"
+          disabled={saving}
+          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving...' : 'Save Preferences'}
+        </button>
+      </div>
+    </form>
+  )
+}
+
+function SystemPreferences({ }: { currentUser?: any, businessInfo?: any }) {
+  const [backingUp, setBackingUp] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [backupStatus, setBackupStatus] = useState<string | null>(null)
+
+  const handleExportBackup = async () => {
+    try {
+      setBackingUp(true)
+      setBackupStatus(null)
+      
+      const backupJson = await invoke('export_database_backup') as string
+      
+      // Create a blob and download
+      const blob = new Blob([backupJson], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0]
+      a.download = `pos-backup-${timestamp}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      
+      setBackupStatus('success')
+      toast.success('Backup exported successfully!')
+    } catch (error) {
+      console.error('Failed to export backup:', error)
+      setBackupStatus('error')
+      toast.error(`Failed to export backup: ${error}`)
+    } finally {
+      setBackingUp(false)
+    }
+  }
+
+  const handleImportBackup = async () => {
+    // Create file input element
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.json'
+    input.onchange = async (e: any) => {
+      const file = e.target.files?.[0]
+      if (!file) return
+
+      try {
+        setRestoring(true)
+        setBackupStatus(null)
+
+        const fileContent = await file.text()
+        
+        // Validate JSON
+        const backupData = JSON.parse(fileContent)
+        if (!backupData.data || !backupData.version) {
+          throw new Error('Invalid backup file format')
+        }
+
+        // Confirm restore (destructive operation)
+        const confirmed = window.confirm(
+          '⚠️ WARNING: Restoring from backup will replace ALL current data!\n\n' +
+          'This action cannot be undone. Are you sure you want to continue?'
+        )
+
+        if (!confirmed) {
+          setRestoring(false)
+          return
+        }
+
+        await invoke('import_database_backup', { backupJson: fileContent })
+        
+        setBackupStatus('success')
+        toast.success('Backup restored successfully! Please refresh the application.')
+        
+        // Suggest reload after a delay
+        setTimeout(() => {
+          if (window.confirm('Backup restored successfully. Reload the application now?')) {
+            window.location.reload()
+          }
+        }, 2000)
+      } catch (error) {
+        console.error('Failed to import backup:', error)
+        setBackupStatus('error')
+        toast.error(`Failed to import backup: ${error}`)
+      } finally {
+        setRestoring(false)
+      }
+    }
+    input.click()
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-slate-800 mb-4">Backup & Restore</h2>
+        
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
+          <div className="mb-4">
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">📦 Export Backup</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              Create a backup of all your data (users, businesses, products, sales, inventory, settings).
+              The backup is saved as a JSON file that you can restore later.
+            </p>
+            <button
+              onClick={handleExportBackup}
+              disabled={backingUp}
+              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {backingUp ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                  Creating Backup...
+                </>
+              ) : (
+                <>
+                  💾 Export Backup
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="border-t border-slate-200 pt-4 mt-4">
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">🔄 Restore Backup</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              <strong className="text-red-600">⚠️ Warning:</strong> Restoring from a backup will replace ALL current data 
+              with the data from the backup file. This action cannot be undone. Make sure to export a backup first!
+            </p>
+            <button
+              onClick={handleImportBackup}
+              disabled={restoring}
+              className="px-6 py-3 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {restoring ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                  Restoring...
+                </>
+              ) : (
+                <>
+                  🔄 Import Backup
+                </>
+              )}
+            </button>
+          </div>
+
+          {backupStatus === 'success' && (
+            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+              <p className="text-sm text-green-800">✅ Operation completed successfully!</p>
+            </div>
+          )}
+
+          {backupStatus === 'error' && (
+            <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm text-red-800">❌ Operation failed. Please check the console for details.</p>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-blue-50 rounded-lg border border-blue-200 p-4">
+          <h4 className="font-semibold text-blue-900 mb-2">💡 Backup Tips</h4>
+          <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
+            <li>Export backups regularly (recommended: weekly or before major changes)</li>
+            <li>Store backups in a safe location (external drive, cloud storage)</li>
+            <li>Backup files contain all your business data - keep them secure</li>
+            <li>Email passwords are not included in backups for security</li>
+            <li>After restoring, you may need to reconfigure email settings</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [permissions, setPermissions] = useState({
+    manager_can_view: false,
+    secretary_can_view: false,
+    staff_can_view: false
+  })
+
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) {
+      loadPermissions()
+    }
+  }, [businessId])
+
+  const loadPermissions = async () => {
+    try {
+      setLoading(true)
+      const perms = await invoke('get_report_permissions', { businessId }) as any
+      setPermissions(perms)
+    } catch (error) {
+      console.error('Failed to load report permissions:', error)
+      toast.error('Failed to load report permissions')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+
+    try {
+      await invoke('save_report_permissions', {
+        businessId,
+        managerCanView: permissions.manager_can_view,
+        secretaryCanView: permissions.secretary_can_view,
+        staffCanView: permissions.staff_can_view
+      })
+      toast.success('Report permissions saved successfully!')
+    } catch (error) {
+      console.error('Failed to save report permissions:', error)
+      toast.error(`Failed to save report permissions: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="text-center py-12">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+        <p className="text-slate-600">Loading permissions...</p>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <h2 className="text-2xl font-bold text-slate-800 mb-4">Report Access Permissions</h2>
+      <p className="text-slate-600 mb-6">
+        Control which roles can view reports. SuperAdmin always has access.
+      </p>
+
+      <form onSubmit={handleSave} className="space-y-6">
+        <div className="space-y-4">
+          <label className="flex items-center cursor-pointer p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors">
+            <input
+              type="checkbox"
+              checked={permissions.manager_can_view}
+              onChange={(e) => setPermissions({ ...permissions, manager_can_view: e.target.checked })}
+              className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="ml-3 flex-1">
+              <p className="font-semibold text-slate-800">Manager</p>
+              <p className="text-sm text-slate-600">Allow Managers to view reports and analytics</p>
+            </div>
+          </label>
+
+          <label className="flex items-center cursor-pointer p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors">
+            <input
+              type="checkbox"
+              checked={permissions.secretary_can_view}
+              onChange={(e) => setPermissions({ ...permissions, secretary_can_view: e.target.checked })}
+              className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="ml-3 flex-1">
+              <p className="font-semibold text-slate-800">Secretary</p>
+              <p className="text-sm text-slate-600">Allow Secretaries to view reports and analytics</p>
+            </div>
+          </label>
+
+          <label className="flex items-center cursor-pointer p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors">
+            <input
+              type="checkbox"
+              checked={permissions.staff_can_view}
+              onChange={(e) => setPermissions({ ...permissions, staff_can_view: e.target.checked })}
+              className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="ml-3 flex-1">
+              <p className="font-semibold text-slate-800">Staff</p>
+              <p className="text-sm text-slate-600">Allow Staff members to view reports and analytics</p>
+            </div>
+          </label>
+        </div>
+
+        <div className="flex space-x-4 pt-4 border-t border-slate-200">
+          <button
+            type="submit"
+            disabled={saving}
+            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? 'Saving...' : '💾 Save Permissions'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function EmailSettings({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [emailConfig, setEmailConfig] = useState({
+    smtp_server: 'smtp.gmail.com',
+    smtp_port: 587,
+    username: '',
+    password: '',
+    from_email: '',
+    from_name: 'POS System',
+    use_tls: true,
+    enabled: false,
+    notification_roles: 'SuperAdmin,Manager',
+    low_stock_enabled: true,
+    pending_sales_enabled: true,
+  })
+  const [testEmail, setTestEmail] = useState('')
+
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) {
+      loadEmailConfig()
+    }
+  }, [businessId])
+
+  const loadEmailConfig = async () => {
+    try {
+      setLoading(true)
+      const config = await invoke('get_email_config', { businessId }) as any
+      setEmailConfig(config)
+    } catch (error) {
+      console.error('Failed to load email config:', error)
+      toast.error('Failed to load email configuration')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+
+    try {
+      await invoke('save_email_config', {
+        request: {
+          business_id: businessId,
+          ...emailConfig,
+        }
+      })
+      toast.success('Email configuration saved successfully!')
+      await loadEmailConfig()
+    } catch (error) {
+      console.error('Failed to save email config:', error)
+      toast.error(`Failed to save email configuration: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleTestEmail = async () => {
+    if (!testEmail || !testEmail.includes('@')) {
+      toast.error('Please enter a valid email address')
+      return
+    }
+
+    setTesting(true)
+    try {
+      await invoke('send_test_email', {
+        request: {
+          business_id: businessId,
+          to_email: testEmail,
+        }
+      })
+      toast.success(`Test email sent to ${testEmail}!`)
+      setTestEmail('')
+    } catch (error) {
+      console.error('Failed to send test email:', error)
+      toast.error(`Failed to send test email: ${error}`)
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const updateConfig = (field: string, value: any) => {
+    setEmailConfig(prev => ({ ...prev, [field]: value }))
+  }
+
+  if (loading) {
+    return (
+      <div className="text-center py-12">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+        <p className="text-slate-600">Loading email settings...</p>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <h2 className="text-2xl font-bold text-slate-800 mb-4">Email Settings</h2>
+      <p className="text-slate-600 mb-6">Configure email notifications for your business</p>
+
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">📧 SMTP Configuration</h2>
+          
+          <form onSubmit={handleSave} className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  SMTP Server *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={emailConfig.smtp_server}
+                  onChange={(e) => updateConfig('smtp_server', e.target.value)}
+                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="smtp.gmail.com"
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  Common: smtp.gmail.com, smtp.outlook.com, smtp.mail.yahoo.com
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  SMTP Port *
+                </label>
+                <input
+                  type="number"
+                  required
+                  value={emailConfig.smtp_port}
+                  onChange={(e) => updateConfig('smtp_port', parseInt(e.target.value) || 587)}
+                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="587"
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  Common: 587 (TLS), 465 (SSL), 25
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  Email/Username *
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={emailConfig.username}
+                  onChange={(e) => updateConfig('username', e.target.value)}
+                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="your-email@gmail.com"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  Password/App Password *
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={emailConfig.password}
+                  onChange={(e) => updateConfig('password', e.target.value)}
+                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Your email password or app password"
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  For Gmail: Use App Password (not your regular password)
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  From Email *
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={emailConfig.from_email}
+                  onChange={(e) => updateConfig('from_email', e.target.value)}
+                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="noreply@yourbusiness.com"
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  Email address that will appear as sender
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  From Name
+                </label>
+                <input
+                  type="text"
+                  value={emailConfig.from_name}
+                  onChange={(e) => updateConfig('from_name', e.target.value)}
+                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="POS System"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-4">
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={emailConfig.use_tls}
+                  onChange={(e) => updateConfig('use_tls', e.target.checked)}
+                  className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                />
+                <span className="ml-2 text-sm font-medium text-slate-700">
+                  Use TLS/SSL Encryption
+                </span>
+              </label>
+
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={emailConfig.enabled}
+                  onChange={(e) => updateConfig('enabled', e.target.checked)}
+                  className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                />
+                <span className="ml-2 text-sm font-medium text-slate-700">
+                  Enable Email Notifications
+                </span>
+              </label>
+            </div>
+
+            <div className="flex space-x-4 pt-4 border-t border-slate-200">
+              <button
+                type="submit"
+                disabled={saving}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {saving ? 'Saving...' : '💾 Save Configuration'}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* Test Email Section */}
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">🧪 Test Email Configuration</h2>
+          <p className="text-slate-600 mb-4">
+            Send a test email to verify your configuration is working correctly.
+          </p>
+          
+          <div className="flex gap-4">
+            <input
+              type="email"
+              value={testEmail}
+              onChange={(e) => setTestEmail(e.target.value)}
+              placeholder="Enter email address to test"
+              className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            <button
+              onClick={handleTestEmail}
+              disabled={testing || !emailConfig.enabled}
+              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {testing ? 'Sending...' : '📧 Send Test Email'}
+            </button>
+          </div>
+
+          {!emailConfig.enabled && (
+            <p className="text-sm text-amber-600 mt-2">
+              ⚠️ Please enable email notifications and save configuration before testing.
+            </p>
+          )}
+        </div>
+
+        {/* Help Section */}
+        <div className="bg-blue-50 rounded-xl border border-blue-200 p-6 mt-6">
+          <h3 className="text-lg font-semibold text-blue-900 mb-3">📚 Setup Instructions</h3>
+          <div className="space-y-3 text-sm text-blue-800">
+            <div>
+              <strong>Gmail Setup:</strong>
+              <ol className="list-decimal list-inside ml-4 mt-1 space-y-1">
+                <li>Go to your Google Account settings</li>
+                <li>Enable 2-Step Verification</li>
+                <li>Generate an App Password (Settings → Security → App passwords)</li>
+                <li>Use the App Password (not your regular password) in the password field</li>
+                <li>SMTP Server: smtp.gmail.com, Port: 587</li>
+              </ol>
+            </div>
+            <div>
+              <strong>Outlook/Hotmail Setup:</strong>
+              <ul className="list-disc list-inside ml-4 mt-1 space-y-1">
+                <li>SMTP Server: smtp-mail.outlook.com</li>
+                <li>Port: 587</li>
+                <li>Use your regular email password</li>
+              </ul>
+            </div>
+            <div>
+              <strong>Yahoo Mail Setup:</strong>
+              <ul className="list-disc list-inside ml-4 mt-1 space-y-1">
+                <li>SMTP Server: smtp.mail.yahoo.com</li>
+                <li>Port: 587 or 465</li>
+                <li>Generate an App Password from Yahoo Account settings</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+    </div>
+  )
+}
+
+function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [loading, setLoading] = useState(true)
+  const [hasAccess, setHasAccess] = useState(false)
+  const [activeTab, setActiveTab] = useState<'sales' | 'revenue' | 'products' | 'staff' | 'inventory'>('sales')
+  const [salesReport, setSalesReport] = useState<any>(null)
+  const [revenueAnalytics, setRevenueAnalytics] = useState<any>(null)
+  const [topProducts, setTopProducts] = useState<any[]>([])
+  const [staffPerformance, setStaffPerformance] = useState<any[]>([])
+  const [inventoryMovements, setInventoryMovements] = useState<any[]>([])
+  // Reserved for future use
+  // const [inventoryTransfers, setInventoryTransfers] = useState<any[]>([])
+  // const [inventoryAdjustments, setInventoryAdjustments] = useState<any[]>([])
+  const [inventorySummary, setInventorySummary] = useState<any>(null)
+  const [dateRange, setDateRange] = useState({
+    start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    end: new Date().toISOString().split('T')[0]
+  })
+
+  const businessId = currentUser?.business_id || businessInfo?.id
+  const userRole = currentUser?.role || ''
+
+  useEffect(() => {
+    if (businessId) {
+      checkAccess()
+    }
+  }, [businessId, userRole])
+
+  const checkAccess = async () => {
+    try {
+      const canView = await invoke('can_user_view_reports', { businessId, userRole: userRole }) as boolean
+      setHasAccess(canView)
+      if (canView) {
+        loadRevenueAnalytics()
+        loadSalesReport()
+      }
+    } catch (error) {
+      console.error('Failed to check report access:', error)
+      setHasAccess(false)
+    }
+  }
+
+
+  const loadRevenueAnalytics = async () => {
+    try {
+      const analytics = await invoke('get_revenue_analytics', { businessId }) as any
+      setRevenueAnalytics(analytics)
+    } catch (error) {
+      console.error('Failed to load revenue analytics:', error)
+      toast.error('Failed to load revenue analytics')
+    }
+  }
+
+  const loadSalesReport = async () => {
+    try {
+      setLoading(true)
+      const [report, products, staff] = await Promise.all([
+        invoke('get_sales_report', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any>,
+        invoke('get_top_products', { businessId, startDate: dateRange.start, endDate: dateRange.end, limit: 10 }) as Promise<any[]>,
+        invoke('get_staff_performance', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
+      ])
+      setSalesReport(report)
+      setTopProducts(products)
+      setStaffPerformance(staff)
+    } catch (error) {
+      console.error('Failed to load sales report:', error)
+      toast.error('Failed to load sales report')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadInventoryReport = async () => {
+    try {
+      setLoading(true)
+      const [summary, movements] = await Promise.all([
+        invoke('get_inventory_summary', { businessId }) as Promise<any>,
+        invoke('get_inventory_movements', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
+        // Reserved for future use
+        // invoke('get_inventory_transfers', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
+        // invoke('get_inventory_adjustments', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
+      ])
+      setInventorySummary(summary)
+      setInventoryMovements(movements)
+      // Reserved for future use
+      // setInventoryTransfers(transfers)
+      // setInventoryAdjustments(adjustments)
+    } catch (error) {
+      console.error('Failed to load inventory report:', error)
+      toast.error('Failed to load inventory report')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (hasAccess && businessId) {
+      if (activeTab === 'inventory') {
+        loadInventoryReport()
+      } else {
+        loadRevenueAnalytics()
+        loadSalesReport()
+      }
+    }
+  }, [businessId, dateRange, hasAccess, activeTab])
+
+  const exportToExcel = (data: any[], filename: string, sheetName: string) => {
+    const ws = XLSX.utils.json_to_sheet(data)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, sheetName)
+    XLSX.writeFile(wb, `${filename}.xlsx`)
+    toast.success(`Exported to ${filename}.xlsx`)
+  }
+
+  const exportSalesReport = () => {
+    if (!salesReport) return
+    const data = salesReport.daily_sales?.map((day: any) => ({
+      Date: day.date,
+      'Total Revenue': day.total,
+      'Transaction Count': day.count
+    })) || []
+    exportToExcel(data, `Sales_Report_${dateRange.start}_to_${dateRange.end}`, 'Sales Report')
+  }
+
+  const exportProductsReport = () => {
+    const data = topProducts.map((product: any) => ({
+      'Product Name': product.name,
+      Category: product.category,
+      'Quantity Sold': product.total_quantity,
+      'Total Revenue': product.total_revenue,
+      'Sales Count': product.sale_count,
+      Price: product.price
+    }))
+    exportToExcel(data, `Products_Report_${dateRange.start}_to_${dateRange.end}`, 'Product Performance')
+  }
+
+  const exportStaffReport = () => {
+    const data = staffPerformance.map((staff: any) => ({
+      'Staff Name': staff.name || 'Unknown',
+      Role: staff.role,
+      'Sales Count': staff.sale_count,
+      'Total Revenue': staff.total_revenue,
+      'Average Sale': staff.average_sale
+    }))
+    exportToExcel(data, `Staff_Report_${dateRange.start}_to_${dateRange.end}`, 'Staff Performance')
+  }
+
+  const exportInventoryMovements = () => {
+    const data = inventoryMovements.map((movement: any) => ({
+      Date: movement.created_at,
+      'Product Name': movement.product_name,
+      Category: movement.category,
+      'Transaction Type': movement.transaction_type,
+      Quantity: movement.quantity,
+      Reason: movement.reason || '',
+      'User Name': movement.user_name || 'Unknown',
+      'User Role': movement.user_role
+    }))
+    exportToExcel(data, `Inventory_Movements_${dateRange.start}_to_${dateRange.end}`, 'Inventory Movements')
+  }
+
+  // Reserved for future use - Export inventory transfers to Excel
+  // const exportInventoryTransfers = () => {
+  //   const data = inventoryTransfers.map((transfer: any) => ({
+  //     Date: transfer.created_at,
+  //     'Product Name': transfer.product_name,
+  //     Category: transfer.category,
+  //     'Transfer Type': transfer.transaction_type,
+  //     Quantity: transfer.quantity,
+  //     Reason: transfer.reason || '',
+  //     'User Name': transfer.user_name || 'Unknown'
+  //   }))
+  //   exportToExcel(data, `Inventory_Transfers_${dateRange.start}_to_${dateRange.end}`, 'Inventory Transfers')
+  // }
+
+  // Reserved for future use - Export inventory adjustments to Excel
+  // const exportInventoryAdjustments = () => {
+  //   const data = inventoryAdjustments.map((adjustment: any) => ({
+  //     Date: adjustment.created_at,
+  //     'Product Name': adjustment.product_name,
+  //     Category: adjustment.category,
+  //     Quantity: adjustment.quantity,
+  //     Reason: adjustment.reason || '',
+  //     'User Name': adjustment.user_name || 'Unknown'
+  //   }))
+  //   exportToExcel(data, `Inventory_Adjustments_${dateRange.start}_to_${dateRange.end}`, 'Inventory Adjustments')
+  // }
+
+  if (!hasAccess) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50">
+        <div className="p-8 w-full">
+          <div className="max-w-md mx-auto mt-20">
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
+              <div className="text-6xl mb-4">🚫</div>
+              <h2 className="text-2xl font-bold text-slate-800 mb-2">Access Denied</h2>
+              <p className="text-slate-600">You don't have permission to view reports. Please contact your administrator.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (loading && !salesReport) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50">
+        <div className="p-8 w-full">
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <p className="text-slate-600">Loading reports...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <h1 className="text-3xl font-bold text-slate-800 mb-2">Business Reports</h1>
-        <p className="text-slate-600 text-lg">View sales reports and analytics</p>
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-12">
-          <div className="text-center">
-            <div className="text-6xl mb-4">📊</div>
-            <h2 className="text-2xl font-bold text-slate-800 mb-2">Reports Dashboard</h2>
-            <p className="text-slate-600">Business analytics and reporting coming next</p>
+      <div className="p-8 w-full max-w-7xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-slate-800 mb-2">📊 Reports & Analytics</h1>
+          <p className="text-slate-600 text-lg">Comprehensive business insights and performance metrics</p>
+        </div>
+
+        {revenueAnalytics && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">Today's Revenue</p>
+                  <p className="text-2xl font-bold text-blue-600">₦{revenueAnalytics.today?.revenue?.toLocaleString() || '0'}</p>
+                  <p className="text-xs text-slate-500 mt-1">{revenueAnalytics.today?.count || 0} sales</p>
+                </div>
+                <div className="text-4xl">💰</div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">This Week</p>
+                  <p className="text-2xl font-bold text-green-600">₦{revenueAnalytics.week?.revenue?.toLocaleString() || '0'}</p>
+                </div>
+                <div className="text-4xl">📈</div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">This Month</p>
+                  <p className="text-2xl font-bold text-amber-600">₦{revenueAnalytics.month?.revenue?.toLocaleString() || '0'}</p>
+                </div>
+                <div className="text-4xl">📅</div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">All Time</p>
+                  <p className="text-2xl font-bold text-purple-600">₦{revenueAnalytics.all_time?.revenue?.toLocaleString() || '0'}</p>
+                </div>
+                <div className="text-4xl">🏆</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
+          <div className="flex items-center gap-4">
+            <label className="text-sm font-medium text-slate-700">Date Range:</label>
+            <input
+              type="date"
+              value={dateRange.start}
+              onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
+              className="px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <span className="text-slate-600">to</span>
+            <input
+              type="date"
+              value={dateRange.end}
+              onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
+              className="px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <button
+              onClick={loadSalesReport}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+            >
+              🔄 Refresh
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 mb-6">
+          <div className="border-b border-slate-200">
+            <div className="flex space-x-1 p-2">
+              <button
+                onClick={() => setActiveTab('sales')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
+                  activeTab === 'sales' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                💰 Sales Report
+              </button>
+              <button
+                onClick={() => setActiveTab('products')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
+                  activeTab === 'products' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                🛍️ Product Performance
+              </button>
+              <button
+                onClick={() => setActiveTab('staff')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
+                  activeTab === 'staff' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                👥 Staff Performance
+              </button>
+              <button
+                onClick={() => setActiveTab('inventory')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
+                  activeTab === 'inventory' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                📦 Inventory Reports
+              </button>
+            </div>
+          </div>
+
+          <div className="p-6">
+            {activeTab === 'sales' && salesReport && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-2xl font-bold text-slate-800">Sales Report</h2>
+                  <button
+                    onClick={exportSalesReport}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  >
+                    📊 Export to Excel
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
+                    <p className="text-sm font-medium text-blue-900 mb-1">Total Sales</p>
+                    <p className="text-3xl font-bold text-blue-600">₦{salesReport.total_sales?.toLocaleString() || '0'}</p>
+                  </div>
+                  <div className="bg-green-50 rounded-lg p-6 border border-green-200">
+                    <p className="text-sm font-medium text-green-900 mb-1">Total Transactions</p>
+                    <p className="text-3xl font-bold text-green-600">{salesReport.total_count || 0}</p>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-6 border border-purple-200">
+                    <p className="text-sm font-medium text-purple-900 mb-1">Average Sale</p>
+                    <p className="text-3xl font-bold text-purple-600">₦{salesReport.average_sale?.toFixed(2) || '0'}</p>
+                  </div>
+                </div>
+
+                {salesReport.daily_sales && salesReport.daily_sales.length > 0 && (
+                  <div className="bg-slate-50 rounded-lg p-6">
+                    <h3 className="text-xl font-bold text-slate-800 mb-4">Daily Sales Trend</h3>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart data={salesReport.daily_sales}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="date" />
+                        <YAxis />
+                        <Tooltip formatter={(value: any) => `₦${value.toLocaleString()}`} />
+                        <Legend />
+                        <Line type="monotone" dataKey="total" stroke="#3b82f6" strokeWidth={2} name="Revenue" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                {salesReport.payment_methods && salesReport.payment_methods.length > 0 && (
+                  <div className="bg-slate-50 rounded-lg p-6">
+                    <h3 className="text-xl font-bold text-slate-800 mb-4">Payment Methods</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {salesReport.payment_methods.map((method: any) => (
+                        <div key={method.method} className="bg-white rounded-lg p-4 border border-slate-200">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="font-semibold text-slate-800">{method.method}</p>
+                              <p className="text-sm text-slate-600">{method.count} transactions</p>
+                            </div>
+                            <p className="text-xl font-bold text-blue-600">₦{method.total.toLocaleString()}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'products' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Top Selling Products</h2>
+                  <button
+                    onClick={exportProductsReport}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  >
+                    📊 Export to Excel
+                  </button>
+                </div>
+                {topProducts.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-xl font-semibold text-slate-700">No Product Sales</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="bg-slate-50 rounded-lg p-6">
+                      <h3 className="text-lg font-bold text-slate-800 mb-4">Revenue by Product</h3>
+                      <ResponsiveContainer width="100%" height={400}>
+                        <BarChart data={topProducts.slice(0, 10)}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
+                          <YAxis />
+                          <Tooltip formatter={(value: any) => `₦${value.toLocaleString()}`} />
+                          <Legend />
+                          <Bar dataKey="total_revenue" fill="#3b82f6" name="Revenue" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead className="bg-slate-50 border-b border-slate-200">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Quantity Sold</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Revenue</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Sales Count</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {topProducts.map((product: any) => (
+                            <tr key={product.id} className="border-b border-slate-100 hover:bg-slate-50">
+                              <td className="px-4 py-3 font-semibold text-slate-800">{product.name}</td>
+                              <td className="px-4 py-3">
+                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                                  {product.category}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-slate-700">{product.total_quantity}</td>
+                              <td className="px-4 py-3 font-bold text-blue-600">₦{product.total_revenue.toLocaleString()}</td>
+                              <td className="px-4 py-3 text-slate-700">{product.sale_count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'staff' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Staff Performance</h2>
+                  <button
+                    onClick={exportStaffReport}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  >
+                    📊 Export to Excel
+                  </button>
+                </div>
+                {staffPerformance.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-xl font-semibold text-slate-700">No Staff Performance Data</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="bg-slate-50 rounded-lg p-6">
+                      <h3 className="text-lg font-bold text-slate-800 mb-4">Revenue by Staff</h3>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <BarChart data={staffPerformance}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="name" />
+                          <YAxis />
+                          <Tooltip formatter={(value: any) => `₦${value.toLocaleString()}`} />
+                          <Legend />
+                          <Bar dataKey="total_revenue" fill="#10b981" name="Revenue" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead className="bg-slate-50 border-b border-slate-200">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Staff Name</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Role</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Sales Count</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Total Revenue</th>
+                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Average Sale</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {staffPerformance.map((staff: any) => (
+                            <tr key={staff.id} className="border-b border-slate-100 hover:bg-slate-50">
+                              <td className="px-4 py-3 font-semibold text-slate-800">{staff.name || 'Unknown'}</td>
+                              <td className="px-4 py-3">
+                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+                                  {staff.role}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-slate-700">{staff.sale_count}</td>
+                              <td className="px-4 py-3 font-bold text-green-600">₦{staff.total_revenue.toLocaleString()}</td>
+                              <td className="px-4 py-3 text-slate-700">₦{staff.average_sale.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'inventory' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Inventory Reports</h2>
+                  <button
+                    onClick={exportInventoryMovements}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  >
+                    📊 Export to Excel
+                  </button>
+                </div>
+
+                {/* Inventory Summary */}
+                {inventorySummary && (
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-6 mb-6">
+                    <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
+                      <p className="text-sm font-medium text-blue-900 mb-1">Total Products</p>
+                      <p className="text-3xl font-bold text-blue-600">{inventorySummary.total_products || 0}</p>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-6 border border-green-200">
+                      <p className="text-sm font-medium text-green-900 mb-1">Total Stock Value</p>
+                      <p className="text-3xl font-bold text-green-600">₦{inventorySummary.total_stock_value?.toLocaleString() || '0'}</p>
+                    </div>
+                    <div className="bg-purple-50 rounded-lg p-6 border border-purple-200">
+                      <p className="text-sm font-medium text-purple-900 mb-1">Total Stock Qty</p>
+                      <p className="text-3xl font-bold text-purple-600">{inventorySummary.total_stock_quantity || 0}</p>
+                    </div>
+                    <div className="bg-amber-50 rounded-lg p-6 border border-amber-200">
+                      <p className="text-sm font-medium text-amber-900 mb-1">Low Stock</p>
+                      <p className="text-3xl font-bold text-amber-600">{inventorySummary.low_stock_count || 0}</p>
+                    </div>
+                    <div className="bg-red-50 rounded-lg p-6 border border-red-200">
+                      <p className="text-sm font-medium text-red-900 mb-1">Out of Stock</p>
+                      <p className="text-3xl font-bold text-red-600">{inventorySummary.out_of_stock_count || 0}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Inventory Movements */}
+                <div className="bg-slate-50 rounded-lg p-6 mb-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-xl font-bold text-slate-800">Stock Movements</h3>
+                    <button
+                      onClick={exportInventoryMovements}
+                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium text-sm"
+                    >
+                      📊 Export
+                    </button>
+                  </div>
+                {/* Inventory Movements Table */}
+                {inventoryMovements.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="text-6xl mb-4">📦</div>
+                    <p className="text-xl font-semibold text-slate-700">No Inventory Movements</p>
+                    <p className="text-slate-600 mt-2">No inventory transactions found in the selected date range</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Date</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Type</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Quantity</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Reason</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">User</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {inventoryMovements.map((movement: any) => {
+                          const isPositive = movement.quantity > 0
+                          return (
+                            <tr key={movement.id} className="border-b border-slate-100 hover:bg-slate-50">
+                              <td className="px-4 py-3 text-sm text-slate-700">{movement.created_at}</td>
+                              <td className="px-4 py-3 font-semibold text-slate-800">{movement.product_name}</td>
+                              <td className="px-4 py-3">
+                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                                  {movement.category}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                  movement.transaction_type.includes('IN') || movement.transaction_type.includes('TRANSFER') 
+                                    ? 'bg-green-100 text-green-700' 
+                                    : 'bg-red-100 text-red-700'
+                                }`}>
+                                  {movement.transaction_type}
+                                </span>
+                              </td>
+                              <td className={`px-4 py-3 font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                                {isPositive ? '+' : ''}{movement.quantity}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-slate-600">{movement.reason || '-'}</td>
+                              <td className="px-4 py-3 text-sm text-slate-700">
+                                {movement.user_name || 'Unknown'} ({movement.user_role})
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const [loading, setLoading] = useState(true)
+  const [activeTab, setActiveTab] = useState<'summary' | 'sales' | 'low_stock' | 'out_of_stock'>('summary')
+  const [summary, setSummary] = useState<any>(null)
+  const [pendingSales, setPendingSales] = useState<any[]>([])
+  const [lowStockProducts, setLowStockProducts] = useState<any[]>([])
+  const [outOfStockProducts, setOutOfStockProducts] = useState<any[]>([])
+
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) {
+      loadAllData()
+    }
+  }, [businessId])
+
+  const loadAllData = async () => {
+    try {
+      setLoading(true)
+      const [summaryData, sales, lowStock, outOfStock] = await Promise.all([
+        invoke('get_pending_items_summary', { businessId }) as Promise<any>,
+        invoke('get_pending_sales', { businessId }) as Promise<any[]>,
+        invoke('get_low_stock_products_for_business', { businessId }) as Promise<any[]>,
+        invoke('get_out_of_stock_products_for_business', { businessId }) as Promise<any[]>,
+      ])
+      setSummary(summaryData)
+      setPendingSales(sales)
+      setLowStockProducts(lowStock)
+      setOutOfStockProducts(outOfStock)
+    } catch (error) {
+      console.error('Failed to load pending items:', error)
+      toast.error('Failed to load pending items')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleMarkSaleCompleted = async (saleId: number) => {
+    try {
+      await invoke('mark_sale_as_completed', { saleId })
+      toast.success('Sale marked as completed')
+      await loadAllData()
+    } catch (error) {
+      console.error('Failed to mark sale as completed:', error)
+      toast.error(`Failed to mark sale as completed: ${error}`)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-auto bg-slate-50">
+        <div className="p-8 w-full">
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <p className="text-slate-600">Loading pending items...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 overflow-auto bg-slate-50">
+      <div className="p-8 w-full max-w-7xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-slate-800 mb-2">📋 Pending Items Dashboard</h1>
+          <p className="text-slate-600 text-lg">View and manage all pending tasks and alerts</p>
+        </div>
+
+        {/* Summary Cards */}
+        {summary && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">Total Pending</p>
+                  <p className="text-3xl font-bold text-slate-800">{summary.total_pending || 0}</p>
+                </div>
+                <div className="text-4xl">📋</div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">Pending Sales</p>
+                  <p className="text-3xl font-bold text-blue-600">{summary.pending_sales || 0}</p>
+                </div>
+                <div className="text-4xl">💰</div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">Low Stock</p>
+                  <p className="text-3xl font-bold text-amber-600">{summary.low_stock_products || 0}</p>
+                </div>
+                <div className="text-4xl">⚠️</div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-600 mb-1">Out of Stock</p>
+                  <p className="text-3xl font-bold text-red-600">{summary.out_of_stock_products || 0}</p>
+                </div>
+                <div className="text-4xl">🚨</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div className="bg-white rounded-xl shadow-lg border border-slate-200 mb-6">
+          <div className="border-b border-slate-200">
+            <div className="flex space-x-1 p-2">
+              <button
+                onClick={() => setActiveTab('summary')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
+                  activeTab === 'summary'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                📊 Summary
+              </button>
+              <button
+                onClick={() => setActiveTab('sales')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors relative ${
+                  activeTab === 'sales'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                💰 Pending Sales
+                {summary?.pending_sales > 0 && (
+                  <span className="ml-2 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
+                    {summary.pending_sales}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setActiveTab('low_stock')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors relative ${
+                  activeTab === 'low_stock'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                ⚠️ Low Stock
+                {summary?.low_stock_products > 0 && (
+                  <span className="ml-2 px-2 py-0.5 bg-amber-500 text-white text-xs rounded-full">
+                    {summary.low_stock_products}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setActiveTab('out_of_stock')}
+                className={`px-6 py-3 rounded-lg font-medium transition-colors relative ${
+                  activeTab === 'out_of_stock'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                🚨 Out of Stock
+                {summary?.out_of_stock_products > 0 && (
+                  <span className="ml-2 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
+                    {summary.out_of_stock_products}
+                  </span>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Tab Content */}
+          <div className="p-6">
+            {activeTab === 'summary' && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-slate-800 mb-4">Overview</h2>
+                
+                {/* Pending Sales Summary */}
+                <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-blue-900">💰 Pending Sales</h3>
+                    <span className="px-3 py-1 bg-blue-600 text-white rounded-full font-bold">
+                      {summary?.pending_sales || 0}
+                    </span>
+                  </div>
+                  {pendingSales.length > 0 ? (
+                    <div className="space-y-2">
+                      {pendingSales.slice(0, 3).map((sale: any) => (
+                        <div key={sale.id} className="bg-white rounded-lg p-4 flex items-center justify-between">
+                          <div>
+                            <p className="font-semibold text-slate-800">Sale #{sale.id}</p>
+                            <p className="text-sm text-slate-600">
+                              {sale.user_name || 'Unknown'} • {sale.item_count} items • ₦{sale.total_amount.toLocaleString()}
+                            </p>
+                            <p className="text-xs text-slate-500">{sale.created_at}</p>
+                          </div>
+                          <button
+                            onClick={() => handleMarkSaleCompleted(sale.id)}
+                            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium"
+                          >
+                            Mark Complete
+                          </button>
+                        </div>
+                      ))}
+                      {pendingSales.length > 3 && (
+                        <p className="text-sm text-slate-600 text-center pt-2">
+                          +{pendingSales.length - 3} more pending sales
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-slate-600">No pending sales</p>
+                  )}
+                </div>
+
+                {/* Low Stock Summary */}
+                <div className="bg-amber-50 rounded-lg p-6 border border-amber-200">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-amber-900">⚠️ Low Stock Products</h3>
+                    <span className="px-3 py-1 bg-amber-600 text-white rounded-full font-bold">
+                      {summary?.low_stock_products || 0}
+                    </span>
+                  </div>
+                  {lowStockProducts.length > 0 ? (
+                    <div className="space-y-2">
+                      {lowStockProducts.slice(0, 3).map((product: any) => (
+                        <div key={product.id} className="bg-white rounded-lg p-4">
+                          <p className="font-semibold text-slate-800">{product.name}</p>
+                          <div className="flex gap-4 mt-2 text-sm">
+                            <span className="text-slate-600">Fridge: <strong className={product.fridge_stock <= product.min_stock_level ? 'text-red-600' : ''}>{product.fridge_stock}</strong></span>
+                            <span className="text-slate-600">Show: <strong className={product.show_stock <= product.min_stock_level ? 'text-red-600' : ''}>{product.show_stock}</strong></span>
+                            <span className="text-slate-600">Store: <strong className={product.store_stock <= product.min_stock_level ? 'text-red-600' : ''}>{product.store_stock}</strong></span>
+                            <span className="text-slate-600">Min: {product.min_stock_level}</span>
+                          </div>
+                        </div>
+                      ))}
+                      {lowStockProducts.length > 3 && (
+                        <p className="text-sm text-slate-600 text-center pt-2">
+                          +{lowStockProducts.length - 3} more low stock products
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-slate-600">No low stock products</p>
+                  )}
+                </div>
+
+                {/* Out of Stock Summary */}
+                <div className="bg-red-50 rounded-lg p-6 border border-red-200">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-red-900">🚨 Out of Stock Products</h3>
+                    <span className="px-3 py-1 bg-red-600 text-white rounded-full font-bold">
+                      {summary?.out_of_stock_products || 0}
+                    </span>
+                  </div>
+                  {outOfStockProducts.length > 0 ? (
+                    <div className="space-y-2">
+                      {outOfStockProducts.slice(0, 3).map((product: any) => (
+                        <div key={product.id} className="bg-white rounded-lg p-4">
+                          <p className="font-semibold text-slate-800">{product.name}</p>
+                          <p className="text-sm text-red-600 mt-1">Completely out of stock - urgent restock needed!</p>
+                        </div>
+                      ))}
+                      {outOfStockProducts.length > 3 && (
+                        <p className="text-sm text-slate-600 text-center pt-2">
+                          +{outOfStockProducts.length - 3} more out of stock products
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-slate-600">No out of stock products</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'sales' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Pending Sales</h2>
+                  <button
+                    onClick={loadAllData}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+                {pendingSales.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="text-6xl mb-4">✅</div>
+                    <p className="text-xl font-semibold text-slate-700">No Pending Sales</p>
+                    <p className="text-slate-600 mt-2">All sales have been completed!</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {pendingSales.map((sale: any) => (
+                      <div key={sale.id} className="bg-slate-50 rounded-lg p-6 border border-slate-200 hover:shadow-md transition-shadow">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-4 mb-3">
+                              <h3 className="text-xl font-bold text-slate-800">Sale #{sale.id}</h3>
+                              <span className="px-3 py-1 bg-amber-500 text-white rounded-full text-sm font-semibold">
+                                PENDING
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                              <div>
+                                <p className="text-slate-600">Total Amount</p>
+                                <p className="font-bold text-lg text-blue-600">₦{sale.total_amount.toLocaleString()}</p>
+                              </div>
+                              <div>
+                                <p className="text-slate-600">Items</p>
+                                <p className="font-semibold text-slate-800">{sale.item_count}</p>
+                              </div>
+                              <div>
+                                <p className="text-slate-600">Payment Method</p>
+                                <p className="font-semibold text-slate-800">{sale.payment_method}</p>
+                              </div>
+                              <div>
+                                <p className="text-slate-600">Staff</p>
+                                <p className="font-semibold text-slate-800">{sale.user_name || 'Unknown'}</p>
+                              </div>
+                            </div>
+                            <div className="mt-3">
+                              <p className="text-xs text-slate-500">Created: {sale.created_at}</p>
+                              {sale.notes && (
+                                <p className="text-sm text-slate-600 mt-1">Notes: {sale.notes}</p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="ml-6">
+                            <button
+                              onClick={() => handleMarkSaleCompleted(sale.id)}
+                              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+                            >
+                              ✅ Mark Complete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'low_stock' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Low Stock Products</h2>
+                  <button
+                    onClick={loadAllData}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+                {lowStockProducts.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="text-6xl mb-4">✅</div>
+                    <p className="text-xl font-semibold text-slate-700">No Low Stock Products</p>
+                    <p className="text-slate-600 mt-2">All products are well stocked!</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product Name</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Fridge Stock</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Show Stock</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Store Stock</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Price</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {lowStockProducts.map((product: any) => {
+                          const isLow = product.fridge_stock <= product.min_stock_level || 
+                                       product.show_stock <= product.min_stock_level ||
+                                       product.store_stock <= product.min_stock_level
+                          return (
+                            <tr key={product.id} className={isLow ? 'bg-red-50' : ''}>
+                              <td className="px-4 py-3">
+                                <div className="font-semibold text-slate-800">{product.name}</div>
+                                {product.description && (
+                                  <div className="text-xs text-slate-500 mt-1">{product.description}</div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                                  {product.category}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className={`font-semibold ${product.fridge_stock <= product.min_stock_level ? 'text-red-600' : 'text-slate-700'}`}>
+                                  {product.fridge_stock} / {product.min_stock_level}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className={`font-semibold ${product.show_stock <= product.min_stock_level ? 'text-red-600' : 'text-slate-700'}`}>
+                                  {product.show_stock} / {product.min_stock_level}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className={`font-semibold ${product.store_stock <= product.min_stock_level ? 'text-red-600' : 'text-slate-700'}`}>
+                                  {product.store_stock} / {product.min_stock_level}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="font-semibold text-slate-800">₦{product.price.toLocaleString()}</div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'out_of_stock' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800">Out of Stock Products</h2>
+                  <button
+                    onClick={loadAllData}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+                {outOfStockProducts.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="text-6xl mb-4">✅</div>
+                    <p className="text-xl font-semibold text-slate-700">No Out of Stock Products</p>
+                    <p className="text-slate-600 mt-2">All products have stock available!</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product Name</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Stock Status</th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Price</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {outOfStockProducts.map((product: any) => (
+                          <tr key={product.id} className="bg-red-50">
+                            <td className="px-4 py-3">
+                              <div className="font-semibold text-red-600">{product.name}</div>
+                              {product.description && (
+                                <div className="text-xs text-slate-500 mt-1">{product.description}</div>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                                {product.category}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="px-3 py-1 bg-red-600 text-white rounded-full text-sm font-bold">
+                                OUT OF STOCK
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-semibold text-slate-800">₦{product.price.toLocaleString()}</div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

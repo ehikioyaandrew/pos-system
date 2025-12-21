@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Tauri App",
+  "productName": "POS System",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.ehikioyaandrew.possystem",
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "npm run dev",
@@ -11,11 +11,14 @@
   "app": {
     "windows": [
       {
-        "title": "Tauri",
-        "width": 800,
-        "height": 600,
+        "label": "main",
+        "title": "POS System",
+        "width": 1200,
+        "height": 800,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": true,
+        "center": true
       }
     ],
     "security": {
@@ -37,7 +40,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://api.github.com/repos/YOUR_USERNAME/YOUR_REPO_NAME/releases/latest"
+        "https://api.github.com/repos/ehikioyaandrew/pos-system/releases/latest"
       ],
       "dialog": true,
       "windows": {

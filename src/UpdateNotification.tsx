@@ -1,4 +1,3 @@
-import React from 'react';
 import { useUpdateChecker } from './useUpdateChecker';
 import toast from 'react-hot-toast';
 

@@ -1,4 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
+import { check } from '@tauri-apps/plugin-updater';
+import { getVersion } from '@tauri-apps/api/app';
+import { relaunch } from '@tauri-apps/plugin-process';
 
 export interface UpdateInfo {
   available: boolean;
@@ -18,11 +20,30 @@ export interface UpdateInstallResult {
  */
 export async function checkForUpdates(): Promise<UpdateInfo> {
   try {
-    const result = await invoke<UpdateInfo>('check_for_updates');
-    return result;
+    const currentVersion = await getVersion();
+    const update = await check();
+    
+    if (update) {
+      return {
+        available: true,
+        version: update.version,
+        date: update.date,
+        body: update.body,
+        current_version: currentVersion
+      };
+    } else {
+      return {
+        available: false,
+        current_version: currentVersion
+      };
+    }
   } catch (error) {
     console.error('Error checking for updates:', error);
-    throw error;
+    const currentVersion = await getVersion().catch(() => 'unknown');
+    return {
+      available: false,
+      current_version: currentVersion
+    };
   }
 }
 
@@ -31,11 +52,38 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
  */
 export async function installUpdate(): Promise<UpdateInstallResult> {
   try {
-    const result = await invoke<UpdateInstallResult>('install_update');
-    return result;
-  } catch (error) {
+    const update = await check();
+    
+    if (!update) {
+      return {
+        success: false,
+        message: 'No update available'
+      };
+    }
+
+    await update.downloadAndInstall((event) => {
+      if (event.event === 'Progress') {
+        console.log(`Downloaded ${event.data.chunkLength} bytes`);
+      } else if (event.event === 'Finished') {
+        console.log('Download finished, installing...');
+      } else if (event.event === 'Started') {
+        console.log('Download started...');
+      }
+    });
+
+    // Restart the app after installation
+    await relaunch();
+    
+    return {
+      success: true,
+      message: 'Update installed successfully. The application will restart.'
+    };
+  } catch (error: any) {
     console.error('Error installing update:', error);
-    throw error;
+    return {
+      success: false,
+      message: error?.message || 'Failed to install update'
+    };
   }
 }
 
