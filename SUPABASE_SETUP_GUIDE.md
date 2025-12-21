@@ -225,3 +225,4 @@ Your POS system is now connected to Supabase!
 
 
 
+

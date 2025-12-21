@@ -80,3 +80,4 @@ If you need assistance rotating keys or have questions, refer to:
 - Supabase Docs: https://supabase.com/docs/guides/platform/api-keys
 - GitHub Secret Scanning: https://docs.github.com/en/code-security/secret-scanning
 
+

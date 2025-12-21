@@ -102,3 +102,4 @@ Current settings in `tauri.conf.json`:
 - `frontendDist`: `../dist` - Location of built frontend assets
 - `updater.active`: `false` - Disabled to prevent startup issues
 
+

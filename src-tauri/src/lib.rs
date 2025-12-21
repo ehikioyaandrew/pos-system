@@ -187,6 +187,10 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load environment variables from .env file if it exists
+    // This allows configuration via .env file in src-tauri directory
+    let _ = dotenv::dotenv();
+    
     let app_data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::env::temp_dir())
         .join("pos-system");
