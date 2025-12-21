@@ -35,3 +35,4 @@ anyhow = "1.0"
 base64 = "0.22"
 postgrest = "1.6"
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
+dotenv = "0.15"

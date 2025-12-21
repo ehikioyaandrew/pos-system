@@ -164,10 +164,22 @@ use std::fs;
 use base64::{Engine as _, engine::general_purpose};
 use tauri::State;
 
-// Cloud sync configuration (to be filled with actual Supabase credentials)
-const SUPABASE_URL: &str = "https://ttiubrnsgllckcpuzypn.supabase.co";
-const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR0aXVicm5zZ2xsY2tjcHV6eXBuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYyNDg2MjUsImV4cCI6MjA4MTgyNDYyNX0.Nb2vBejQ5-bzjQokUpLEf0GL-dDtRBGIXdjZBkB05Cg";
-const SUPABASE_SERVICE_ROLE_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR0aXVicm5zZ2xsY2tjcHV6eXBuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjI0ODYyNSwiZXhwIjoyMDgxODI0NjI1fQ.YyZ6q3r6SIHzrY9swI7EG3h3nBTtDa_tfpnU4F_u_Ak";
+// Cloud sync configuration - loaded from environment variables
+// Set these in a .env file in the src-tauri directory or as environment variables
+fn get_supabase_url() -> String {
+    std::env::var("SUPABASE_URL")
+        .unwrap_or_else(|_| "https://your-project.supabase.co".to_string())
+}
+
+fn get_supabase_anon_key() -> String {
+    std::env::var("SUPABASE_ANON_KEY")
+        .unwrap_or_else(|_| String::new())
+}
+
+fn get_supabase_service_role_key() -> String {
+    std::env::var("SUPABASE_SERVICE_ROLE_KEY")
+        .unwrap_or_else(|_| String::new())
+}
 
 pub struct AppState {
     db: Arc<Mutex<Database>>,
@@ -726,8 +738,11 @@ async fn fix_orphaned_users(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     // Check if Supabase is configured
-    if SUPABASE_URL == "https://your-project.supabase.co" {
-        return Err("Supabase not configured. Please update SUPABASE_URL, SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY in src-tauri/src/lib.rs".to_string());
+    let supabase_url = get_supabase_url();
+    let service_key = get_supabase_service_role_key();
+    
+    if supabase_url == "https://your-project.supabase.co" || service_key.is_empty() {
+        return Err("Supabase not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables or create a .env file in src-tauri directory.".to_string());
     }
 
     // Get all data for sync in a block scope
@@ -776,7 +791,7 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
     };
 
     // Create Supabase client
-    let client = SupabaseClient::new(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    let client = SupabaseClient::new(&supabase_url, &service_key);
 
     // Sync to Supabase (lock is already released)
     client.upsert_users(users).await
@@ -814,11 +829,14 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
 #[tauri::command]
 async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     // Check if Supabase is configured
-    if SUPABASE_URL == "https://your-project.supabase.co" {
-        return Err("Supabase not configured. Please update SUPABASE_URL, SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY in src-tauri/src/lib.rs".to_string());
+    let supabase_url = get_supabase_url();
+    let anon_key = get_supabase_anon_key();
+    
+    if supabase_url == "https://your-project.supabase.co" || anon_key.is_empty() {
+        return Err("Supabase not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables or create a .env file in src-tauri directory.".to_string());
     }
 
-    let client = SupabaseClient::new(SUPABASE_URL, SUPABASE_ANON_KEY);
+    let client = SupabaseClient::new(&supabase_url, &anon_key);
     
     // Fetch data from Supabase
     let cloud_users = client.fetch_users().await
@@ -1032,18 +1050,21 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
 #[tauri::command]
 async fn get_sync_status(_state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     // Check if Supabase is configured
-    if SUPABASE_URL == "https://your-project.supabase.co" {
+    let supabase_url = get_supabase_url();
+    let anon_key = get_supabase_anon_key();
+    
+    if supabase_url == "https://your-project.supabase.co" || anon_key.is_empty() {
         return Ok(serde_json::json!({
             "cloud_enabled": false,
             "last_sync": null,
             "pending_changes": 0,
             "status": "not_configured",
-            "message": "Cloud sync not yet configured. Please set up Supabase credentials."
+            "message": "Cloud sync not yet configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables or create a .env file in src-tauri directory."
         }));
     }
 
     // Test connection
-    let client = SupabaseClient::new(SUPABASE_URL, SUPABASE_ANON_KEY);
+    let client = SupabaseClient::new(&supabase_url, &anon_key);
     match client.test_connection().await {
         Ok(true) => {
             Ok(serde_json::json!({
