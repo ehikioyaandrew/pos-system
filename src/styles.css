@@ -2,6 +2,44 @@
 @tailwind components;
 @tailwind utilities;
 
+html,
+body,
+#root {
+  min-height: 100%;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  overflow-x: hidden;
+}
+
+body {
+  background-color: #f4f6f5;
+  color: #121c19;
+  font-family: Figtree, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Atmospheric mesh for login brand panel */
+.login-brand-panel {
+  background:
+    radial-gradient(ellipse 80% 60% at 20% 20%, rgba(196, 120, 58, 0.22), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 90% 80%, rgba(42, 120, 98, 0.35), transparent 50%),
+    linear-gradient(155deg, #0b1210 0%, #121c19 42%, #1a2924 100%);
+}
+
+.login-brand-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 85%);
+  pointer-events: none;
+}
+
 /* Custom styles for POS system */
 .pos-button {
   @apply bg-blue-500 hover:bg-blue-600 text-white font-medium py-2 px-4 rounded-md transition-colors duration-200;

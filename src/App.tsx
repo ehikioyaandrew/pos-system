@@ -1,15 +1,24 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { invoke } from '@tauri-apps/api/core'
-import { getVersion } from '@tauri-apps/api/app'
+import React, { useState, useEffect } from 'react'
 import toast, { Toaster } from 'react-hot-toast'
-import { UpdateNotification } from './UpdateNotification'
+import {
+  authenticateWebUser,
+  changeWebPassword,
+  invoke,
+  resetWebPassword,
+  verifyPasswordResetIdentity,
+} from './api'
 import { checkForUpdates, installUpdate } from './updateApi'
-import { Table } from './components/Table'
-import { Html5Qrcode } from 'html5-qrcode'
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import {
+  StaffPOSInterface,
+  StaffInventoryCheck,
+  SalesLogDashboard,
+  DebtManagementDashboard,
+} from './floorViews'
 import * as XLSX from 'xlsx'
 
-// Helper component to display product images
+const SESSION_KEY = 'pos_web_user'
+
+// Helper component to display product images (web: use URL / path directly)
 function ProductImage({ imagePath, alt }: { imagePath: string, alt: string }) {
   const [imageSrc, setImageSrc] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -20,26 +29,8 @@ function ProductImage({ imagePath, alt }: { imagePath: string, alt: string }) {
       return
     }
 
-    const loadImage = async () => {
-      try {
-        const imageBytes = await invoke('get_product_image', { imagePath }) as number[]
-        const blob = new Blob([new Uint8Array(imageBytes)], { type: 'image/png' })
-        const url = URL.createObjectURL(blob)
-        setImageSrc(url)
-      } catch (error) {
-        console.error('Failed to load image:', error)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    loadImage()
-
-    return () => {
-      if (imageSrc) {
-        URL.revokeObjectURL(imageSrc)
-      }
-    }
+    setImageSrc(imagePath)
+    setLoading(false)
   }, [imagePath])
 
   if (loading) {
@@ -65,50 +56,37 @@ function ProductImage({ imagePath, alt }: { imagePath: string, alt: string }) {
 }
 
 function App() {
-  const [currentView, setCurrentView] = useState<'setup' | 'login' | 'dashboard' | 'change-password'>('setup')
+  const [currentView, setCurrentView] = useState<'login' | 'dashboard' | 'customer'>('login')
   const [loading, setLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState<any>(null)
   const [showPasswordChange, setShowPasswordChange] = useState(false)
 
   useEffect(() => {
-    initializeSystem()
-  }, [])
-
-  const initializeSystem = async () => {
     try {
-      console.log('Checking for SuperSuperAdmin...')
-
-      // Check if SuperSuperAdmin exists
-      const hasSuperAdmin = await invoke<boolean>('has_super_super_admin')
-      console.log('Has SuperSuperAdmin:', hasSuperAdmin)
-
-      if (!hasSuperAdmin) {
-        console.log('Creating default SuperSuperAdmin account...')
-        const passwordHash = btoa('Pawpaw4life@')
-        console.log('Password hash:', passwordHash)
-
-        // Create default SuperSuperAdmin account
-        const result = await invoke('create_user', {
-          request: {
-            username: 'admin',
-            password_hash: passwordHash,
-            role: 'SuperSuperAdmin',
-            name: 'System Administrator',
-            email: null,
-            business_id: null
-          }
-        })
-        console.log('Default SuperSuperAdmin account created successfully, ID:', result)
-      } else {
-        console.log('SuperSuperAdmin account already exists')
+      const saved = localStorage.getItem(SESSION_KEY)
+      if (saved) {
+        const user = JSON.parse(saved)
+        setCurrentUser(user)
+        if (user?.has_temporary_password) {
+          setShowPasswordChange(true)
+        } else {
+          setCurrentView('dashboard')
+        }
       }
-
-      setCurrentView('login')
     } catch (error) {
-      console.error('Failed to initialize system:', error)
-      setCurrentView('login') // Continue to login even if setup fails
+      console.error('Failed to restore session:', error)
+      localStorage.removeItem(SESSION_KEY)
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  const persistUser = (user: any | null) => {
+    setCurrentUser(user)
+    if (user) {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(user))
+    } else {
+      localStorage.removeItem(SESSION_KEY)
     }
   }
 
@@ -124,25 +102,29 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen w-full bg-mist-50">
       {showPasswordChange && currentUser ? (
         <PasswordChangeModal
           currentUser={currentUser}
           onPasswordChanged={() => {
+            const updated = { ...currentUser, has_temporary_password: false, temporary_password: null }
+            persistUser(updated)
             setShowPasswordChange(false)
             setCurrentView('dashboard')
           }}
           onCancel={() => {
             setShowPasswordChange(false)
-            setCurrentUser(null)
+            persistUser(null)
             setCurrentView('login')
           }}
         />
+      ) : currentView === 'customer' ? (
+        <CustomerOrderView onBack={() => setCurrentView('login')} />
       ) : currentView === 'login' ? (
         <LoginView
           onLogin={() => setCurrentView('dashboard')}
           onUserAuthenticated={(user) => {
-            setCurrentUser(user)
+            persistUser(user)
             if ((user as any)?.has_temporary_password) {
               setShowPasswordChange(true)
             } else {
@@ -150,14 +132,15 @@ function App() {
             }
           }}
           onShowPasswordChange={(user) => {
-            setCurrentUser(user)
+            persistUser(user)
             setShowPasswordChange(true)
           }}
+          onCustomerPOS={() => setCurrentView('customer')}
         />
       ) : (
         <DashboardView
           onLogout={() => {
-            setCurrentUser(null)
+            persistUser(null)
             setCurrentView('login')
           }}
           currentUser={currentUser}
@@ -187,22 +170,58 @@ function App() {
           },
         }}
       />
-      <UpdateNotification autoCheck={true} showNotification={true} />
     </div>
   )
 }
 
-function LoginView({ onLogin, onUserAuthenticated, onShowPasswordChange }: {
+type AuthPanel =
+  | 'signin'
+  | 'forgot-identify'
+  | 'forgot-reset'
+  | 'forgot-done'
+
+const loginFieldClass =
+  'w-full px-4 py-3.5 text-base bg-white border border-mist-200 rounded-md text-ink-900 placeholder:text-ink-700/35 focus:outline-none focus:border-copper-500 focus:ring-2 focus:ring-copper-500/20 transition-colors'
+
+function LoginView({ onLogin, onUserAuthenticated, onShowPasswordChange, onCustomerPOS }: {
   onLogin: () => void
   onUserAuthenticated: (user: any) => void
   onShowPasswordChange?: (user: any) => void
+  onCustomerPOS?: () => void
 }) {
+  const [panel, setPanel] = useState<AuthPanel>('signin')
   const [formData, setFormData] = useState({
     username: '',
-    password: ''
+    password: '',
   })
+  const [resetForm, setResetForm] = useState({
+    username: '',
+    email: '',
+    newPassword: '',
+    confirmPassword: '',
+  })
+  const [resetUser, setResetUser] = useState<{ userId: number; username: string } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  const goToSignIn = () => {
+    setPanel('signin')
+    setError('')
+    setResetUser(null)
+    setResetForm({ username: '', email: '', newPassword: '', confirmPassword: '' })
+  }
+
+  const openForgot = () => {
+    setError('')
+    setResetForm((prev) => ({
+      ...prev,
+      username: formData.username,
+      newPassword: '',
+      confirmPassword: '',
+    }))
+    setResetUser(null)
+    setPanel('forgot-identify')
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -210,106 +229,465 @@ function LoginView({ onLogin, onUserAuthenticated, onShowPasswordChange }: {
     setLoading(true)
 
     try {
-      console.log('Attempting login with:', formData.username)
+      const result = await authenticateWebUser(formData.username, formData.password)
 
-      // Hash password for login check (trim username to avoid whitespace issues)
-      const username = formData.username.trim()
-      const passwordHash = btoa(formData.password)
-      console.log('Attempting login with username:', username)
-      console.log('Generated password hash:', passwordHash)
+      if ('error' in result) {
+        setError(result.error)
+        return
+      }
 
-      const user = await invoke('authenticate_user', {
-        request: {
-          username: username,
-          password_hash: passwordHash
-        }
-      })
+      const user = result.user
 
-      console.log('Authentication result:', user)
-
-      if (user) {
-        console.log('Login successful! User:', user)
-        // Check if user has temporary password and needs to change it
-        if ((user as any).has_temporary_password) {
-          // Show password change modal instead of logging in
-          onUserAuthenticated(user)
-          if (onShowPasswordChange) {
-            onShowPasswordChange(user)
-          }
-          return
-        }
-        // Store user information for the session
+      if (user.has_temporary_password) {
         onUserAuthenticated(user)
-        onLogin()
-      } else {
-        console.log('Authentication returned null/undefined')
-        setError('Invalid username or password')
+        onShowPasswordChange?.(user)
+        return
       }
-    } catch (error: any) {
-      console.error('Login failed:', error)
-      const errorMsg = error?.toString() || 'Login failed'
-      if (errorMsg.includes('Query returned no rows') || errorMsg.includes('Authentication failed')) {
-        setError('Invalid username or password. If this is a newly created account, use the "View Password" button in Client Businesses to see the password.')
-      } else {
-        setError(`Login failed: ${errorMsg}`)
-      }
+
+      onUserAuthenticated(user)
+      onLogin()
+      toast.success(`Welcome back, ${user.name || user.username}!`, { duration: 3000 })
+    } catch (err) {
+      console.error('Login error:', err)
+      setError('An unexpected error occurred. Please try again.')
     } finally {
       setLoading(false)
     }
   }
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value
-    })
+  const handleVerifyReset = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+
+    try {
+      const result = await verifyPasswordResetIdentity(resetForm.username, resetForm.email)
+      if ('error' in result) {
+        setError(result.error)
+        return
+      }
+      setResetUser(result)
+      setPanel('forgot-reset')
+    } catch (err) {
+      console.error('Reset verify error:', err)
+      setError('An unexpected error occurred. Please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+
+    if (resetForm.newPassword.length < 6) {
+      setError('Password must be at least 6 characters long.')
+      return
+    }
+    if (resetForm.newPassword !== resetForm.confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+    if (!resetUser) {
+      setError('Session expired. Please verify your account again.')
+      setPanel('forgot-identify')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const result = await resetWebPassword(resetUser.userId, resetForm.newPassword)
+      if (result.error) {
+        setError(result.error)
+        return
+      }
+      setFormData((prev) => ({ ...prev, username: resetUser.username, password: '' }))
+      setPanel('forgot-done')
+      toast.success('Password updated. You can sign in now.')
+    } catch (err) {
+      console.error('Reset password error:', err)
+      setError('An unexpected error occurred. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const brandCopy =
+    panel === 'signin'
+      ? {
+          title: (
+            <>
+              Run the counter
+              <span className="block text-copper-400">from anywhere.</span>
+            </>
+          ),
+          body: 'Admin and staff sign-in for sales, inventory, and floor operations.',
+        }
+      : {
+          title: (
+            <>
+              Reset access
+              <span className="block text-copper-400">in a few steps.</span>
+            </>
+          ),
+          body: 'Confirm your account details, then choose a new password to get back on the floor.',
+        }
+
   return (
-    <div className="flex items-center justify-center min-h-screen">
-      <div className="bg-white p-8 rounded-lg shadow-md w-96">
-        <h1 className="text-2xl font-bold text-center mb-6">POS System Login</h1>
+    <div className="min-h-screen w-full grid lg:grid-cols-2">
+      <section className="login-brand-panel relative hidden lg:flex min-h-screen flex-col justify-between overflow-hidden px-12 xl:px-16 py-12 text-white">
+        <p className="relative z-10 font-display text-sm font-semibold tracking-[0.22em] uppercase text-copper-400 animate-fade-in">
+          POS System
+        </p>
 
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg mb-4">
-            {error}
-          </div>
-        )}
+        <div className="relative z-10 max-w-xl animate-fade-up" style={{ animationDelay: '120ms' }}>
+          <h1 className="font-display text-5xl xl:text-6xl font-extrabold leading-[1.05] tracking-tight">
+            {brandCopy.title}
+          </h1>
+          <p className="mt-6 text-lg text-white/70 leading-relaxed max-w-md">{brandCopy.body}</p>
+        </div>
 
-        <form onSubmit={handleSubmit}>
-          <div className="mb-4">
-            <label className="block text-gray-700 mb-2">Username</label>
-            <input
-              type="text"
-              name="username"
-              required
-              value={formData.username}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Enter username"
-            />
-          </div>
-          <div className="mb-6">
-            <label className="block text-gray-700 mb-2">Password</label>
-            <input
-              type="password"
-              name="password"
-              required
-              value={formData.password}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Enter password"
-            />
-          </div>
+        <p className="relative z-10 text-sm text-white/40 animate-fade-in" style={{ animationDelay: '280ms' }}>
+          Web Version
+        </p>
+      </section>
+
+      <section className="min-h-screen w-full flex flex-col justify-center bg-mist-50 px-6 sm:px-10 xl:px-20 py-12 animate-panel-in">
+        <div className="w-full max-w-lg mx-auto lg:mx-0 lg:max-w-md xl:max-w-lg">
+          {panel === 'signin' && (
+            <>
+              <div className="lg:hidden mb-10">
+                <p className="font-display text-xs font-semibold tracking-[0.2em] uppercase text-copper-500 mb-2">
+                  POS System
+                </p>
+                <h1 className="font-display text-3xl font-bold text-ink-900 tracking-tight">
+                  Staff sign in
+                </h1>
+              </div>
+
+              <div className="hidden lg:block mb-10">
+                <h2 className="font-display text-3xl xl:text-4xl font-bold text-ink-900 tracking-tight">
+                  Sign in
+                </h2>
+                <p className="mt-2 text-ink-700/70 text-base">
+                  Use your admin or staff credentials to continue.
+                </p>
+              </div>
+
+              <form onSubmit={handleSubmit} className="space-y-5">
+                <div>
+                  <label htmlFor="username" className="block text-sm font-semibold text-ink-800 mb-2">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    id="username"
+                    value={formData.username}
+                    onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                    className={loginFieldClass}
+                    placeholder="Enter your username"
+                    required
+                    disabled={loading}
+                    autoComplete="username"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label htmlFor="password" className="block text-sm font-semibold text-ink-800">
+                      Password
+                    </label>
+                    <button
+                      type="button"
+                      onClick={openForgot}
+                      className="text-sm font-semibold text-copper-600 hover:text-copper-500 transition-colors"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                  <input
+                    type="password"
+                    id="password"
+                    value={formData.password}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                    className={loginFieldClass}
+                    placeholder="Enter your password"
+                    required
+                    disabled={loading}
+                    autoComplete="current-password"
+                  />
+                </div>
+
+                {error && (
+                  <div className="border border-red-200 bg-red-50 px-4 py-3 rounded-md">
+                    <p className="text-red-700 text-sm font-medium">{error}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full mt-2 bg-[#121c19] hover:bg-[#1a2924] disabled:bg-[#121c19]/40 text-white py-3.5 px-6 rounded-md font-semibold text-base tracking-wide transition-colors disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <span className="inline-flex items-center justify-center gap-3">
+                      <span className="animate-spin rounded-full h-4 w-4 border-2 border-white/30 border-t-white" />
+                      Signing in…
+                    </span>
+                  ) : (
+                    'Sign in'
+                  )}
+                </button>
+              </form>
+
+              <div className="mt-10 pt-8 border-t border-mist-200">
+                <p className="text-sm text-ink-700/60 mb-3">Ordering for yourself?</p>
+                <button
+                  type="button"
+                  onClick={onCustomerPOS}
+                  className="w-full border border-ink-900/15 hover:border-ink-900/40 hover:bg-white text-ink-900 py-3.5 px-4 rounded-md font-semibold transition-colors"
+                >
+                  Continue as customer
+                </button>
+                <p className="mt-3 text-sm text-ink-700/45">
+                  Skip staff login and place an order.
+                </p>
+              </div>
+            </>
+          )}
+
+          {panel === 'forgot-identify' && (
+            <>
+              <button
+                type="button"
+                onClick={goToSignIn}
+                className="mb-8 text-sm font-semibold text-ink-700/70 hover:text-ink-900 transition-colors"
+              >
+                ← Back to sign in
+              </button>
+
+              <div className="mb-8">
+                <p className="font-display text-xs font-semibold tracking-[0.2em] uppercase text-copper-500 mb-2">
+                  Password recovery
+                </p>
+                <h2 className="font-display text-3xl xl:text-4xl font-bold text-ink-900 tracking-tight">
+                  Verify your account
+                </h2>
+                <p className="mt-2 text-ink-700/70 text-base">
+                  Enter the username and email on your staff profile.
+                </p>
+              </div>
+
+              <form onSubmit={handleVerifyReset} className="space-y-5">
+                <div>
+                  <label htmlFor="reset-username" className="block text-sm font-semibold text-ink-800 mb-2">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    id="reset-username"
+                    value={resetForm.username}
+                    onChange={(e) => setResetForm({ ...resetForm, username: e.target.value })}
+                    className={loginFieldClass}
+                    placeholder="Your username"
+                    required
+                    disabled={loading}
+                    autoComplete="username"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="reset-email" className="block text-sm font-semibold text-ink-800 mb-2">
+                    Email on file
+                  </label>
+                  <input
+                    type="email"
+                    id="reset-email"
+                    value={resetForm.email}
+                    onChange={(e) => setResetForm({ ...resetForm, email: e.target.value })}
+                    className={loginFieldClass}
+                    placeholder="name@business.com"
+                    required
+                    disabled={loading}
+                    autoComplete="email"
+                  />
+                </div>
+
+                {error && (
+                  <div className="border border-red-200 bg-red-50 px-4 py-3 rounded-md">
+                    <p className="text-red-700 text-sm font-medium">{error}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full mt-2 bg-[#121c19] hover:bg-[#1a2924] disabled:bg-[#121c19]/40 text-white py-3.5 px-6 rounded-md font-semibold text-base tracking-wide transition-colors disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <span className="inline-flex items-center justify-center gap-3">
+                      <span className="animate-spin rounded-full h-4 w-4 border-2 border-white/30 border-t-white" />
+                      Checking…
+                    </span>
+                  ) : (
+                    'Continue'
+                  )}
+                </button>
+              </form>
+            </>
+          )}
+
+          {panel === 'forgot-reset' && resetUser && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setError('')
+                  setPanel('forgot-identify')
+                }}
+                className="mb-8 text-sm font-semibold text-ink-700/70 hover:text-ink-900 transition-colors"
+              >
+                ← Back
+              </button>
+
+              <div className="mb-8">
+                <p className="font-display text-xs font-semibold tracking-[0.2em] uppercase text-copper-500 mb-2">
+                  Password recovery
+                </p>
+                <h2 className="font-display text-3xl xl:text-4xl font-bold text-ink-900 tracking-tight">
+                  Choose a new password
+                </h2>
+                <p className="mt-2 text-ink-700/70 text-base">
+                  Updating password for <span className="font-semibold text-ink-900">{resetUser.username}</span>.
+                </p>
+              </div>
+
+              <form onSubmit={handleResetPassword} className="space-y-5">
+                <div>
+                  <label htmlFor="new-password" className="block text-sm font-semibold text-ink-800 mb-2">
+                    New password
+                  </label>
+                  <input
+                    type="password"
+                    id="new-password"
+                    value={resetForm.newPassword}
+                    onChange={(e) => setResetForm({ ...resetForm, newPassword: e.target.value })}
+                    className={loginFieldClass}
+                    placeholder="At least 6 characters"
+                    required
+                    minLength={6}
+                    disabled={loading}
+                    autoComplete="new-password"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="confirm-password" className="block text-sm font-semibold text-ink-800 mb-2">
+                    Confirm password
+                  </label>
+                  <input
+                    type="password"
+                    id="confirm-password"
+                    value={resetForm.confirmPassword}
+                    onChange={(e) => setResetForm({ ...resetForm, confirmPassword: e.target.value })}
+                    className={loginFieldClass}
+                    placeholder="Re-enter new password"
+                    required
+                    minLength={6}
+                    disabled={loading}
+                    autoComplete="new-password"
+                  />
+                </div>
+
+                {error && (
+                  <div className="border border-red-200 bg-red-50 px-4 py-3 rounded-md">
+                    <p className="text-red-700 text-sm font-medium">{error}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full mt-2 bg-[#121c19] hover:bg-[#1a2924] disabled:bg-[#121c19]/40 text-white py-3.5 px-6 rounded-md font-semibold text-base tracking-wide transition-colors disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <span className="inline-flex items-center justify-center gap-3">
+                      <span className="animate-spin rounded-full h-4 w-4 border-2 border-white/30 border-t-white" />
+                      Saving…
+                    </span>
+                  ) : (
+                    'Update password'
+                  )}
+                </button>
+              </form>
+            </>
+          )}
+
+          {panel === 'forgot-done' && (
+            <>
+              <div className="mb-8">
+                <p className="font-display text-xs font-semibold tracking-[0.2em] uppercase text-copper-500 mb-2">
+                  Password recovery
+                </p>
+                <h2 className="font-display text-3xl xl:text-4xl font-bold text-ink-900 tracking-tight">
+                  Password updated
+                </h2>
+                <p className="mt-2 text-ink-700/70 text-base">
+                  Your new password is ready. Sign in with it to continue.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={goToSignIn}
+                className="w-full bg-[#121c19] hover:bg-[#1a2924] text-white py-3.5 px-6 rounded-md font-semibold text-base tracking-wide transition-colors"
+              >
+                Back to sign in
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function CustomerOrderView({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="min-h-screen w-full grid lg:grid-cols-2">
+      <section className="login-brand-panel relative hidden lg:flex min-h-screen flex-col justify-between overflow-hidden px-12 xl:px-16 py-12 text-white">
+        <p className="relative z-10 font-display text-sm font-semibold tracking-[0.22em] uppercase text-copper-400">
+          POS System
+        </p>
+        <div className="relative z-10 max-w-xl">
+          <h1 className="font-display text-5xl xl:text-6xl font-bold leading-[1.05] tracking-tight">
+            Order at your
+            <span className="block text-copper-400">own pace.</span>
+          </h1>
+          <p className="mt-6 text-lg text-white/70 leading-relaxed max-w-md">
+            Customer self-order is being restored for the web build.
+          </p>
+        </div>
+        <p className="relative z-10 text-sm text-white/40">Web Version</p>
+      </section>
+
+      <section className="min-h-screen w-full flex flex-col justify-center bg-mist-50 px-6 sm:px-10 xl:px-20 py-12">
+        <div className="w-full max-w-lg mx-auto lg:mx-0">
+          <h2 className="font-display text-3xl font-bold text-ink-900 tracking-tight mb-3">
+            Customer ordering
+          </h2>
+          <p className="text-ink-700/70 mb-8 max-w-md leading-relaxed">
+            Self-order is coming back soon. Please use staff login for now, or return to the sign-in page.
+          </p>
           <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            type="button"
+            onClick={onBack}
+            className="bg-[#121c19] hover:bg-[#1a2924] text-white py-3.5 px-8 rounded-md font-semibold transition-colors"
           >
-            {loading ? 'Logging in...' : 'Login'}
+            Back to sign in
           </button>
-        </form>
-      </div>
+        </div>
+      </section>
     </div>
   )
 }
@@ -344,12 +722,11 @@ function PasswordChangeModal({ currentUser, onPasswordChanged, onCancel }: {
 
     setLoading(true)
     try {
-      const newPasswordHash = btoa(formData.newPassword)
-      
-      await invoke('change_password', {
-        user_id: currentUser.id,
-        new_password_hash: newPasswordHash
-      })
+      const result = await changeWebPassword(currentUser.id, formData.newPassword)
+      if (result.error) {
+        setError(`Failed to change password: ${result.error}`)
+        return
+      }
 
       toast.success('Password changed successfully! You can now access the system.')
       onPasswordChanged()
@@ -433,86 +810,172 @@ function PasswordChangeModal({ currentUser, onPasswordChanged, onCancel }: {
 }
 
 // NavButton Component for consistent navigation styling
-function NavButton({ active, onClick, icon, label }: {
+function NavButton({ active, onClick, label }: {
   active: boolean
   onClick: () => void
-  icon: string
+  icon?: string
   label: string
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
-      className={`w-full flex items-center py-3 px-4 rounded-lg transition-all duration-200 text-left ${
+      className={`w-full flex items-center gap-3 py-2.5 px-3 rounded-md text-left text-sm font-medium transition-colors ${
         active
-          ? 'bg-blue-600 text-white shadow-lg'
-          : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+          ? 'bg-white/10 text-white'
+          : 'text-white/55 hover:bg-white/5 hover:text-white'
       }`}
     >
-      <span className="mr-3 text-lg">{icon}</span>
-      <span className="font-medium">{label}</span>
-          </button>
+      <span
+        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+          active ? 'bg-[#e0a06a]' : 'bg-white/25'
+        }`}
+      />
+      <span>{label}</span>
+    </button>
   )
 }
 
-// MetricCard Component for consistent card styling
-function MetricCard({ title, value, icon, color = 'blue' }: {
+function MetricCard({ title, value, hint, accent, color = 'blue' }: {
   title: string
   value: string
-  icon: string
+  icon?: string
   color?: 'blue' | 'green' | 'purple' | 'orange' | 'red'
+  hint?: string
+  accent?: 'ink' | 'copper' | 'teal' | 'rose'
 }) {
-  const colorClasses = {
-    blue: 'from-blue-500 to-blue-600',
-    green: 'from-green-500 to-green-600',
-    purple: 'from-purple-500 to-purple-600',
-    orange: 'from-orange-500 to-orange-600',
-    red: 'from-red-500 to-red-600'
+  const colorToAccent: Record<string, 'ink' | 'copper' | 'teal' | 'rose'> = {
+    blue: 'ink',
+    green: 'teal',
+    purple: 'copper',
+    orange: 'copper',
+    red: 'rose',
   }
+  const resolved = accent || colorToAccent[color] || 'ink'
+  const accentClass = {
+    ink: 'bg-[#121c19]',
+    copper: 'bg-[#c4783a]',
+    teal: 'bg-teal-600',
+    rose: 'bg-rose-500',
+  }[resolved]
 
   return (
-    <div className={`bg-gradient-to-br ${colorClasses[color]} text-white p-6 rounded-xl shadow-lg hover:shadow-xl transition-shadow duration-300`}>
-      <div className="flex items-center justify-between">
-        <div className="flex-1">
-          <h3 className="text-sm font-medium text-blue-100 mb-1">{title}</h3>
-          <p className="text-3xl font-bold">{value}</p>
-        </div>
-        <div className="text-4xl opacity-80">{icon}</div>
+    <div className="relative overflow-hidden rounded-xl border border-[#d4dcd8] bg-white p-6 min-h-[140px] flex flex-col justify-between">
+      <div className={`absolute left-0 top-0 h-full w-1 ${accentClass}`} />
+      <p className="text-sm font-medium text-[#2a3d36]/60 pl-2">{title}</p>
+      <div className="pl-2 mt-4">
+        <p className="font-display text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">{value}</p>
+        {hint && <p className="mt-1 text-xs text-[#2a3d36]/45">{hint}</p>}
       </div>
     </div>
   )
 }
 
+function PageLoader({ label = 'Loading…' }: { label?: string }) {
+  return (
+    <div className="min-h-full bg-[#f4f6f5] flex items-center justify-center py-24 px-6">
+      <div className="text-center animate-fade-in">
+        <div className="relative mx-auto mb-5 h-12 w-12">
+          <div className="absolute inset-0 rounded-full border-2 border-[#121c19]/10" />
+          <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#c4783a] animate-spin" />
+        </div>
+        <p className="font-display text-lg font-semibold text-[#121c19]">{label}</p>
+        <p className="mt-1 text-sm text-[#2a3d36]/50">Please wait a moment</p>
+      </div>
+    </div>
+  )
+}
+
+/** Accepts JSON arrays or comma-separated values like "BAR,KITCHEN". */
+function parseBusinessModules(
+  raw: unknown,
+  fallback: string[] = ['BAR', 'KITCHEN', 'ROOM']
+): string[] {
+  if (Array.isArray(raw)) {
+    const modules = raw.map(String).map((m) => m.trim()).filter(Boolean)
+    return modules.length ? modules : fallback
+  }
+  if (typeof raw !== 'string') return fallback
+
+  const trimmed = raw.trim()
+  if (!trimmed) return fallback
+
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) {
+        const modules = parsed.map(String).map((m) => m.trim()).filter(Boolean)
+        return modules.length ? modules : fallback
+      }
+    } catch {
+      // fall through to comma-separated parsing
+    }
+  }
+
+  const modules = trimmed
+    .split(',')
+    .map((part) => part.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean)
+
+  return modules.length ? modules : fallback
+}
+
 function DashboardView({ onLogout, currentUser }: { onLogout: () => void, currentUser: any }) {
-  const [userRole, setUserRole] = useState<string>('Staff')
-  const [currentSection, setCurrentSection] = useState('dashboard')
+  const initialRole = String(currentUser?.role || 'Staff')
+  const isFloorStaffRole = ['Staff', 'BarStaff', 'KitchenStaff'].includes(initialRole)
+  const [userRole, setUserRole] = useState<string>(initialRole)
+  const [currentSection, setCurrentSection] = useState(isFloorStaffRole ? 'pos' : 'dashboard')
   const [businessInfo, setBusinessInfo] = useState<any>(null)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  const goToSection = (section: string) => {
+    setCurrentSection(section)
+    setMobileNavOpen(false)
+  }
+
+  useEffect(() => {
+    setMobileNavOpen(false)
+  }, [currentSection])
+
+  useEffect(() => {
+    if (!mobileNavOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileNavOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = ''
+    }
+  }, [mobileNavOpen])
 
   useEffect(() => {
     // Get current user info to determine role
     if (currentUser && currentUser.role) {
-      console.log('Setting user role from currentUser:', currentUser.role)
       setUserRole(currentUser.role)
+      const floor = ['Staff', 'BarStaff', 'KitchenStaff'].includes(String(currentUser.role))
+      setCurrentSection((prev) => {
+        if (floor && (prev === 'dashboard' || !prev)) return 'pos'
+        return prev
+      })
 
       // Get business information if user has a business_id
       if (currentUser.business_id) {
         loadBusinessInfo(currentUser.business_id)
       }
     } else {
-      console.log('No currentUser or role found, defaulting to Staff')
       setUserRole('Staff')
     }
   }, [currentUser])
 
   const loadBusinessInfo = async (businessId: number) => {
     try {
-      console.log('Loading business info for ID:', businessId)
       // Backend accepts serde_json::Value which can be a number or object
       const business = await invoke('get_business_by_id', businessId as any) as any
       if (business) {
         setBusinessInfo(business)
-        console.log('Loaded business info:', business)
       } else {
-        console.warn('Business not found for ID:', businessId)
       }
     } catch (error) {
       console.error('Failed to load business info:', error)
@@ -522,13 +985,34 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         const business = businesses.find((b: any) => b.id === businessId)
         if (business) {
           setBusinessInfo(business)
-          console.log('Loaded business info from fallback:', business)
         }
       } catch (fallbackError) {
         console.error('Fallback also failed:', fallbackError)
       }
     }
   }
+
+  const roleLabel =
+    userRole === 'SuperSuperAdmin' ? 'Super Super Admin' :
+    userRole === 'SuperAdmin' ? 'Business Admin' :
+    userRole === 'Manager' ? 'Manager' :
+    userRole === 'Secretary' ? 'Secretary' :
+    userRole === 'BarStaff' ? 'Bar Staff' :
+    userRole === 'KitchenStaff' ? 'Kitchen Staff' : 'Staff'
+
+  const roleSubtitle =
+    userRole === 'SuperSuperAdmin' ? 'Software management' :
+    businessInfo?.address ? businessInfo.address :
+    userRole === 'SuperAdmin' ? 'Full business control' :
+    userRole === 'Manager' ? 'Operations' :
+    userRole === 'Secretary' ? 'Administrative support' : 'Sales operations'
+
+  const displayName = businessInfo?.name || roleLabel
+  const initials = String(currentUser?.name || currentUser?.username || roleLabel)
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((p: string) => p[0]?.toUpperCase() || '')
+    .join('') || 'U'
 
   const renderSidebar = () => {
     const isSuperSuperAdmin = userRole === 'SuperSuperAdmin'
@@ -537,284 +1021,126 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
     const isSecretary = userRole === 'Secretary'
 
     return (
-      <div className="w-72 bg-slate-900 text-white shadow-xl flex flex-col">
-        {/* Header */}
-        <div className="p-6 border-b border-slate-700">
-          <div className="flex items-center">
-            <div className={`w-12 h-12 rounded-xl flex items-center justify-center mr-4 shadow-lg ${
-              isSuperSuperAdmin ? 'bg-gradient-to-br from-purple-500 to-purple-600' :
-              isSuperAdmin ? 'bg-gradient-to-br from-blue-500 to-blue-600' :
-              isManager ? 'bg-gradient-to-br from-green-500 to-green-600' :
-              isSecretary ? 'bg-gradient-to-br from-orange-500 to-orange-600' :
-              'bg-gradient-to-br from-gray-500 to-gray-600'
-            }`}>
-              <span className="text-xl font-bold text-white">
-                {isSuperSuperAdmin ? 'SSA' :
-                 isSuperAdmin ? 'SA' :
-                 isManager ? 'M' :
-                 isSecretary ? 'S' : 'ST'}
-              </span>
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-[min(18rem,85vw)] bg-[#0b1210] text-white flex flex-col border-r border-white/5 transform transition-transform duration-200 ease-out md:static md:z-auto md:w-64 xl:w-72 md:max-w-none ${
+          mobileNavOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
+        }`}
+      >
+        <div className="px-5 pt-6 pb-5">
+          <div className="flex items-start justify-between gap-3 mb-5">
+            <p className="font-display text-[11px] font-semibold tracking-[0.22em] uppercase text-[#e0a06a]">
+              POS System
+            </p>
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(false)}
+              className="md:hidden -mt-1 -mr-1 h-9 w-9 rounded-md text-white/60 hover:text-white hover:bg-white/10 text-xl leading-none"
+              aria-label="Close menu"
+            >
+              ×
+            </button>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="h-11 w-11 rounded-lg bg-[#1a2924] border border-white/10 flex items-center justify-center font-display font-bold text-[#e0a06a]">
+              {initials}
             </div>
-            <div>
-              <h2 className="text-lg font-semibold text-white">
-                {isSuperSuperAdmin ? 'Super Super Admin' :
-                 businessInfo ? businessInfo.name :
-                 isSuperAdmin ? 'Business Admin' :
-                 isManager ? 'Manager' :
-                 isSecretary ? 'Secretary' : 'Staff'}
-              </h2>
-              <p className="text-slate-400 text-sm">
-                {isSuperSuperAdmin ? 'Software Management' :
-                 businessInfo ? `${businessInfo.address}` :
-                 isSuperAdmin ? 'Full Business Control' :
-                 isManager ? 'Operations Management' :
-                 isSecretary ? 'Administrative Support' : 'Sales Operations'}
-              </p>
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-white truncate">{displayName}</h2>
+              <p className="text-xs text-white/45 truncate">{roleSubtitle}</p>
             </div>
           </div>
         </div>
 
-        {/* Navigation */}
-        <nav className="flex-1 p-4 space-y-2">
+        <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto pb-4">
+          <p className="px-3 pt-2 pb-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-white/30">
+            Menu
+          </p>
           {isSuperSuperAdmin ? (
-            // Super Super Admin - Full Software Control
             <>
-              <NavButton
-                active={currentSection === 'dashboard'}
-                onClick={() => setCurrentSection('dashboard')}
-                icon="📊"
-                label="Dashboard"
-              />
-              <NavButton
-                active={currentSection === 'clients'}
-                onClick={() => setCurrentSection('clients')}
-                icon="🏢"
-                label="Client Businesses"
-              />
-              <NavButton
-                active={currentSection === 'onboarding'}
-                onClick={() => setCurrentSection('onboarding')}
-                icon="➕"
-                label="Onboard Client"
-              />
-              <NavButton
-                active={currentSection === 'reports'}
-                onClick={() => setCurrentSection('reports')}
-                icon="📈"
-                label="System Reports"
-              />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
+              <NavButton active={currentSection === 'clients'} onClick={() => goToSection('clients')} label="Client Businesses" />
+              <NavButton active={currentSection === 'onboarding'} onClick={() => goToSection('onboarding')} label="Onboard Client" />
+              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} label="System Reports" />
             </>
           ) : isSuperAdmin ? (
-            // Business Super Admin - Full Business Control
             <>
-              <NavButton
-                active={currentSection === 'dashboard'}
-                onClick={() => setCurrentSection('dashboard')}
-                icon="📊"
-                label="Dashboard"
-              />
-              <NavButton
-                active={currentSection === 'products'}
-                onClick={() => setCurrentSection('products')}
-                icon="🛍️"
-                label="Products"
-              />
-              <NavButton
-                active={currentSection === 'sales'}
-                onClick={() => setCurrentSection('sales')}
-                icon="💰"
-                label="Sales & POS"
-              />
-              <NavButton
-                active={currentSection === 'inventory'}
-                onClick={() => setCurrentSection('inventory')}
-                icon="📦"
-                label="Inventory"
-              />
-              <NavButton
-                active={currentSection === 'staff'}
-                onClick={() => setCurrentSection('staff')}
-                icon="👥"
-                label="Staff Management"
-              />
-              <NavButton
-                active={currentSection === 'reports'}
-                onClick={() => setCurrentSection('reports')}
-                icon="📊"
-                label="Reports"
-              />
-              <NavButton
-                active={currentSection === 'reports'}
-                onClick={() => setCurrentSection('reports')}
-                icon="📊"
-                label="Reports"
-              />
-              <NavButton
-                active={currentSection === 'settings'}
-                onClick={() => setCurrentSection('settings')}
-                icon="⚙️"
-                label="Settings"
-              />
-              <NavButton
-                active={currentSection === 'pending'}
-                onClick={() => setCurrentSection('pending')}
-                icon="📋"
-                label="Pending Items"
-              />
-              <NavButton
-                active={currentSection === 'kitchen'}
-                onClick={() => setCurrentSection('kitchen')}
-                icon="👨‍🍳"
-                label="Kitchen Orders"
-              />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
+              <NavButton active={currentSection === 'products'} onClick={() => goToSection('products')} label="Products" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Inventory" />
+              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} label="Staff Management" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
+              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} label="Reports" />
+              <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} label="Settings" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
             </>
           ) : isManager ? (
-            // Manager - Operations Focus
             <>
-              <NavButton
-                active={currentSection === 'dashboard'}
-                onClick={() => setCurrentSection('dashboard')}
-                icon="📊"
-                label="Dashboard"
-              />
-              <NavButton
-                active={currentSection === 'sales'}
-                onClick={() => setCurrentSection('sales')}
-                icon="💰"
-                label="Sales & POS"
-              />
-              <NavButton
-                active={currentSection === 'inventory'}
-                onClick={() => setCurrentSection('inventory')}
-                icon="📦"
-                label="Inventory"
-              />
-              <NavButton
-                active={currentSection === 'staff'}
-                onClick={() => setCurrentSection('staff')}
-                icon="👥"
-                label="Staff Overview"
-              />
-              <NavButton
-                active={currentSection === 'reports'}
-                onClick={() => setCurrentSection('reports')}
-                icon="📊"
-                label="Reports"
-              />
-              <NavButton
-                active={currentSection === 'reports'}
-                onClick={() => setCurrentSection('reports')}
-                icon="📊"
-                label="Reports"
-              />
-              <NavButton
-                active={currentSection === 'settings'}
-                onClick={() => setCurrentSection('settings')}
-                icon="⚙️"
-                label="Settings"
-              />
-              <NavButton
-                active={currentSection === 'pending'}
-                onClick={() => setCurrentSection('pending')}
-                icon="📋"
-                label="Pending Items"
-              />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Inventory" />
+              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} label="Staff Overview" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
+              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} label="Reports" />
+              <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} label="Settings" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
             </>
           ) : isSecretary ? (
-            // Secretary - Administrative Focus
             <>
-              <NavButton
-                active={currentSection === 'dashboard'}
-                onClick={() => setCurrentSection('dashboard')}
-                icon="📊"
-                label="Dashboard"
-              />
-              <NavButton
-                active={currentSection === 'products'}
-                onClick={() => setCurrentSection('products')}
-                icon="🛍️"
-                label="Product Catalog"
-              />
-              <NavButton
-                active={currentSection === 'sales'}
-                onClick={() => setCurrentSection('sales')}
-                icon="💰"
-                label="Sales Support"
-              />
-              <NavButton
-                active={currentSection === 'inventory'}
-                onClick={() => setCurrentSection('inventory')}
-                icon="📦"
-                label="Inventory Tracking"
-              />
-              <NavButton
-                active={currentSection === 'staff'}
-                onClick={() => setCurrentSection('staff')}
-                icon="👥"
-                label="Staff Records"
-              />
-              <NavButton
-                active={currentSection === 'pending'}
-                onClick={() => setCurrentSection('pending')}
-                icon="📋"
-                label="Pending Items"
-              />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
+              <NavButton active={currentSection === 'products'} onClick={() => goToSection('products')} label="Product Catalog" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Inventory Tracking" />
+              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} label="Staff Records" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
             </>
           ) : (
-            // Staff - Sales Only (Kitchen or Bar)
             <>
-              <NavButton
-                active={currentSection === 'pos'}
-                onClick={() => setCurrentSection('pos')}
-                icon="🛒"
-                label="Point of Sale"
-              />
-              <NavButton
-                active={currentSection === 'inventory'}
-                onClick={() => setCurrentSection('inventory')}
-                icon="📦"
-                label="Stock Check"
-              />
-              <NavButton
-                active={currentSection === 'pending'}
-                onClick={() => setCurrentSection('pending')}
-                icon="📋"
-                label="Pending Items"
-              />
+              <NavButton active={currentSection === 'pos'} onClick={() => goToSection('pos')} label="Point of Sale" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Stock Check" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
             </>
           )}
         </nav>
 
-        {/* Logout Button */}
-        <div className="p-4 border-t border-slate-700">
+        <div className="p-4 border-t border-white/5">
+          <div className="px-2 mb-3">
+            <p className="text-xs text-white/40 truncate">{currentUser?.name || currentUser?.username}</p>
+            <p className="text-[11px] text-white/25">{roleLabel}</p>
+          </div>
           <button
+            type="button"
             onClick={onLogout}
-            className="w-full bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white py-3 px-4 rounded-lg transition-all duration-200 font-medium border border-slate-700 hover:border-red-500"
+            className="w-full border border-white/10 hover:border-rose-400/40 hover:bg-rose-500/10 text-white/70 hover:text-white py-2.5 px-4 rounded-md text-sm font-medium transition-colors"
           >
-            🚪 Logout
+            Log out
           </button>
         </div>
-      </div>
+      </aside>
     )
   }
+
 
   const renderContent = () => {
     if (userRole === 'SuperSuperAdmin') {
       switch (currentSection) {
         case 'clients':
           return <ClientsManagement
-            onNavigateToOnboarding={() => setCurrentSection('onboarding')}
+            onNavigateToOnboarding={() => goToSection('onboarding')}
             refreshTrigger={currentSection === 'clients'}
           />
         case 'onboarding':
           return <ClientOnboarding
-            onComplete={() => setCurrentSection('clients')}
+            onComplete={() => goToSection('clients')}
             currentUser={currentUser}
           />
         case 'reports':
           return <SystemReports />
         default:
-          return <SuperAdminDashboard onNavigateToSection={setCurrentSection} />
+          return <SuperAdminDashboard onNavigateToSection={goToSection} />
       }
     }
 
@@ -822,15 +1148,21 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
     const isSuperAdmin = userRole === 'SuperAdmin'
     const isManager = userRole === 'Manager'
     const isSecretary = userRole === 'Secretary'
-    const isStaff = userRole === 'Staff'
+    const isFloorStaff = ['Staff', 'BarStaff', 'KitchenStaff'].includes(userRole)
 
-    // Staff only sees POS interface
-    if (isStaff) {
+    // Floor staff (Staff / BarStaff / KitchenStaff) — POS-first, not admin dashboard
+    if (isFloorStaff) {
       switch (currentSection) {
         case 'pos':
           return <StaffPOSInterface currentUser={currentUser} businessInfo={businessInfo} />
         case 'inventory':
           return <StaffInventoryCheck currentUser={currentUser} />
+        case 'sales-log':
+          return <SalesLogDashboard currentUser={currentUser} businessInfo={businessInfo} ownOnly />
+        case 'debt':
+          return <DebtManagementDashboard currentUser={currentUser} businessInfo={businessInfo} />
+        case 'pending':
+          return <PendingItemsDashboard currentUser={currentUser} businessInfo={businessInfo} />
         default:
           return <StaffPOSInterface currentUser={currentUser} businessInfo={businessInfo} />
       }
@@ -846,12 +1178,19 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         return <AccessDenied />
       case 'sales':
         return <BusinessSales />
+      case 'sales-log':
+        return <SalesLogDashboard currentUser={currentUser} businessInfo={businessInfo} />
+      case 'debt':
+        if (isSuperAdmin || isManager || isSecretary || isFloorStaff) {
+          return <DebtManagementDashboard currentUser={currentUser} businessInfo={businessInfo} />
+        }
+        return <AccessDenied />
       case 'inventory':
         return <BusinessInventory currentUser={currentUser} />
       case 'staff':
-        // Only SuperAdmin and Manager can manage staff
-        if (isSuperAdmin || isManager) {
-          return <BusinessStaff />
+        // SuperAdmin, Manager, and Secretary can view staff records
+        if (isSuperAdmin || isManager || isSecretary) {
+          return <BusinessStaff currentUser={currentUser} businessInfo={businessInfo} />
         }
         return <AccessDenied />
       case 'reports':
@@ -873,15 +1212,46 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         // All roles can view kitchen orders (kitchen staff, managers, etc.)
         return <KitchenOrderQueue currentUser={currentUser} businessInfo={businessInfo} />
       default:
-        return <BusinessDashboard currentUser={currentUser} />
+        return (
+          <BusinessDashboard
+            currentUser={currentUser}
+            onNavigate={goToSection}
+          />
+        )
     }
   }
 
   return (
-    <div className="flex h-screen w-screen bg-slate-50 overflow-hidden">
+    <div className="flex h-[100dvh] w-full max-w-[100vw] bg-[#f4f6f5] overflow-hidden">
+      {mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="Close menu overlay"
+          className="fixed inset-0 z-30 bg-[#0b1210]/55 md:hidden"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
       {renderSidebar()}
-      <div className="flex-1 min-w-0 overflow-auto">
-        {renderContent()}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        <header className="md:hidden sticky top-0 z-20 flex items-center gap-3 px-4 py-3 bg-[#0b1210] text-white border-b border-white/10 shrink-0">
+          <button
+            type="button"
+            onClick={() => setMobileNavOpen(true)}
+            className="h-10 w-10 rounded-md border border-white/10 hover:bg-white/10 flex flex-col items-center justify-center gap-1.5"
+            aria-label="Open menu"
+          >
+            <span className="block w-4 h-0.5 bg-white rounded-full" />
+            <span className="block w-4 h-0.5 bg-white rounded-full" />
+            <span className="block w-4 h-0.5 bg-white rounded-full" />
+          </button>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold truncate">{displayName}</p>
+            <p className="text-[11px] text-white/45 truncate">{roleLabel}</p>
+          </div>
+        </header>
+        <div className="flex-1 min-w-0 overflow-auto overscroll-contain">
+          {renderContent()}
+        </div>
       </div>
     </div>
   )
@@ -901,13 +1271,7 @@ function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (se
   }, [])
 
   const loadCurrentVersion = async () => {
-    try {
-      const version = await getVersion()
-      setCurrentVersion(version)
-    } catch (error) {
-      console.error('Failed to get version:', error)
-      setCurrentVersion('Unknown')
-    }
+    setCurrentVersion(import.meta.env.VITE_APP_VERSION || '1.0.0-web')
   }
 
   const checkSyncStatus = async () => {
@@ -1588,7 +1952,7 @@ function ClientsManagement({
                 </div>
 
                 <div className="flex justify-between items-center text-sm text-slate-500">
-                  <span>Modules: {client.modules_enabled ? JSON.parse(client.modules_enabled).join(', ') : 'None'}</span>
+                  <span>Modules: {client.modules_enabled ? parseBusinessModules(client.modules_enabled).join(', ') : 'None'}</span>
                   <span>Status: {client.subscription_status || 'TRIAL'}</span>
                   <span>Last Sync: {client.last_sync || 'Never'}</span>
                 </div>
@@ -1741,8 +2105,6 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
       // Get the actual logged-in Super Super Admin ID
       const superAdminId = currentUser?.id
 
-      console.log('Current user:', currentUser)
-      console.log('SuperAdmin ID:', superAdminId)
 
       if (!superAdminId) {
         toast.error('User session expired. Please login again.', {
@@ -1751,7 +2113,6 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
         return
       }
 
-      console.log('Creating business with SuperAdmin ID:', superAdminId)
 
       // Check if business already exists
       const exists = await invoke('check_business_exists', {
@@ -1780,20 +2141,13 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
         }
       }) as { business_id: number; client_id: string }
 
-      console.log('Business created:', result)
 
       // Generate a secure temporary password
       const tempPassword = `Temp${Math.random().toString(36).slice(-8)}!`
       const passwordHash = btoa(tempPassword)
 
-      console.log('Generated temp password:', tempPassword)
 
       // Create the business admin user
-      console.log('Creating user with:', {
-        username: formData.adminUsername,
-        business_id: result.business_id,
-        password_hash: passwordHash
-      })
       
       // Ensure business_id is set
       if (!result.business_id) {
@@ -1803,7 +2157,6 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
         return
       }
 
-      console.log('Creating admin user with business_id:', result.business_id)
       const userId = await invoke('create_user', {
         request: {
           username: formData.adminUsername.trim(), // Trim whitespace
@@ -1816,7 +2169,6 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
         }
       }) as number
 
-      console.log('User created with ID:', userId, 'and business_id:', result.business_id)
       
       // Verify the user was created with the correct business_id
       if (!userId) {
@@ -2184,7 +2536,41 @@ function SystemReports() {
                 <h2 className="text-xl font-bold text-slate-800">Client Performance</h2>
                 <p className="text-slate-600 text-sm mt-1">Revenue by client business</p>
               </div>
-              <div className="overflow-x-auto">
+              <div className="md:hidden divide-y divide-slate-200">
+                {summary.business_revenue && summary.business_revenue.length > 0 ? (
+                  summary.business_revenue.map((business: any, index: number) => (
+                    <div key={business.business_id} className="p-4">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                          <span className="text-blue-600 font-bold text-sm">{index + 1}</span>
+                        </div>
+                        <p className="font-medium text-slate-800">{business.business_name}</p>
+                      </div>
+                      <dl className="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <dt className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Revenue</dt>
+                          <dd className="font-semibold text-slate-800">₦{business.revenue?.toLocaleString() || '0'}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Transactions</dt>
+                          <dd className="text-slate-700">{business.transactions || 0}</dd>
+                        </div>
+                        <div className="col-span-2">
+                          <dt className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Avg per transaction</dt>
+                          <dd className="text-slate-700">
+                            ₦{business.transactions > 0 ? (business.revenue / business.transactions).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '0'}
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                  ))
+                ) : (
+                  <p className="px-6 py-8 text-center text-slate-500">
+                    No revenue data available for the selected date range
+                  </p>
+                )}
+              </div>
+              <div className="hidden md:block overflow-x-auto">
                 <table className="w-full">
                   <thead className="bg-slate-50">
                     <tr>
@@ -2690,28 +3076,49 @@ function AdminSetupStep({ formData, updateFormData }: {
 }
 
 // Business Components
-function BusinessDashboard({ currentUser }: { currentUser: any }) {
+function BusinessDashboard({
+  currentUser,
+  onNavigate,
+}: {
+  currentUser: any
+  onNavigate?: (section: string) => void
+}) {
   const [staffCount, setStaffCount] = useState<any>(null)
   const [showAddStaff, setShowAddStaff] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [metrics, setMetrics] = useState({
+    todaySales: 0,
+    itemsInStock: 0,
+    activeStaff: 0,
+    lowStockAlerts: 0,
+  })
 
   useEffect(() => {
     if (currentUser?.business_id) {
-      loadStaffCount()
+      void loadDashboard()
+    } else {
+      setLoading(false)
     }
   }, [currentUser])
 
-  const loadStaffCount = async () => {
+  const loadDashboard = async () => {
+    setLoading(true)
     try {
-      const count = await invoke('get_business_staff_count', { businessId: currentUser.business_id })
+      const [count, data] = await Promise.all([
+        invoke('get_business_staff_count', { businessId: currentUser.business_id }),
+        invoke('get_dashboard_metrics', { businessId: currentUser.business_id }) as Promise<any>,
+      ])
       setStaffCount(count)
-    } catch (error) {
-      console.error('Failed to load staff count:', error)
+      if (data) setMetrics(data)
+    } catch {
+      toast.error('Failed to load dashboard data')
+    } finally {
+      setLoading(false)
     }
   }
 
   const handleAddStaff = async (staffData: any) => {
     try {
-      // Generate temp password for new staff
       const tempPassword = `Staff${Math.random().toString(36).slice(-6)}!`
       const passwordHash = btoa(tempPassword)
 
@@ -2727,135 +3134,151 @@ function BusinessDashboard({ currentUser }: { currentUser: any }) {
         }
       })
 
-      toast.success(`Staff member added successfully!\n\nUsername: ${staffData.username}\nPassword: ${tempPassword}\n\n⚠️ Please save this password and share it securely.`, {
+      toast.success(`Staff member added successfully!\n\nUsername: ${staffData.username}\nPassword: ${tempPassword}\n\nPlease save this password and share it securely.`, {
         duration: 8000,
       })
 
       setShowAddStaff(false)
-      loadStaffCount() // Refresh staff count
-    } catch (error) {
-      console.error('Failed to add staff:', error)
+      void loadDashboard()
+    } catch {
       toast.error('Failed to add staff member')
     }
   }
 
+  const firstName = String(currentUser?.name || currentUser?.username || 'there').split(' ')[0]
+  const canManageStaff = currentUser?.role === 'SuperAdmin' || currentUser?.role === 'Manager'
+  const formatMoney = (n: number) =>
+    `₦${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+  if (loading) {
+    return <PageLoader label="Loading dashboard…" />
+  }
+
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">Business Dashboard</h1>
-          <p className="text-slate-600 text-lg">Manage your restaurant operations</p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8 w-full">
-          <MetricCard
-            title="Today's Sales"
-            value="₦0.00"
-            icon="💰"
-            color="green"
-          />
-          <MetricCard
-            title="Items in Stock"
-            value="0"
-            icon="📦"
-            color="blue"
-          />
-          <MetricCard
-            title="Active Staff"
-            value={staffCount ? staffCount.total.toString() : "0"}
-            icon="👥"
-            color="purple"
-          />
-          <MetricCard
-            title="Low Stock Alert"
-            value="0"
-            icon="⚠️"
-            color="red"
-          />
-        </div>
-
-        {/* Staff Management */}
-        {staffCount && (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 w-full">
-            <h3 className="text-xl font-bold text-slate-800 mb-4">👥 Staff Management</h3>
-
-            {/* Staff Count Summary */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-blue-600">{staffCount.admin}</div>
-                <div className="text-sm text-slate-600">Admin</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-green-600">{staffCount.manager}</div>
-                <div className="text-sm text-slate-600">Manager</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-orange-600">{staffCount.secretary}</div>
-                <div className="text-sm text-slate-600">Secretary</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-purple-600">{staffCount.staff}</div>
-                <div className="text-sm text-slate-600">Staff</div>
-              </div>
-            </div>
-
-            {/* Limits Info */}
-            <div className="bg-slate-50 rounded-lg p-4 mb-4">
-              <h4 className="font-semibold text-slate-700 mb-2">Staff Limits</h4>
-              <div className="text-sm text-slate-600 space-y-1">
-                <div>Manager: {staffCount.manager}/{staffCount.limits.max_manager} ({staffCount.available.manager} available)</div>
-                <div>Secretary: {staffCount.secretary}/{staffCount.limits.max_secretary} ({staffCount.available.secretary} available)</div>
-                <div>Staff: {staffCount.staff}/{staffCount.limits.max_staff} ({staffCount.available.staff} available)</div>
-                <div className="font-medium">Total: {staffCount.total}/{staffCount.limits.max_total} users</div>
-              </div>
-            </div>
-
-            {/* Add Staff Button */}
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 sm:mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Overview
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Good day, {firstName}
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+              Track sales, stock, and floor activity from one place.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3">
             <button
-              onClick={() => setShowAddStaff(true)}
-              disabled={staffCount.available.total <= 0}
-              className="w-full bg-green-600 hover:bg-green-700 disabled:bg-slate-400 disabled:cursor-not-allowed text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
+              type="button"
+              onClick={() => onNavigate?.('inventory')}
+              className="border border-[#121c19]/15 hover:border-[#121c19]/35 hover:bg-white text-[#121c19] px-5 py-2.5 rounded-md text-sm font-semibold transition-colors"
             >
-              <span>➕</span>
-              <span>{staffCount.available.total <= 0 ? 'Staff Limit Reached' : 'Add Staff Member'}</span>
+              Inventory
             </button>
+            <button
+              type="button"
+              onClick={() => onNavigate?.('pending')}
+              className="bg-[#121c19] hover:bg-[#1a2924] text-white px-5 py-2.5 rounded-md text-sm font-semibold transition-colors"
+            >
+              Pending items
+            </button>
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+          <MetricCard title="Today's sales" value={formatMoney(metrics.todaySales)} accent="teal" />
+          <MetricCard title="Items in stock" value={String(metrics.itemsInStock)} accent="ink" />
+          <MetricCard
+            title="Active staff"
+            value={String(metrics.activeStaff || staffCount?.total || 0)}
+            accent="copper"
+          />
+          <MetricCard title="Low stock alerts" value={String(metrics.lowStockAlerts)} accent="rose" />
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-5 gap-6 mb-8">
+          <section className="xl:col-span-3 rounded-xl border border-[#d4dcd8] bg-white p-6 sm:p-7">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="font-display text-xl font-bold text-[#121c19]">Quick actions</h2>
+                <p className="text-sm text-[#2a3d36]/55 mt-1">Jump into everyday tasks</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => onNavigate?.('inventory')}
+                className="text-left rounded-lg border border-[#d4dcd8] hover:border-[#c4783a]/50 hover:bg-[#f4f6f5] p-4 transition-colors"
+              >
+                <p className="font-semibold text-[#121c19]">Inventory</p>
+                <p className="text-sm text-[#2a3d36]/55 mt-1">Check stock levels</p>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate?.('pending')}
+                className="text-left rounded-lg border border-[#d4dcd8] hover:border-[#c4783a]/50 hover:bg-[#f4f6f5] p-4 transition-colors"
+              >
+                <p className="font-semibold text-[#121c19]">Pending items</p>
+                <p className="text-sm text-[#2a3d36]/55 mt-1">Review open work</p>
+              </button>
+            </div>
+          </section>
+
+          <section className="xl:col-span-2 rounded-xl border border-[#d4dcd8] bg-white p-6 sm:p-7">
+            <h2 className="font-display text-xl font-bold text-[#121c19]">Recent activity</h2>
+            <p className="text-sm text-[#2a3d36]/55 mt-1 mb-8">Latest floor and sales events</p>
+            <div className="rounded-lg border border-dashed border-[#d4dcd8] bg-[#f4f6f5]/70 px-4 py-10 text-center">
+              <p className="font-medium text-[#121c19]">No activity yet</p>
+              <p className="text-sm text-[#2a3d36]/55 mt-1">Sales and stock changes will show here.</p>
+            </div>
+          </section>
+        </div>
+
+        {staffCount && canManageStaff && (
+          <section className="rounded-xl border border-[#d4dcd8] bg-white p-6 sm:p-7">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-6">
+              <div>
+                <h2 className="font-display text-xl font-bold text-[#121c19]">Staff overview</h2>
+                <p className="text-sm text-[#2a3d36]/55 mt-1">
+                  {staffCount.total}/{staffCount.limits.max_total} seats in use
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddStaff(true)}
+                disabled={staffCount.available.total <= 0}
+                className="bg-[#121c19] hover:bg-[#1a2924] disabled:bg-[#121c19]/35 text-white px-5 py-2.5 rounded-md text-sm font-semibold transition-colors disabled:cursor-not-allowed"
+              >
+                {staffCount.available.total <= 0 ? 'Staff limit reached' : 'Add staff member'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+              {[
+                { label: 'Admin', value: staffCount.admin },
+                { label: 'Manager', value: staffCount.manager, cap: `${staffCount.manager}/${staffCount.limits.max_manager}` },
+                { label: 'Secretary', value: staffCount.secretary, cap: `${staffCount.secretary}/${staffCount.limits.max_secretary}` },
+                { label: 'Staff', value: staffCount.staff, cap: `${staffCount.staff}/${staffCount.limits.max_staff}` },
+              ].map((item) => (
+                <div key={item.label} className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5]/80 px-4 py-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-[#2a3d36]/50">{item.label}</p>
+                  <p className="font-display text-2xl font-bold text-[#121c19] mt-1">{item.value}</p>
+                  {item.cap && <p className="text-xs text-[#2a3d36]/45 mt-1">{item.cap}</p>}
+                </div>
+              ))}
+            </div>
 
             {staffCount.available.total <= 0 && (
-              <p className="text-sm text-amber-600 mt-2 text-center">
-                ⚠️ Maximum staff limit reached. Contact administrator for additional staff slots.
+              <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-4 py-3">
+                Maximum staff limit reached. Contact an administrator for additional seats.
               </p>
             )}
-          </div>
+          </section>
         )}
-
-        {/* Business-specific content */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 w-full">
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-            <h3 className="text-xl font-bold text-slate-800 mb-4">Quick Actions</h3>
-            <div className="space-y-3">
-              <button className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium transition-colors">
-                💰 New Sale
-              </button>
-              <button className="w-full bg-slate-600 hover:bg-slate-700 text-white py-3 px-4 rounded-lg font-medium transition-colors">
-                📦 Manage Inventory
-              </button>
-              <button className="w-full bg-slate-600 hover:bg-slate-700 text-white py-3 px-4 rounded-lg font-medium transition-colors">
-                📊 View Reports
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-            <h3 className="text-xl font-bold text-slate-800 mb-4">Recent Activity</h3>
-            <div className="text-center py-8">
-              <div className="text-4xl mb-3">📋</div>
-              <p className="text-slate-500">No recent activity</p>
-            </div>
-          </div>
-        </div>
       </div>
 
-      {/* Add Staff Modal */}
       {showAddStaff && staffCount && (
         <AddStaffModal
           onClose={() => setShowAddStaff(false)}
@@ -2869,396 +3292,492 @@ function BusinessDashboard({ currentUser }: { currentUser: any }) {
 
 function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, currentUser: any }) {
   const [products, setProducts] = useState<any[]>([])
+  const [packagingTypes, setPackagingTypes] = useState<{ id: number; name: string }[]>([])
   const [showAddModal, setShowAddModal] = useState(false)
-  const [showImportModal, setShowImportModal] = useState(false)
+  const [editingProduct, setEditingProduct] = useState<any | null>(null)
+  const [showPackagingModal, setShowPackagingModal] = useState(false)
   const [loading, setLoading] = useState(true)
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage] = useState(10)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [packagingFilter, setPackagingFilter] = useState('ALL')
 
-  // Extract business modules from businessInfo
-  const businessModules = React.useMemo(() => {
-    if (businessInfo && businessInfo.modules_enabled) {
-      try {
-        const modules = JSON.parse(businessInfo.modules_enabled)
-        console.log('Parsed business modules:', modules)
-        return modules
-      } catch (error) {
-        console.error('Failed to parse business modules:', error)
-        return []
-      }
-    }
-    console.log('No business modules found, using defaults')
-    return ['BAR', 'KITCHEN', 'ROOM'] // Default fallback
-  }, [businessInfo])
-
-  // Get business ID from user or business info - prioritize currentUser.business_id
   const businessId = currentUser?.business_id || businessInfo?.id
 
   useEffect(() => {
     if (businessId) {
-      console.log('ProductManagement: Loading products for business ID:', businessId)
-      loadProducts()
+      void loadAll()
     } else {
-      console.warn('ProductManagement: No business ID available')
       setLoading(false)
     }
   }, [businessId])
 
-  const loadProducts = async () => {
+  const loadAll = async () => {
+    setLoading(true)
     try {
-      setLoading(true)
-      console.log('Loading products for business ID:', businessId)
-      if (!businessId) {
-        console.error('No business ID available')
-        setProducts([])
-        return
-      }
-      // Pass as object with businessId (camelCase) - Tauri converts to snake_case
-      console.log('About to load products for businessId:', businessId, 'Type:', typeof businessId)
-      const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
-      console.log('Loaded products:', businessProducts)
-      console.log('Loaded products count:', businessProducts?.length || 0)
-      
-      // Debug: Also try to get all products to see what's in the database
-      try {
-        const allProducts = await invoke('get_all_products') as any[]
-        console.log('All products in database:', allProducts)
-        console.log('All products count:', allProducts?.length || 0)
-        if (allProducts.length > 0) {
-          console.log('Sample product business_id:', allProducts[0]?.business_id)
-        }
-      } catch (e) {
-        console.error('Failed to get all products for debugging:', e)
-      }
-      if (businessProducts && Array.isArray(businessProducts)) {
-        setProducts(businessProducts)
-      } else {
-        console.warn('Products is not an array:', businessProducts)
-        setProducts([])
-      }
-    } catch (error) {
-      console.error('Failed to load products:', error)
-      toast.error('Failed to load products. Please try refreshing the page.')
-      setProducts([])
+      await Promise.all([loadProducts(), loadPackagingTypes()])
     } finally {
       setLoading(false)
     }
   }
 
+  const loadProducts = async () => {
+    try {
+      if (!businessId) {
+        setProducts([])
+        return
+      }
+      const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
+      setProducts(Array.isArray(businessProducts) ? businessProducts : [])
+    } catch {
+      toast.error('Failed to load products. Please try refreshing the page.')
+      setProducts([])
+    }
+  }
+
+  const loadPackagingTypes = async () => {
+    if (!businessId) {
+      setPackagingTypes([])
+      return
+    }
+    try {
+      const rows = await invoke('get_product_categories', { businessId }) as any[]
+      const list = Array.isArray(rows) ? rows : []
+      setPackagingTypes(list.map((c) => ({ id: c.id, name: c.name })))
+    } catch {
+      setPackagingTypes([])
+    }
+  }
+
+  const ensureDefaultPackaging = async () => {
+    if (!businessId) return
+    const existingNames = new Set(packagingTypes.map((c) => c.name.toLowerCase()))
+    const defaults = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
+    for (const name of defaults) {
+      if (!existingNames.has(name.toLowerCase())) {
+        try {
+          await invoke('create_product_category', {
+            request: { business_id: businessId, name },
+          })
+          existingNames.add(name.toLowerCase())
+        } catch {
+          // ignore duplicates
+        }
+      }
+    }
+    await loadPackagingTypes()
+  }
+
+  useEffect(() => {
+    if (businessId && !loading && packagingTypes.length === 0) {
+      void ensureDefaultPackaging()
+    }
+  }, [businessId, loading])
+
   const addProduct = async (productData: any) => {
     try {
-      // Get business_id from currentUser, businessInfo, or productData
-      const businessId = currentUser?.business_id || businessInfo?.id || productData.business_id
-      
-      if (!businessId) {
+      const id = currentUser?.business_id || businessInfo?.id || productData.business_id
+      if (!id) {
         toast.error('Business ID not found. Please log out and log back in.')
-        console.error('No business ID available:', { currentUser, businessInfo, productData })
         return
       }
 
-      // Convert camelCase to snake_case for backend
-      const requestData = {
-        business_id: businessId,
-        name: productData.name,
-        description: productData.description || '',
-        category: productData.category,
-        price: productData.price || 0,
-        cost_price: productData.costPrice || productData.cost_price || 0,
-        stock_quantity: productData.stockQuantity || productData.stock_quantity || 0,
-        min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
-        fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
-        show_stock: productData.showStock || productData.show_stock || 0,
-        store_stock: productData.storeStock || productData.store_stock || 0,
-        barcode: productData.barcode || '',
-        serial_number: productData.serialNumber || productData.serial_number || ''
-      }
-      console.log('Creating product with data:', requestData)
       await invoke('create_product', {
-        request: requestData
+        request: {
+          business_id: id,
+          name: productData.name,
+          description: productData.description || '',
+          category: 'BAR',
+          packaging: productData.packaging || null,
+          price: productData.price || 0,
+          cost_price: productData.costPrice || productData.cost_price || 0,
+          stock_quantity: productData.stockQuantity || productData.stock_quantity || 0,
+          min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
+          fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
+          show_stock: productData.showStock || productData.show_stock || 0,
+          store_stock: productData.storeStock || productData.store_stock || 0,
+          image_path: productData.image_path || productData.imagePath || null,
+        },
       })
       toast.success('Product added successfully!')
       await loadProducts()
+      await loadPackagingTypes()
       setShowAddModal(false)
     } catch (error) {
-      console.error('Failed to add product:', error)
       toast.error(`Failed to add product: ${error}`)
     }
   }
 
-  if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-slate-600">Loading products...</p>
-          </div>
-        </div>
-      </div>
-    )
+  const saveProductEdit = async (productData: any) => {
+    try {
+      const id = currentUser?.business_id || businessInfo?.id
+      if (!id || !productData.id) {
+        toast.error('Missing product or business id')
+        return
+      }
+      await invoke('update_product', {
+        request: {
+          id: productData.id,
+          business_id: id,
+          name: productData.name,
+          description: productData.description || '',
+          category: 'BAR',
+          packaging: productData.packaging || null,
+          price: productData.price || 0,
+          cost_price: productData.costPrice || productData.cost_price || 0,
+          min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
+          fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
+          show_stock: productData.showStock || productData.show_stock || 0,
+          store_stock: productData.storeStock || productData.store_stock || 0,
+          image_path: productData.image_path || productData.imagePath || null,
+        },
+      })
+      toast.success('Product updated')
+      await loadProducts()
+      setEditingProduct(null)
+    } catch (error) {
+      toast.error(`Failed to update product: ${error}`)
+    }
   }
 
+  const filteredProducts = React.useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return products.filter((product) => {
+      const isBar = String(product.category || '').toUpperCase() === 'BAR'
+      const matchesPackaging =
+        packagingFilter === 'ALL' ||
+        String(product.packaging || '').toLowerCase() === packagingFilter.toLowerCase()
+      const haystack = [product.name, product.description, product.packaging]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return isBar && matchesPackaging && (!q || haystack.includes(q))
+    })
+  }, [products, searchQuery, packagingFilter])
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, packagingFilter])
+
+  if (loading) {
+    return <PageLoader label="Loading catalog…" />
+  }
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / itemsPerPage))
+  const pageProducts = filteredProducts.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  )
+  const lowStockCount = products.filter((p) => {
+    if (String(p.category || '').toUpperCase() !== 'BAR') return false
+    const total =
+      Number(p.fridge_stock || 0) + Number(p.show_stock || 0) + Number(p.store_stock || 0)
+    const min = Number(p.min_stock_level || 0)
+    return total > 0 && total <= min
+  }).length
+
+  const packagingOptions = Array.from(
+    new Set([
+      ...packagingTypes.map((c) => c.name),
+      ...products.map((p) => String(p.packaging || '').trim()).filter(Boolean),
+    ])
+  ).sort((a, b) => a.localeCompare(b))
+
+  const fieldClass =
+    'w-full px-4 py-3 text-base bg-white border border-[#d4dcd8] rounded-md text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20 transition-colors'
+
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <div className="mb-8 flex justify-between items-center">
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-slate-800 mb-2">Product Management</h1>
-            <p className="text-slate-600 text-lg">Manage your menu items and inventory</p>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Catalog
+            </p>
+            <h1 className="font-display text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Product management
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+              BAR drinks only. Set packaging as Can, Plastic Bottle, Bottle, and more.
+            </p>
           </div>
-          <div className="flex space-x-4">
+          <div className="flex flex-wrap gap-3">
             <button
+              type="button"
+              onClick={() => setShowPackagingModal(true)}
+              className="border border-[#121c19]/15 hover:border-[#121c19]/35 hover:bg-white text-[#121c19] px-5 py-2.5 rounded-md text-sm font-semibold transition-colors"
+            >
+              Packaging types
+            </button>
+            <button
+              type="button"
               onClick={() => setShowAddModal(true)}
-              className="bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
+              className="bg-[#121c19] hover:bg-[#1a2924] text-white px-5 py-2.5 rounded-md text-sm font-semibold transition-colors"
             >
-              ➕ Add Product
-            </button>
-            <button
-              onClick={() => setShowImportModal(true)}
-              className="bg-green-600 hover:bg-green-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
-            >
-              📊 Import from Excel
+              Add product
             </button>
           </div>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <MetricCard title="BAR products" value={String(filteredProducts.length)} accent="ink" />
+          <MetricCard title="Low stock" value={String(lowStockCount)} accent="rose" />
+          <MetricCard title="Packaging types" value={String(packagingOptions.length)} accent="copper" />
         </div>
 
-        {products.length === 0 ? (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-12 w-full">
-            <div className="text-center">
-              <div className="text-7xl mb-6">🛍️</div>
-              <h2 className="text-3xl font-bold text-slate-800 mb-3">No Products Yet</h2>
-              <p className="text-slate-600 mb-8 text-lg">Start by adding your first product to the catalog</p>
+        <div className="mb-6 grid grid-cols-1 lg:grid-cols-[1fr_220px] gap-3">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by name or packaging…"
+            className={fieldClass}
+          />
+          <select
+            value={packagingFilter}
+            onChange={(e) => setPackagingFilter(e.target.value)}
+            className={fieldClass}
+          >
+            <option value="ALL">All packaging</option>
+            {packagingOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {filteredProducts.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
+            <p className="font-display text-2xl font-bold text-[#121c19]">
+              {products.length === 0 ? 'No products yet' : 'No matching products'}
+            </p>
+            <p className="mt-2 text-[#2a3d36]/60 max-w-md mx-auto">
+              {products.length === 0
+                ? 'Add a BAR drink and choose packaging like Can or Plastic Bottle.'
+                : 'Try another search or packaging filter.'}
+            </p>
+            <div className="mt-6">
               <button
+                type="button"
                 onClick={() => setShowAddModal(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white py-4 px-8 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg text-lg"
+                className="bg-[#121c19] hover:bg-[#1a2924] text-white px-6 py-3 rounded-md text-sm font-semibold transition-colors"
               >
-                ➕ Add Your First Product
+                Add product
               </button>
             </div>
           </div>
         ) : (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 w-full overflow-hidden">
-            <div className="p-6 border-b border-slate-200 flex justify-between items-center">
-              <h3 className="text-xl font-bold text-slate-800">Product Catalog ({products.length})</h3>
-              <div className="text-sm text-slate-600">
-                Showing {((currentPage - 1) * itemsPerPage) + 1} to {Math.min(currentPage * itemsPerPage, products.length)} of {products.length}
-              </div>
+          <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+            <div className="px-6 py-4 border-b border-[#d4dcd8] flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h2 className="font-display text-lg font-bold text-[#121c19]">Product catalog</h2>
+              <p className="text-sm text-[#2a3d36]/55">
+                Showing {((currentPage - 1) * itemsPerPage) + 1}–
+                {Math.min(currentPage * itemsPerPage, filteredProducts.length)} of{' '}
+                {filteredProducts.length}
+              </p>
             </div>
-            <Table
-              columns={[
-                {
-                  key: 'image',
-                  header: 'Image',
-                  render: (product: any) => (
-                    <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center">
-                      {product.image_path ? (
-                        <ProductImage imagePath={product.image_path} alt={product.name} />
-                      ) : (
-                        <span className="text-2xl">
-                          {product.category === 'KITCHEN' ? '🍽️' : product.category === 'BAR' ? '🍺' : '🏨'}
-                        </span>
-                      )}
+
+            {/* Mobile cards */}
+            <div className="md:hidden divide-y divide-[#e8ecea]">
+              {pageProducts.map((product) => {
+                const fridge = Number(product.fridge_stock || 0)
+                return (
+                  <article key={product.id} className="p-4 space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="h-12 w-12 rounded-lg bg-[#f4f6f5] border border-[#d4dcd8] overflow-hidden flex items-center justify-center shrink-0">
+                        {product.image_path ? (
+                          <ProductImage imagePath={product.image_path} alt={product.name} />
+                        ) : (
+                          <span className="text-[10px] font-bold text-[#2a3d36]/40 tracking-wide">
+                            BAR
+                          </span>
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-[#121c19] leading-snug">{product.name}</p>
+                        <p className="text-xs text-[#2a3d36]/50 mt-0.5 line-clamp-2">
+                          {product.description || 'No description'}
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <span className="inline-flex px-2 py-0.5 rounded-md text-xs font-semibold bg-white text-[#121c19] border border-[#d4dcd8]">
+                            {product.packaging || 'No packaging'}
+                          </span>
+                          <span className="font-semibold text-[#121c19]">
+                            ₦{Number(product.price || 0).toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'name',
-                  header: 'Name',
-                  render: (product: any) => (
-                    <div className="text-sm font-semibold text-slate-900">{product.name}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'category',
-                  header: 'Category',
-                  render: (product: any) => (
-                    <span className="px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
-                      {product.category}
-                    </span>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'description',
-                  header: 'Description',
-                  render: (product: any) => (
-                    <div className="text-sm text-slate-600 max-w-xs truncate" title={product.description || ''}>
-                      {product.description || '-'}
+                    <div className="grid grid-cols-3 gap-2 rounded-lg bg-[#f4f6f5] border border-[#d4dcd8] p-3">
+                      <div className="text-center">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Fridge</p>
+                        <p className={`mt-0.5 font-semibold ${fridge < 5 ? 'text-rose-600' : 'text-[#121c19]'}`}>{fridge}</p>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Show</p>
+                        <p className="mt-0.5 font-semibold text-[#121c19]">{Number(product.show_stock || 0)}</p>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Store</p>
+                        <p className="mt-0.5 font-semibold text-[#121c19]">{Number(product.store_stock || 0)}</p>
+                      </div>
                     </div>
-                  )
-                },
-                {
-                  key: 'price',
-                  header: 'Price',
-                  render: (product: any) => (
-                    <div className="text-sm font-bold text-green-600">₦{product.price?.toFixed(2) || '0.00'}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'cost_price',
-                  header: 'Cost Price',
-                  render: (product: any) => (
-                    <div className="text-sm text-slate-600">₦{product.cost_price?.toFixed(2) || '0.00'}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'fridge_stock',
-                  header: 'Fridge Stock',
-                  align: 'center',
-                  render: (product: any) => (
-                    <div className={`text-sm font-semibold ${(product.fridge_stock || 0) < 5 ? 'text-red-600' : 'text-slate-900'}`}>
-                      {product.fridge_stock || 0}
-                    </div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'show_stock',
-                  header: 'Show Stock',
-                  align: 'center',
-                  render: (product: any) => (
-                    <div className="text-sm font-semibold text-slate-900">{product.show_stock || 0}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'store_stock',
-                  header: 'Store Stock',
-                  align: 'center',
-                  render: (product: any) => (
-                    <div className="text-sm font-semibold text-slate-900">{product.store_stock || 0}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'min_stock_level',
-                  header: 'Min Stock',
-                  render: (product: any) => (
-                    <div className="text-sm text-slate-600">{product.min_stock_level || 0}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                },
-                {
-                  key: 'barcode',
-                  header: 'Barcode',
-                  render: (product: any) => (
-                    <div className="text-sm text-slate-500 font-mono">{product.barcode || '-'}</div>
-                  ),
-                  className: 'whitespace-nowrap'
-                }
-              ]}
-              data={products.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)}
-              rowKey={(product) => product.id}
-              emptyMessage="No products found"
-            />
-            {/* Pagination */}
-            {products.length > itemsPerPage && (
-              <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between">
-                <div className="flex-1 flex justify-between sm:hidden">
-                  <button
-                    onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                    disabled={currentPage === 1}
-                    className="relative inline-flex items-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-md text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Previous
-                  </button>
-                  <button
-                    onClick={() => setCurrentPage(prev => Math.min(Math.ceil(products.length / itemsPerPage), prev + 1))}
-                    disabled={currentPage === Math.ceil(products.length / itemsPerPage)}
-                    className="ml-3 relative inline-flex items-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-md text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Next
-                  </button>
-                </div>
-                <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-                  <div>
-                    <p className="text-sm text-slate-700">
-                      Showing <span className="font-medium">{((currentPage - 1) * itemsPerPage) + 1}</span> to{' '}
-                      <span className="font-medium">{Math.min(currentPage * itemsPerPage, products.length)}</span> of{' '}
-                      <span className="font-medium">{products.length}</span> results
-                    </p>
-                  </div>
-                  <div>
-                    <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                      <button
-                        onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                        disabled={currentPage === 1}
-                        className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-slate-300 bg-white text-sm font-medium text-slate-500 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <span className="sr-only">Previous</span>
-                        ‹
-                      </button>
-                      {Array.from({ length: Math.ceil(products.length / itemsPerPage) }, (_, i) => i + 1)
-                        .filter(page => {
-                          // Show first page, last page, current page, and pages around current
-                          return page === 1 || 
-                                 page === Math.ceil(products.length / itemsPerPage) ||
-                                 (page >= currentPage - 1 && page <= currentPage + 1)
-                        })
-                        .map((page, idx, arr) => {
-                          // Add ellipsis if there's a gap
-                          const showEllipsisBefore = idx > 0 && arr[idx - 1] !== page - 1
-                          return (
-                            <React.Fragment key={page}>
-                              {showEllipsisBefore && (
-                                <span className="relative inline-flex items-center px-4 py-2 border border-slate-300 bg-white text-sm font-medium text-slate-700">
-                                  ...
+                    <button
+                      type="button"
+                      onClick={() => setEditingProduct(product)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-md text-sm font-semibold text-[#c4783a] bg-[#c4783a]/10 border border-[#c4783a]/20"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                      </svg>
+                      Edit product
+                    </button>
+                  </article>
+                )
+              })}
+            </div>
+
+            {/* Desktop table */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="min-w-full text-left">
+                <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
+                  <tr>
+                    <th className="px-5 py-3 font-semibold">Product</th>
+                    <th className="px-5 py-3 font-semibold">Packaging</th>
+                    <th className="px-5 py-3 font-semibold">Price</th>
+                    <th className="px-5 py-3 font-semibold text-center">Fridge</th>
+                    <th className="px-5 py-3 font-semibold text-center">Show</th>
+                    <th className="px-5 py-3 font-semibold text-center">Store</th>
+                    <th className="px-5 py-3 font-semibold text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#e8ecea]">
+                  {pageProducts.map((product) => {
+                    const fridge = Number(product.fridge_stock || 0)
+                    return (
+                      <tr key={product.id} className="hover:bg-[#f4f6f5]/70 transition-colors">
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-3 min-w-[180px]">
+                            <div className="h-11 w-11 rounded-lg bg-[#f4f6f5] border border-[#d4dcd8] overflow-hidden flex items-center justify-center shrink-0">
+                              {product.image_path ? (
+                                <ProductImage imagePath={product.image_path} alt={product.name} />
+                              ) : (
+                                <span className="text-[10px] font-bold text-[#2a3d36]/40 tracking-wide">
+                                  BAR
                                 </span>
                               )}
-                              <button
-                                onClick={() => setCurrentPage(page)}
-                                className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
-                                  currentPage === page
-                                    ? 'z-10 bg-blue-50 border-blue-500 text-blue-600'
-                                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                                }`}
-                              >
-                                {page}
-                              </button>
-                            </React.Fragment>
-                          )
-                        })}
-                      <button
-                        onClick={() => setCurrentPage(prev => Math.min(Math.ceil(products.length / itemsPerPage), prev + 1))}
-                        disabled={currentPage === Math.ceil(products.length / itemsPerPage)}
-                        className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-slate-300 bg-white text-sm font-medium text-slate-500 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <span className="sr-only">Next</span>
-                        ›
-                      </button>
-                    </nav>
-                  </div>
-                </div>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-[#121c19] truncate">{product.name}</p>
+                              <p className="text-xs text-[#2a3d36]/50 truncate max-w-[220px]">
+                                {product.description || 'No description'}
+                              </p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-5 py-4">
+                          <span className="inline-flex px-2.5 py-1 rounded-md text-xs font-semibold bg-white text-[#121c19] border border-[#d4dcd8]">
+                            {product.packaging || '—'}
+                          </span>
+                        </td>
+                        <td className="px-5 py-4 font-semibold text-[#121c19] whitespace-nowrap">
+                          ₦{Number(product.price || 0).toFixed(2)}
+                        </td>
+                        <td className={`px-5 py-4 text-center font-semibold ${fridge < 5 ? 'text-rose-600' : 'text-[#121c19]'}`}>
+                          {fridge}
+                        </td>
+                        <td className="px-5 py-4 text-center font-semibold text-[#121c19]">
+                          {Number(product.show_stock || 0)}
+                        </td>
+                        <td className="px-5 py-4 text-center font-semibold text-[#121c19]">
+                          {Number(product.store_stock || 0)}
+                        </td>
+                        <td className="px-5 py-4 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setEditingProduct(product)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold text-[#c4783a] hover:bg-[#c4783a]/10 border border-transparent hover:border-[#c4783a]/25 transition-colors"
+                            title="Edit product"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                              <path d="M12 20h9" />
+                              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                            </svg>
+                            Edit
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {filteredProducts.length > itemsPerPage && (
+              <div className="px-6 py-4 border-t border-[#d4dcd8] flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage === 1}
+                  className="px-4 py-2 rounded-md border border-[#d4dcd8] text-sm font-semibold text-[#121c19] disabled:opacity-40 hover:bg-[#f4f6f5]"
+                >
+                  Previous
+                </button>
+                <p className="text-sm text-[#2a3d36]/60">
+                  Page {currentPage} of {totalPages}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-4 py-2 rounded-md border border-[#d4dcd8] text-sm font-semibold text-[#121c19] disabled:opacity-40 hover:bg-[#f4f6f5]"
+                >
+                  Next
+                </button>
               </div>
             )}
           </div>
         )}
 
-        {/* Add Product Modal */}
         {showAddModal && (
-          <AddProductModal
+          <ProductFormModal
+            mode="add"
             onClose={() => setShowAddModal(false)}
             onSave={addProduct}
-        businessId={businessId}
-            businessModules={businessModules}
+            businessId={businessId}
+            packagingTypes={packagingOptions}
+            onManagePackaging={() => {
+              setShowAddModal(false)
+              setShowPackagingModal(true)
+            }}
           />
         )}
 
-        {/* Import Products Modal */}
-        {showImportModal && (
-          <ImportProductsModal
-            onClose={() => setShowImportModal(false)}
-            onImportComplete={async () => {
-              setShowImportModal(false)
-              // Small delay to ensure database commits
-              await new Promise(resolve => setTimeout(resolve, 300))
-              await loadProducts()
-            }}
+        {editingProduct && (
+          <ProductFormModal
+            mode="edit"
+            product={editingProduct}
+            onClose={() => setEditingProduct(null)}
+            onSave={saveProductEdit}
             businessId={businessId}
+            packagingTypes={packagingOptions}
+            onManagePackaging={() => {
+              setEditingProduct(null)
+              setShowPackagingModal(true)
+            }}
+          />
+        )}
+
+        {showPackagingModal && (
+          <PackagingTypesModal
+            businessId={businessId}
+            packagingTypes={packagingTypes}
+            onClose={() => setShowPackagingModal(false)}
+            onChanged={async () => {
+              await loadPackagingTypes()
+            }}
           />
         )}
       </div>
@@ -3266,362 +3785,473 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
   )
 }
 
-function AddProductModal({ onClose, onSave, businessModules, businessId }: {
+function PackagingTypesModal({
+  businessId,
+  packagingTypes,
+  onClose,
+  onChanged,
+}: {
+  businessId: number
+  packagingTypes: { id: number; name: string }[]
+  onClose: () => void
+  onChanged: () => Promise<void> | void
+}) {
+  const [name, setName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const suggestions = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = name.trim()
+    if (!trimmed) return
+    setSaving(true)
+    try {
+      await invoke('create_product_category', {
+        request: { business_id: businessId, name: trimmed },
+      })
+      setName('')
+      toast.success(`Packaging "${trimmed}" created`)
+      await onChanged()
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to create packaging type')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async (item: { id: number; name: string }) => {
+    try {
+      await invoke('delete_product_category', {
+        id: item.id,
+        business_id: businessId,
+        name: item.name,
+      })
+      toast.success(`Removed "${item.name}"`)
+      await onChanged()
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to delete packaging type')
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b1210]/55">
+      <div className="w-full max-w-lg bg-white rounded-xl border border-[#d4dcd8] shadow-xl overflow-hidden">
+        <div className="px-6 py-5 border-b border-[#d4dcd8] flex items-start justify-between gap-4">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a]">
+              Catalog
+            </p>
+            <h2 className="font-display text-2xl font-bold text-[#121c19] mt-1">Packaging types</h2>
+            <p className="text-sm text-[#2a3d36]/60 mt-1">
+              Packaging for BAR drinks — Can, Plastic Bottle, Bottle, Glass.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[#2a3d36]/45 hover:text-[#121c19] text-2xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        <form onSubmit={handleCreate} className="px-6 py-5 border-b border-[#d4dcd8] space-y-3">
+          <label className="block text-sm font-semibold text-[#121c19]">New packaging type</label>
+          <div className="flex gap-2">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Plastic Bottle"
+              className="flex-1 px-4 py-3 border border-[#d4dcd8] rounded-md focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20"
+            />
+            <button
+              type="submit"
+              disabled={saving || !name.trim()}
+              className="bg-[#121c19] hover:bg-[#1a2924] disabled:opacity-40 text-white px-5 py-3 rounded-md text-sm font-semibold"
+            >
+              {saving ? 'Saving…' : 'Add'}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {suggestions.map((suggestion) => (
+              <button
+                key={suggestion}
+                type="button"
+                onClick={() => setName(suggestion)}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#d4dcd8] text-[#121c19] hover:bg-[#f4f6f5]"
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        </form>
+
+        <div className="px-6 py-5 max-h-72 overflow-y-auto">
+          {packagingTypes.length === 0 ? (
+            <p className="text-sm text-[#2a3d36]/55 text-center py-8">
+              No packaging types yet. Add Can, Plastic Bottle, Bottle, or Glass.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {packagingTypes.map((item) => (
+                <li
+                  key={`${item.id}-${item.name}`}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-[#d4dcd8] px-4 py-3"
+                >
+                  <span className="font-semibold text-[#121c19]">{item.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleDelete(item)}
+                    className="text-sm font-semibold text-rose-600 hover:text-rose-700"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-[#d4dcd8] bg-[#f4f6f5]/60">
+          <p className="text-xs text-[#2a3d36]/55">
+            Products are BAR only. Packaging types (Can, Plastic Bottle, Bottle) are managed here.
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="mt-3 w-full bg-[#121c19] hover:bg-[#1a2924] text-white py-2.5 rounded-md text-sm font-semibold"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ProductFormModal({
+  mode,
+  product,
+  onClose,
+  onSave,
+  businessId,
+  packagingTypes,
+  onManagePackaging,
+}: {
+  mode: 'add' | 'edit'
+  product?: any
   onClose: () => void
   onSave: (product: any) => void
-  businessModules: string[]
   businessId: number
+  packagingTypes: string[]
+  onManagePackaging: () => void
 }) {
   const [formData, setFormData] = useState({
-    name: '',
-    description: '',
+    name: product?.name || '',
+    description: product?.description || '',
     category: 'BAR',
-    price: '',
-    costPrice: '',
-    stockQuantity: '',
-    minStockLevel: '',
-    fridgeStock: '',
-    showStock: '',
-    storeStock: '',
-    barcode: '',
-    serialNumber: '',
-    imagePath: ''
+    packaging: product?.packaging || packagingTypes[0] || '',
+    price: product?.price != null ? String(product.price) : '',
+    costPrice: product?.cost_price != null ? String(product.cost_price) : '',
+    minStockLevel: product?.min_stock_level != null ? String(product.min_stock_level) : '5',
+    fridgeStock: product?.fridge_stock != null ? String(product.fridge_stock) : '',
+    showStock: product?.show_stock != null ? String(product.show_stock) : '',
+    storeStock: product?.store_stock != null ? String(product.store_stock) : '',
+    imagePath: product?.image_path || '',
   })
-  const [imagePreview, setImagePreview] = useState<string | null>(null)
+  const [imagePreview, setImagePreview] = useState<string | null>(product?.image_path || null)
+  const [saving, setSaving] = useState(false)
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (!formData.packaging && packagingTypes.length > 0) {
+      setFormData((prev) => ({ ...prev, packaging: packagingTypes[0] }))
+    }
+  }, [packagingTypes])
+
+  const fieldClass =
+    'w-full px-4 py-3 text-base bg-white border border-[#d4dcd8] rounded-md text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20 transition-colors'
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    onSave({
-      ...formData,
-      price: parseFloat(formData.price),
-      costPrice: parseFloat(formData.costPrice),
-      stockQuantity: parseInt(formData.stockQuantity) || 0,
-      minStockLevel: parseInt(formData.minStockLevel) || 0,
-      fridgeStock: parseInt(formData.fridgeStock) || 0,
-      showStock: parseInt(formData.showStock) || 0,
-      storeStock: parseInt(formData.storeStock) || 0,
-      business_id: businessId,
-      image_path: formData.imagePath
-    })
+    setSaving(true)
+    try {
+      await onSave({
+        ...formData,
+        id: product?.id,
+        category: 'BAR',
+        packaging: formData.packaging || null,
+        price: parseFloat(formData.price),
+        costPrice: parseFloat(formData.costPrice),
+        minStockLevel: parseInt(formData.minStockLevel) || 0,
+        fridgeStock: parseInt(formData.fridgeStock) || 0,
+        showStock: parseInt(formData.showStock) || 0,
+        storeStock: parseInt(formData.storeStock) || 0,
+        business_id: businessId,
+        image_path: formData.imagePath,
+      })
+    } finally {
+      setSaving(false)
+    }
   }
 
   const updateFormData = (field: string, value: any) => {
-    setFormData(prev => ({ ...prev, [field]: value }))
+    setFormData((prev) => ({ ...prev, [field]: value }))
   }
 
   const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-
-    // Validate file type
     if (!file.type.startsWith('image/')) {
       toast.error('Please select an image file')
       return
     }
-
-    // Validate file size (max 5MB)
     if (file.size > 5 * 1024 * 1024) {
       toast.error('Image size must be less than 5MB')
       return
     }
 
     try {
-      // Create preview
       const reader = new FileReader()
-      reader.onload = (e) => {
-        setImagePreview(e.target?.result as string)
-      }
+      reader.onload = (ev) => setImagePreview(ev.target?.result as string)
       reader.readAsDataURL(file)
 
-      // Convert to base64 and store
       const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => {
-          const result = reader.result as string
-          resolve(result)
-        }
-        reader.onerror = reject
-        reader.readAsDataURL(file)
+        const r = new FileReader()
+        r.onload = () => resolve(r.result as string)
+        r.onerror = reject
+        r.readAsDataURL(file)
       })
 
-      // Save image using Tauri command
       const imagePath = await invoke('save_product_image', {
         imageData: base64,
         productName: formData.name || 'product',
-        businessId: businessId
+        businessId: businessId,
       }) as string
 
-      setFormData(prev => ({ ...prev, imagePath }))
+      setFormData((prev) => ({ ...prev, imagePath }))
       toast.success('Image uploaded successfully')
-    } catch (error) {
-      console.error('Failed to upload image:', error)
-      toast.error('Failed to upload image')
+    } catch {
+      setFormData((prev) => ({ ...prev, imagePath: imagePreview || '' }))
+      toast.error('Image save is limited in web mode; product can still be saved without it')
     }
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex justify-between items-center">
-            <h2 className="text-2xl font-bold text-slate-800">Add New Product</h2>
-            <button
-              onClick={onClose}
-              className="text-slate-400 hover:text-slate-600 text-2xl"
-            >
-              ×
-            </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b1210]/55">
+      <div className="w-full max-w-3xl bg-white rounded-xl border border-[#d4dcd8] shadow-xl max-h-[92vh] overflow-hidden flex flex-col">
+        <div className="px-6 py-5 border-b border-[#d4dcd8] flex items-start justify-between gap-4">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a]">
+              Catalog
+            </p>
+            <h2 className="font-display text-2xl font-bold text-[#121c19] mt-1">
+              {mode === 'edit' ? 'Edit product' : 'Add product'}
+            </h2>
+            <p className="text-sm text-[#2a3d36]/60 mt-1">
+              Category is fixed to BAR. Choose packaging like Can, Plastic Bottle, or Bottle.
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[#2a3d36]/45 hover:text-[#121c19] text-2xl leading-none"
+          >
+            ×
+          </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Product Name *
-              </label>
-              <input
-                type="text"
-                required
-                value={formData.name}
-                onChange={(e) => updateFormData('name', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter product name"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Description
-              </label>
-              <textarea
-                value={formData.description}
-                onChange={(e) => updateFormData('description', e.target.value)}
-                rows={3}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Product description (optional)"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Category *
-              </label>
-              <select
-                value={formData.category}
-                onChange={(e) => updateFormData('category', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                {businessModules.map(module => {
-                  const moduleConfigs: Record<string, { icon: string; label: string }> = {
-                    BAR: { icon: '🍸', label: 'BAR - Drinks & Cocktails' },
-                    KITCHEN: { icon: '👨‍🍳', label: 'KITCHEN - Food Items' },
-                    ROOM: { icon: '🏨', label: 'ROOM - Amenities & Services' }
-                  }
-
-                  const moduleConfig = moduleConfigs[module]
-
-                  return moduleConfig ? (
-                    <option key={module} value={module}>
-                      {moduleConfig.icon} {moduleConfig.label}
-                    </option>
-                  ) : null
-                })}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Selling Price (₦) *
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                required
-                value={formData.price}
-                onChange={(e) => updateFormData('price', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="0.00"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Cost Price (₦) *
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                required
-                value={formData.costPrice}
-                onChange={(e) => updateFormData('costPrice', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="0.00"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Fridge Stock (for POS) *
-              </label>
-              <input
-                type="number"
-                required
-                value={formData.fridgeStock}
-                onChange={(e) => updateFormData('fridgeStock', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="0"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Show Stock (for display)
-              </label>
-              <input
-                type="number"
-                value={formData.showStock}
-                onChange={(e) => updateFormData('showStock', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="0"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Store Stock (warehouse)
-              </label>
-              <input
-                type="number"
-                value={formData.storeStock}
-                onChange={(e) => updateFormData('storeStock', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="0"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Min Stock Level
-              </label>
-              <input
-                type="number"
-                value={formData.minStockLevel}
-                onChange={(e) => updateFormData('minStockLevel', e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="5"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Barcode (Optional)
-              </label>
-              <div className="flex gap-2">
+        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+              Basics
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Product name *</label>
                 <input
                   type="text"
-                  value={formData.barcode}
-                  onChange={(e) => updateFormData('barcode', e.target.value)}
-                  className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Scan or enter barcode"
-                  id="barcode-input"
+                  required
+                  value={formData.name}
+                  onChange={(e) => updateFormData('name', e.target.value)}
+                  className={fieldClass}
+                  placeholder="e.g. Maltina"
                 />
-                <button
-                  type="button"
-                  onClick={() => {
-                    // Focus on barcode input and trigger scan mode
-                    const input = document.getElementById('barcode-input') as HTMLInputElement
-                    if (input) {
-                      input.focus()
-                      input.select()
-                    }
-                    toast('Ready to scan! Use your barcode scanner or type the code.', { duration: 3000 })
-                  }}
-                  className="px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
-                >
-                  📷 Scan
-                </button>
               </div>
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Serial Number (Optional)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={formData.serialNumber}
-                  onChange={(e) => updateFormData('serialNumber', e.target.value)}
-                  className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Scan or enter serial number"
-                  id="serial-input"
+              <div className="md:col-span-2">
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Description</label>
+                <textarea
+                  value={formData.description}
+                  onChange={(e) => updateFormData('description', e.target.value)}
+                  rows={3}
+                  className={fieldClass}
+                  placeholder="Optional details"
                 />
-                <button
-                  type="button"
-                  onClick={() => {
-                    // Focus on serial input and trigger scan mode
-                    const input = document.getElementById('serial-input') as HTMLInputElement
-                    if (input) {
-                      input.focus()
-                      input.select()
-                    }
-                    toast('Ready to scan! Use your barcode scanner or type the code.', { duration: 3000 })
-                  }}
-                  className="px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
-                >
-                  📷 Scan
-                </button>
               </div>
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Product Image (Optional)
-              </label>
-              <div className="space-y-3">
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleImageSelect}
-                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-                {imagePreview && (
-                  <div className="mt-3">
-                    <img
-                      src={imagePreview}
-                      alt="Product preview"
-                      className="w-32 h-32 object-cover rounded-lg border border-slate-300"
-                    />
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Category</label>
+                <div className="px-4 py-3 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] font-semibold text-[#121c19]">
+                  BAR
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <label className="block text-sm font-semibold text-[#121c19]">Packaging</label>
+                  <button
+                    type="button"
+                    onClick={onManagePackaging}
+                    className="text-sm font-semibold text-[#c4783a] hover:text-[#a35f2a]"
+                  >
+                    Manage
+                  </button>
+                </div>
+                {packagingTypes.length === 0 ? (
+                  <div className="rounded-md border border-dashed border-[#d4dcd8] bg-[#f4f6f5] px-4 py-4">
+                    <p className="text-sm text-[#2a3d36]/70 mb-3">
+                      Add Can, Plastic Bottle, or Bottle for BAR drinks.
+                    </p>
                     <button
                       type="button"
-                      onClick={() => {
-                        setImagePreview(null)
-                        setFormData(prev => ({ ...prev, imagePath: '' }))
-                      }}
-                      className="mt-2 text-sm text-red-600 hover:text-red-700"
+                      onClick={onManagePackaging}
+                      className="bg-[#121c19] text-white px-4 py-2 rounded-md text-sm font-semibold"
                     >
-                      Remove Image
+                      Add packaging
                     </button>
                   </div>
+                ) : (
+                  <select
+                    value={formData.packaging}
+                    onChange={(e) => updateFormData('packaging', e.target.value)}
+                    className={fieldClass}
+                  >
+                    <option value="">None</option>
+                    {packagingTypes.map((packaging) => (
+                      <option key={packaging} value={packaging}>
+                        {packaging}
+                      </option>
+                    ))}
+                  </select>
                 )}
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="flex space-x-4 pt-6 border-t border-slate-200">
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+              Pricing
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Selling price (₦) *</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  required
+                  value={formData.price}
+                  onChange={(e) => updateFormData('price', e.target.value)}
+                  className={fieldClass}
+                  placeholder="0.00"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Cost price (₦) *</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  required
+                  value={formData.costPrice}
+                  onChange={(e) => updateFormData('costPrice', e.target.value)}
+                  className={fieldClass}
+                  placeholder="0.00"
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+              Stock
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Fridge stock *</label>
+                <input
+                  type="number"
+                  required
+                  value={formData.fridgeStock}
+                  onChange={(e) => updateFormData('fridgeStock', e.target.value)}
+                  className={fieldClass}
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Show stock</label>
+                <input
+                  type="number"
+                  value={formData.showStock}
+                  onChange={(e) => updateFormData('showStock', e.target.value)}
+                  className={fieldClass}
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Store stock</label>
+                <input
+                  type="number"
+                  value={formData.storeStock}
+                  onChange={(e) => updateFormData('storeStock', e.target.value)}
+                  className={fieldClass}
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Min stock level</label>
+                <input
+                  type="number"
+                  value={formData.minStockLevel}
+                  onChange={(e) => updateFormData('minStockLevel', e.target.value)}
+                  className={fieldClass}
+                  placeholder="5"
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+              Media
+            </h3>
+            <div>
+              <label className="block text-sm font-semibold text-[#121c19] mb-2">Product image</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleImageSelect}
+                className={fieldClass}
+              />
+              {imagePreview && (
+                <img
+                  src={imagePreview}
+                  alt="Product preview"
+                  className="mt-3 w-28 h-28 object-cover rounded-md border border-[#d4dcd8]"
+                />
+              )}
+            </div>
+          </section>
+
+          <div className="sticky bottom-0 -mx-6 px-6 py-4 border-t border-[#d4dcd8] bg-white flex gap-3">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 py-3 px-4 rounded-lg font-medium transition-colors"
+              className="flex-1 border border-[#d4dcd8] hover:bg-[#f4f6f5] text-[#121c19] py-3 rounded-md font-semibold"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium transition-colors"
+              disabled={saving}
+              className="flex-1 bg-[#121c19] hover:bg-[#1a2924] disabled:opacity-40 text-white py-3 rounded-md font-semibold"
             >
-              Add Product
+              {saving ? 'Saving…' : mode === 'edit' ? 'Save changes' : 'Save product'}
             </button>
           </div>
         </form>
@@ -3917,6 +4547,8 @@ function KitchenOrderQueue({ currentUser, businessInfo }: { currentUser: any, bu
 function BusinessInventory({ currentUser }: { currentUser: any }) {
   const [products, setProducts] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [packagingFilter, setPackagingFilter] = useState('ALL')
   const [editingProduct, setEditingProduct] = useState<any>(null)
   const [transferModal, setTransferModal] = useState<any>(null)
   const isAdmin = currentUser?.role === 'SuperAdmin'
@@ -3924,7 +4556,7 @@ function BusinessInventory({ currentUser }: { currentUser: any }) {
   const canEditStore = isAdmin || isSecretary
 
   useEffect(() => {
-    loadProducts()
+    void loadProducts()
   }, [])
 
   const loadProducts = async () => {
@@ -3933,10 +4565,9 @@ function BusinessInventory({ currentUser }: { currentUser: any }) {
       const businessId = currentUser?.business_id
       if (businessId) {
         const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
-        setProducts(businessProducts)
+        setProducts(Array.isArray(businessProducts) ? businessProducts : [])
       }
-    } catch (error) {
-      console.error('Failed to load products:', error)
+    } catch {
       toast.error('Failed to load products')
     } finally {
       setLoading(false)
@@ -3950,13 +4581,12 @@ function BusinessInventory({ currentUser }: { currentUser: any }) {
         stockType: 'store',
         quantityChange: newStock,
         userId: currentUser?.id || 1,
-        reason: 'Store stock update'
+        reason: 'Store stock update',
       })
-      toast.success('Store stock updated successfully')
+      toast.success('Store stock updated')
       await loadProducts()
       setEditingProduct(null)
-    } catch (error) {
-      console.error('Failed to update store stock:', error)
+    } catch {
       toast.error('Failed to update store stock')
     }
   }
@@ -3968,187 +4598,313 @@ function BusinessInventory({ currentUser }: { currentUser: any }) {
         from,
         to,
         quantity,
-        userId: currentUser?.id || 1
+        userId: currentUser?.id || 1,
       })
-      toast.success(`Stock transferred from ${from} to ${to} successfully`)
+      toast.success(`Transferred from ${from} to ${to}`)
       await loadProducts()
       setTransferModal(null)
     } catch (error) {
-      console.error('Failed to transfer stock:', error)
       toast.error(`Failed to transfer stock: ${error}`)
     }
   }
 
+  const barProducts = React.useMemo(
+    () => products.filter((p) => String(p.category || '').toUpperCase() === 'BAR'),
+    [products]
+  )
+
+  const packagingOptions = Array.from(
+    new Set(barProducts.map((p) => String(p.packaging || '').trim()).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b))
+
+  const filtered = React.useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return barProducts.filter((product) => {
+      const matchesPackaging =
+        packagingFilter === 'ALL' ||
+        String(product.packaging || '').toLowerCase() === packagingFilter.toLowerCase()
+      const haystack = [product.name, product.packaging].filter(Boolean).join(' ').toLowerCase()
+      return matchesPackaging && (!q || haystack.includes(q))
+    })
+  }, [barProducts, searchQuery, packagingFilter])
+
+  const lowFridge = barProducts.filter((p) => Number(p.fridge_stock || 0) < 5).length
+  const totalFridge = barProducts.reduce((s, p) => s + Number(p.fridge_stock || 0), 0)
+  const totalStore = barProducts.reduce((s, p) => s + Number(p.store_stock || 0), 0)
+
+  const fieldClass =
+    'w-full px-4 py-3 text-base bg-white border border-[#d4dcd8] rounded-md text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20 transition-colors'
+
   if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-          <p className="text-slate-600">Loading inventory...</p>
-        </div>
-      </div>
-    )
+    return <PageLoader label="Loading inventory…" />
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <div className="mb-6">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">Inventory Management</h1>
-          <p className="text-slate-600 text-lg">Manage fridge stock, show stock, and store stock</p>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-8">
+          <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+            Stock
+          </p>
+          <h1 className="font-display text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+            Inventory tracking
+          </h1>
+          <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+            Track fridge, show, and store levels for BAR products. Move stock from store when needed.
+          </p>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <MetricCard title="Fridge units" value={String(totalFridge)} accent="ink" />
+          <MetricCard title="Store units" value={String(totalStore)} accent="copper" />
+          <MetricCard title="Low fridge" value={String(lowFridge)} accent="rose" />
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-6 border-b border-slate-200">
-            <h2 className="text-xl font-bold text-slate-800">Stock Overview</h2>
-            <p className="text-sm text-slate-600 mt-1">Fridge stock is used for POS, show stock for display, store stock for warehouse</p>
+        <div className="mb-6 grid grid-cols-1 lg:grid-cols-[1fr_220px] gap-3">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search BAR products…"
+            className={fieldClass}
+          />
+          <select
+            value={packagingFilter}
+            onChange={(e) => setPackagingFilter(e.target.value)}
+            className={fieldClass}
+          >
+            <option value="ALL">All packaging</option>
+            {packagingOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+          <div className="px-6 py-4 border-b border-[#d4dcd8]">
+            <h2 className="font-display text-lg font-bold text-[#121c19]">Stock overview</h2>
+            <p className="text-sm text-[#2a3d36]/55 mt-1">
+              Fridge for POS · Show for display · Store for warehouse
+            </p>
           </div>
 
-          <Table
-            columns={[
-              {
-                key: 'product',
-                header: 'Product',
-                render: (product: any) => {
-                  const fridgeStock = product.fridge_stock || 0
-                  const isLowFridgeStock = fridgeStock < 5
+          {filtered.length === 0 ? (
+            <div className="px-6 py-16 text-center text-[#2a3d36]/60">No BAR products found</div>
+          ) : (
+            <>
+              {/* Mobile cards */}
+              <div className="md:hidden divide-y divide-[#e8ecea]">
+                {filtered.map((product) => {
+                  const fridge = Number(product.fridge_stock || 0)
+                  const show = Number(product.show_stock || 0)
+                  const store = Number(product.store_stock || 0)
+                  const low = fridge < 5
                   return (
-                    <>
-                      <div className="font-semibold text-slate-800">{product.name}</div>
-                      <div className="text-xs text-slate-500">{product.category}</div>
-                      {isLowFridgeStock && (
-                        <span className="inline-block mt-1 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full font-bold">
-                          Low Fridge Stock
-                        </span>
-                      )}
-                    </>
-                  )
-                }
-              },
-              {
-                key: 'fridge_stock',
-                header: 'Fridge Stock',
-                align: 'center',
-                render: (product: any) => {
-                  const fridgeStock = product.fridge_stock || 0
-                  const isLowFridgeStock = fridgeStock < 5
-                  return (
-                    <div className={`font-bold ${isLowFridgeStock ? 'text-red-600' : 'text-slate-700'}`}>
-                      {fridgeStock}
-                    </div>
-                  )
-                }
-              },
-              {
-                key: 'show_stock',
-                header: 'Show Stock',
-                align: 'center',
-                render: (product: any) => (
-                  <div className="font-bold text-slate-700">{product.show_stock || 0}</div>
-                )
-              },
-              {
-                key: 'store_stock',
-                header: 'Store Stock',
-                align: 'center',
-                render: (product: any) => {
-                  const storeStock = product.store_stock || 0
-                  if (editingProduct?.id === product.id) {
-                    return (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          defaultValue={storeStock}
-                          onBlur={(e) => {
-                            const newStock = parseInt(e.target.value) || 0
-                            const change = newStock - storeStock
-                            if (change !== 0) {
-                              handleUpdateStoreStock(product.id, change)
-                            } else {
-                              setEditingProduct(null)
-                            }
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              const newStock = parseInt((e.target as HTMLInputElement).value) || 0
-                              const change = newStock - storeStock
-                              if (change !== 0) {
-                                handleUpdateStoreStock(product.id, change)
-                              } else {
-                                setEditingProduct(null)
-                              }
-                            } else if (e.key === 'Escape') {
-                              setEditingProduct(null)
-                            }
-                          }}
-                          className="w-20 px-2 py-1 border border-slate-300 rounded text-center"
-                          autoFocus
-                          onClick={(e) => e.stopPropagation()}
-                        />
+                    <article
+                      key={product.id}
+                      className={`p-4 space-y-3 ${low ? 'bg-rose-50/60' : ''}`}
+                    >
+                      <div>
+                        <p className="font-semibold text-[#121c19]">{product.name}</p>
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-semibold text-[#2a3d36]/50">
+                            {product.packaging || 'No packaging'}
+                          </span>
+                          {low && (
+                            <span className="inline-flex px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide bg-rose-500 text-white">
+                              Low fridge
+                            </span>
+                          )}
+                        </div>
                       </div>
-                    )
-                  }
-                  return (
-                    <div className="flex items-center justify-center gap-2">
-                      <div className="font-bold text-slate-700">{storeStock}</div>
+                      <div className="grid grid-cols-3 gap-2 rounded-lg bg-white border border-[#d4dcd8] p-3">
+                        <div className="text-center">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Fridge</p>
+                          <p className={`mt-0.5 font-semibold ${low ? 'text-rose-600' : 'text-[#121c19]'}`}>{fridge}</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Show</p>
+                          <p className="mt-0.5 font-semibold text-[#121c19]">{show}</p>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Store</p>
+                          {editingProduct?.id === product.id ? (
+                            <input
+                              type="number"
+                              defaultValue={store}
+                              autoFocus
+                              className="w-16 mt-0.5 mx-auto block px-1 py-1 border border-[#d4dcd8] rounded-md text-center text-sm"
+                              onBlur={(e) => {
+                                const next = parseInt(e.target.value) || 0
+                                const change = next - store
+                                if (change !== 0) handleUpdateStoreStock(product.id, change)
+                                else setEditingProduct(null)
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const next = parseInt((e.target as HTMLInputElement).value) || 0
+                                  const change = next - store
+                                  if (change !== 0) handleUpdateStoreStock(product.id, change)
+                                  else setEditingProduct(null)
+                                } else if (e.key === 'Escape') {
+                                  setEditingProduct(null)
+                                }
+                              }}
+                            />
+                          ) : (
+                            <p className="mt-0.5 font-semibold text-[#121c19]">{store}</p>
+                          )}
+                        </div>
+                      </div>
                       {canEditStore && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setEditingProduct(product)
-                          }}
-                          className="text-blue-600 hover:text-blue-700 text-xs"
-                        >
-                          ✏️ Edit
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingProduct(product)}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-md text-sm font-semibold text-[#c4783a] bg-[#c4783a]/10 border border-[#c4783a]/20"
+                          >
+                            Edit store
+                          </button>
+                          {store > 0 && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => setTransferModal({ product, from: 'store', to: 'fridge' })}
+                                className="flex-1 px-3 py-2.5 rounded-md text-xs font-semibold bg-[#121c19] text-white"
+                              >
+                                To fridge
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setTransferModal({ product, from: 'store', to: 'show' })}
+                                className="flex-1 px-3 py-2.5 rounded-md text-xs font-semibold border border-[#121c19]/15 text-[#121c19]"
+                              >
+                                To show
+                              </button>
+                            </>
+                          )}
+                        </div>
                       )}
-                    </div>
+                    </article>
                   )
-                }
-              },
-              {
-                key: 'actions',
-                header: 'Actions',
-                align: 'center',
-                render: (product: any) => {
-                  const storeStock = product.store_stock || 0
-                  if (!canEditStore || storeStock <= 0) return null
-                  return (
-                    <div className="flex items-center justify-center gap-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setTransferModal({ product, from: 'store', to: 'fridge' })
-                        }}
-                        className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded font-medium"
-                      >
-                        ➡️ To Fridge
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setTransferModal({ product, from: 'store', to: 'show' })
-                        }}
-                        className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded font-medium"
-                      >
-                        ➡️ To Show
-                      </button>
-                    </div>
-                  )
-                }
-              }
-            ]}
-            data={products}
-            rowKey={(product) => product.id}
-            rowClassName={(product) => {
-              const fridgeStock = product.fridge_stock || 0
-              return fridgeStock < 5 ? 'bg-red-50' : ''
-            }}
-            emptyMessage="No products found"
-          />
+                })}
+              </div>
+
+              {/* Desktop table */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="min-w-full text-left">
+                  <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
+                    <tr>
+                      <th className="px-5 py-3 font-semibold">Product</th>
+                      <th className="px-5 py-3 font-semibold text-center">Fridge</th>
+                      <th className="px-5 py-3 font-semibold text-center">Show</th>
+                      <th className="px-5 py-3 font-semibold text-center">Store</th>
+                      <th className="px-5 py-3 font-semibold text-center">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#e8ecea]">
+                    {filtered.map((product) => {
+                      const fridge = Number(product.fridge_stock || 0)
+                      const show = Number(product.show_stock || 0)
+                      const store = Number(product.store_stock || 0)
+                      const low = fridge < 5
+                      return (
+                        <tr
+                          key={product.id}
+                          className={`hover:bg-[#f4f6f5]/70 transition-colors ${low ? 'bg-rose-50/60' : ''}`}
+                        >
+                          <td className="px-5 py-4">
+                            <p className="font-semibold text-[#121c19]">{product.name}</p>
+                            <div className="mt-1 flex flex-wrap items-center gap-2">
+                              <span className="text-xs font-semibold text-[#2a3d36]/50">
+                                {product.packaging || 'No packaging'}
+                              </span>
+                              {low && (
+                                <span className="inline-flex px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide bg-rose-500 text-white">
+                                  Low fridge
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className={`px-5 py-4 text-center font-semibold ${low ? 'text-rose-600' : 'text-[#121c19]'}`}>
+                            {fridge}
+                          </td>
+                          <td className="px-5 py-4 text-center font-semibold text-[#121c19]">{show}</td>
+                          <td className="px-5 py-4 text-center">
+                            {editingProduct?.id === product.id ? (
+                              <input
+                                type="number"
+                                defaultValue={store}
+                                autoFocus
+                                className="w-20 mx-auto block px-2 py-1.5 border border-[#d4dcd8] rounded-md text-center"
+                                onBlur={(e) => {
+                                  const next = parseInt(e.target.value) || 0
+                                  const change = next - store
+                                  if (change !== 0) handleUpdateStoreStock(product.id, change)
+                                  else setEditingProduct(null)
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    const next = parseInt((e.target as HTMLInputElement).value) || 0
+                                    const change = next - store
+                                    if (change !== 0) handleUpdateStoreStock(product.id, change)
+                                    else setEditingProduct(null)
+                                  } else if (e.key === 'Escape') {
+                                    setEditingProduct(null)
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <span className="font-semibold text-[#121c19]">{store}</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4">
+                            <div className="flex flex-wrap items-center justify-center gap-2">
+                              {canEditStore && (
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingProduct(product)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold text-[#c4783a] hover:bg-[#c4783a]/10 border border-[#c4783a]/20"
+                                >
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                                    <path d="M12 20h9" />
+                                    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                                  </svg>
+                                  Edit
+                                </button>
+                              )}
+                              {canEditStore && store > 0 && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => setTransferModal({ product, from: 'store', to: 'fridge' })}
+                                    className="px-3 py-1.5 rounded-md text-xs font-semibold bg-[#121c19] text-white hover:bg-[#1a2924]"
+                                  >
+                                    To fridge
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setTransferModal({ product, from: 'store', to: 'show' })}
+                                    className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#121c19]/15 text-[#121c19] hover:bg-[#f4f6f5]"
+                                  >
+                                    To show
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </div>
 
-        {/* Transfer Stock Modal */}
         {transferModal && (
           <TransferStockModal
             product={transferModal.product}
@@ -4223,1107 +4979,305 @@ function TransferStockModal({ product, from, to, onTransfer, onClose }: {
   )
 }
 
-function BusinessStaff() {
-  return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <h1 className="text-3xl font-bold text-slate-800 mb-2">Staff Management</h1>
-        <p className="text-slate-600 text-lg">Manage your team members and permissions</p>
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-12">
-          <div className="text-center">
-            <div className="text-6xl mb-4">👥</div>
-            <h2 className="text-2xl font-bold text-slate-800 mb-2">Team Management</h2>
-            <p className="text-slate-600">Staff management interface coming next</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function StaffPOSInterface({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
-  const [products, setProducts] = useState<any[]>([])
-  const [cart, setCart] = useState<any[]>([])
+function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, businessInfo?: any }) {
+  const [staff, setStaff] = useState<any[]>([])
+  const [staffCount, setStaffCount] = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [processingPayment, setProcessingPayment] = useState(false)
-  const [showPaymentModal, setShowPaymentModal] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [saleLocation, setSaleLocation] = useState<'fridge' | 'show'>('fridge')
-  const [scanInput, setScanInput] = useState('')
-  const [isScanning, setIsScanning] = useState(false)
-  const scanInputRef = useRef<HTMLInputElement>(null)
-
-  // Get business ID from user or business info
+  const [showAddStaff, setShowAddStaff] = useState(false)
   const businessId = currentUser?.business_id || businessInfo?.id
-
-  // Extract business modules to determine available categories
-  const businessModules = React.useMemo(() => {
-    if (businessInfo && businessInfo.modules_enabled) {
-      try {
-        const modules = JSON.parse(businessInfo.modules_enabled)
-        return modules
-      } catch (error) {
-        console.error('Failed to parse business modules:', error)
-        return ['BAR', 'KITCHEN']
-      }
-    }
-    return ['BAR', 'KITCHEN'] // Default fallback
-  }, [businessInfo])
-
-  // Set default category to ALL initially to show all products
-  const [selectedCategory, setSelectedCategory] = useState<string>('ALL')
+  const canManage =
+    currentUser?.role === 'SuperAdmin' || currentUser?.role === 'Manager'
 
   useEffect(() => {
-    console.log('POS: useEffect triggered. businessId:', businessId, 'currentUser:', currentUser?.id, 'businessInfo:', businessInfo?.id)
-    if (businessId) {
-      loadProducts()
-    } else {
-      console.warn('POS: No business ID available. currentUser?.business_id:', currentUser?.business_id, 'businessInfo?.id:', businessInfo?.id)
+    if (!businessId) {
       setLoading(false)
-    }
-  }, [businessId, currentUser, businessInfo])
-
-  const loadProducts = async () => {
-    try {
-      setLoading(true)
-      console.log('POS: Loading products for business ID:', businessId)
-      if (!businessId) {
-        console.error('POS: No business ID available')
-        setProducts([])
-        setLoading(false)
-        return
-      }
-      
-      console.log('POS: About to load products for businessId:', businessId, 'Type:', typeof businessId)
-      const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
-      console.log('POS: Loaded products:', businessProducts)
-      console.log('POS: Loaded products count:', businessProducts?.length || 0)
-      
-      // Debug: Also try to get all products to see what's in the database
-      try {
-        const allProducts = await invoke('get_all_products') as any[]
-        console.log('POS: All products in database:', allProducts)
-        console.log('POS: All products count:', allProducts?.length || 0)
-        if (allProducts.length > 0) {
-          console.log('POS: Sample product business_id:', allProducts[0]?.business_id)
-          console.log('POS: Sample product category:', allProducts[0]?.category)
-          console.log('POS: Sample product is_active:', allProducts[0]?.is_active)
-        }
-      } catch (e) {
-        console.error('POS: Failed to get all products for debugging:', e)
-      }
-      
-      if (businessProducts && Array.isArray(businessProducts)) {
-        console.log('POS: Setting products array with', businessProducts.length, 'items')
-        setProducts(businessProducts)
-      } else {
-        console.warn('POS: Products is not an array:', businessProducts)
-        setProducts([])
-      }
-    } catch (error) {
-      console.error('POS: Failed to load products:', error)
-      toast.error(`Failed to load products: ${error}`)
-      setProducts([])
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const addToCart = (product: any) => {
-    const existingItem = cart.find(item => item.product.id === product.id)
-
-    if (existingItem) {
-      setCart(cart.map(item =>
-        item.product.id === product.id
-          ? { ...item, quantity: item.quantity + 1 }
-          : item
-      ))
-    } else {
-      setCart([...cart, {
-        product,
-        quantity: 1,
-        unitPrice: product.price
-      }])
-    }
-    toast.success(`Added ${product.name} to cart`)
-  }
-
-  // Handle barcode/serial number scan for cart
-  const handleScanInput = async (code: string) => {
-    if (!code || !code.trim()) return
-
-    try {
-      const product = await invoke('find_product_by_code', {
-        code: code.trim(),
-        businessId: businessId
-      }) as any
-
-      if (product) {
-        // Check stock availability
-        const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
-        if (stock <= 0) {
-          toast.error(`Product "${product.name}" is out of stock`)
-          return
-        }
-        addToCart(product)
-        setScanInput('')
-        if (scanInputRef.current) {
-          scanInputRef.current.focus()
-        }
-      } else {
-        toast.error(`Product not found for code: ${code}`)
-      }
-    } catch (error) {
-      console.error('Failed to find product:', error)
-      toast.error(`Failed to find product: ${error}`)
-    }
-  }
-
-  // Handle scan input change (for barcode scanner that types quickly)
-  useEffect(() => {
-    if (scanInput && scanInput.length > 3) {
-      // Debounce: wait a bit to see if more characters are coming
-      const timer = setTimeout(async () => {
-        if (!scanInput || !scanInput.trim()) return
-
-        try {
-          const product = await invoke('find_product_by_code', {
-            code: scanInput.trim(),
-            businessId: businessId
-          }) as any
-
-          if (product) {
-            // Check stock availability
-            const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
-            if (stock <= 0) {
-              toast.error(`Product "${product.name}" is out of stock`)
-              return
-            }
-            addToCart(product)
-            setScanInput('')
-            if (scanInputRef.current) {
-              scanInputRef.current.focus()
-            }
-          } else {
-            toast.error(`Product not found for code: ${scanInput}`)
-          }
-        } catch (error) {
-          console.error('Failed to find product:', error)
-          toast.error(`Failed to find product: ${error}`)
-        }
-      }, 300)
-      return () => clearTimeout(timer)
-    }
-  }, [scanInput, businessId, saleLocation])
-
-  const scannerRef = useRef<Html5Qrcode | null>(null)
-
-  // Start camera scanner
-  const startCameraScanner = async () => {
-    if (isScanning) {
-      stopCameraScanner()
       return
     }
+    void loadStaff()
+  }, [businessId])
 
+  const loadStaff = async () => {
     try {
-      setIsScanning(true)
-      const html5QrCode = new Html5Qrcode("barcode-scanner")
-      scannerRef.current = html5QrCode
-      
-      await html5QrCode.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 }
-        },
-        (decodedText) => {
-          handleScanInput(decodedText)
-          html5QrCode.stop()
-          setIsScanning(false)
-          scannerRef.current = null
-        },
-        (_errorMessage) => {
-          // Ignore errors, just keep scanning
-        }
-      )
-    } catch (error) {
-      console.error('Failed to start camera:', error)
-      toast.error('Failed to start camera. Please check permissions.')
-      setIsScanning(false)
-      scannerRef.current = null
-    }
-  }
-
-  const stopCameraScanner = async () => {
-    try {
-      if (scannerRef.current) {
-        await scannerRef.current.stop()
-        scannerRef.current = null
-      }
-      setIsScanning(false)
-    } catch (error) {
-      // Ignore errors
-      setIsScanning(false)
-      scannerRef.current = null
-    }
-  }
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (scannerRef.current) {
-        scannerRef.current.stop().catch(() => {})
-        scannerRef.current = null
-      }
-    }
-  }, [])
-
-  const updateQuantity = (productId: number, newQuantity: number) => {
-    if (newQuantity <= 0) {
-      setCart(cart.filter(item => item.product.id !== productId))
-    } else {
-      setCart(cart.map(item =>
-        item.product.id === productId
-          ? { ...item, quantity: newQuantity }
-          : item
-      ))
-    }
-  }
-
-  const getTotal = () => {
-    return cart.reduce((total, item) => total + (item.unitPrice * item.quantity), 0)
-  }
-
-  const processPayment = async (paymentMethod: string) => {
-    setProcessingPayment(true)
-    try {
-      const saleData = {
-        items: cart.map(item => ({
-          product_id: item.product.id,
-          quantity: item.quantity,
-          unit_price: item.unitPrice
-        })),
-        payment_method: paymentMethod,
-        staff_id: currentUser?.id || 1,
-        business_id: businessId || 1,
-        location: saleLocation // Use selected location (fridge or show)
-      }
-
-      const result = await invoke('process_sale', { request: saleData }) as {
-        sale_id: number
-        total_amount: number
-        payment_method: string
-        items: number
-        timestamp: string
-      }
-
-      // Clear cart and show success
-      setCart([])
-      setShowPaymentModal(false)
-
-      toast.success(`Sale completed!\nSale ID: ${result.sale_id}\nTotal: ₦${result.total_amount}\nPayment: ${result.payment_method}`, {
-        duration: 6000,
-      })
-
-      // Refresh products to show updated inventory
-      await loadProducts()
-
-    } catch (error) {
-      console.error('Payment failed:', error)
-      toast.error(`Payment failed: ${error}`)
+      setLoading(true)
+      const [rows, count] = await Promise.all([
+        invoke('get_users_for_business', { businessId }) as Promise<any[]>,
+        invoke('get_business_staff_count', { businessId }) as Promise<any>,
+      ])
+      setStaff(Array.isArray(rows) ? rows : [])
+      setStaffCount(count)
+    } catch {
+      toast.error('Failed to load staff records')
+      setStaff([])
     } finally {
-      setProcessingPayment(false)
+      setLoading(false)
     }
   }
 
-  // Filter products by selected category and search query
-  // Check for low stock and show notification
-  useEffect(() => {
-    const lowStockProducts = products.filter(p => (p.fridge_stock || 0) < 5 && (p.fridge_stock || 0) > 0)
-    if (lowStockProducts.length > 0) {
-      toast.error(`⚠️ Low Stock Alert: ${lowStockProducts.length} product(s) have less than 5 items in fridge stock!`, {
-        duration: 8000,
+  const handleAddStaff = async (staffData: any) => {
+    try {
+      const tempPassword = `Staff${Math.random().toString(36).slice(-6)}!`
+      const passwordHash = btoa(tempPassword)
+
+      await invoke('create_user', {
+        request: {
+          username: staffData.username,
+          password_hash: passwordHash,
+          role: staffData.role,
+          name: staffData.name,
+          email: staffData.email || null,
+          business_id: businessId,
+          temporary_password: tempPassword,
+        },
       })
+
+      toast.success(
+        `Staff added.\nUsername: ${staffData.username}\nPassword: ${tempPassword}\nSave and share this password securely.`,
+        { duration: 9000 }
+      )
+      setShowAddStaff(false)
+      await loadStaff()
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to add staff member')
     }
-  }, [products])
+  }
 
-  const filteredProducts = React.useMemo(() => {
-    console.log('POS: Filtering products. Total products:', products.length, 'Selected category:', selectedCategory, 'Search query:', searchQuery)
-    const filtered = products.filter(product => {
-      // Filter based on selected location (fridge or show)
-      const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
-      const hasStock = stock > 0
-      const matchesCategory = selectedCategory === 'ALL' || product.category === selectedCategory
-      const matchesSearch = !searchQuery || 
-        product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (product.description && product.description.toLowerCase().includes(searchQuery.toLowerCase()))
-      const matches = hasStock && matchesCategory && matchesSearch
-      if (!matches && products.length > 0) {
-        console.log('POS: Product filtered out:', product.name, 'Category:', product.category, 'Selected:', selectedCategory, 'Matches category:', matchesCategory, 'Matches search:', matchesSearch)
-      }
-      return matches
+  const formatLastLogin = (value?: string | null) => {
+    if (!value) return 'Never'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return '—'
+    return date.toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
     })
-    console.log('POS: Filtered products count:', filtered.length)
-    return filtered
-  }, [products, selectedCategory, searchQuery])
-
-  // Only show categories that are enabled in business modules
-  const availableCategories = React.useMemo(() => {
-    const allCategories = Array.from(new Set(products.map(p => p.category)))
-    return allCategories.filter(cat => businessModules.includes(cat))
-  }, [products, businessModules])
-
-  const categories = ['ALL', ...availableCategories]
+  }
 
   if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-slate-600">Loading products...</p>
-          </div>
-        </div>
-      </div>
-    )
+    return <PageLoader label="Loading staff…" />
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-gradient-to-br from-slate-50 via-blue-50 to-purple-50">
-      <div className="p-6 w-full max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-6">
-          <div className="flex justify-between items-center mb-2">
-            <div>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-2">
-                Point of Sale
-              </h1>
-              <p className="text-slate-600 text-lg">Select products and process orders</p>
-            </div>
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-              <label className="block text-sm font-medium text-slate-700 mb-2">Sale Location</label>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setSaleLocation('fridge')}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    saleLocation === 'fridge'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  🧊 Fridge
-                </button>
-                <button
-                  onClick={() => setSaleLocation('show')}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    saleLocation === 'show'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  🎨 Show
-                </button>
-              </div>
-            </div>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 sm:mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Team
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Staff records
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+              {canManage
+                ? 'View and manage team members for this business.'
+                : 'View team members for this business.'}
+            </p>
           </div>
+          {canManage && staffCount && (
+            <button
+              type="button"
+              onClick={() => setShowAddStaff(true)}
+              disabled={staffCount.available?.total <= 0}
+              className="inline-flex items-center justify-center gap-2 bg-[#121c19] hover:bg-[#1a2924] disabled:opacity-50 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-md text-sm font-semibold transition-colors"
+            >
+              <span className="text-lg leading-none">+</span>
+              Add staff
+            </button>
+          )}
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <MetricCard title="Team members" value={String(staff.length)} accent="ink" />
+          <MetricCard
+            title="Active"
+            value={String(staff.filter((u) => u.is_active !== false).length)}
+            accent="teal"
+          />
+          <MetricCard
+            title="Roles"
+            value={String(new Set(staff.map((u) => u.role)).size)}
+            accent="copper"
+          />
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Product Selection */}
-          <div className="lg:col-span-2 space-y-4">
-            {/* Search Bar */}
-            <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-4">
-              <div className="relative">
-                <input
-                  type="text"
-                  placeholder="🔍 Search products..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full px-4 py-3 pl-12 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-slate-700"
-                />
-                <div className="absolute left-4 top-1/2 transform -translate-y-1/2 text-slate-400">
-                  🔍
-                </div>
-              </div>
-            </div>
-
-            {/* Category Filter - Modern Design */}
-            <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-5">
-              <h3 className="text-sm font-semibold text-slate-700 mb-3 uppercase tracking-wide">Select Category</h3>
-              <div className="flex flex-wrap gap-3">
-                {categories.map(category => {
-                  const isKitchen = category === 'KITCHEN'
-                  const isBar = category === 'BAR'
-                  
-                  return (
-                    <button
-                      key={category}
-                      onClick={() => setSelectedCategory(category)}
-                      className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 transform hover:scale-105 ${
-                        selectedCategory === category
-                          ? isKitchen
-                            ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
-                            : isBar
-                            ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-white shadow-lg'
-                            : 'bg-gradient-to-r from-blue-500 to-purple-500 text-white shadow-lg'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      {category === 'ALL' ? '🌐 All' : 
-                       category === 'KITCHEN' ? '🍽️ Kitchen' :
-                       category === 'BAR' ? '🍺 Bar' : category}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Products Grid - Modern Card Design */}
-            <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-slate-800">
-                  {selectedCategory === 'ALL' ? 'All Products' : 
-                   selectedCategory === 'KITCHEN' ? '🍽️ Kitchen Menu' :
-                   selectedCategory === 'BAR' ? '🍺 Bar Menu' : selectedCategory}
-                </h2>
-                <span className="px-4 py-2 bg-blue-100 text-blue-800 rounded-full font-semibold text-sm">
-                  {filteredProducts.length} items
-                </span>
-              </div>
-
-              {filteredProducts.length === 0 ? (
-                <div className="text-center py-16">
-                  <div className="text-8xl mb-4">📦</div>
-                  <h3 className="text-2xl font-semibold text-slate-700 mb-2">No products found</h3>
-                  <p className="text-slate-500 mb-4">
-                    {searchQuery ? 'Try a different search term' : 
-                     products.length === 0 ? 'No products available for this business' :
-                     `No products match category "${selectedCategory}". Total products: ${products.length}`}
-                  </p>
-                  {products.length > 0 && (
-                    <div className="mt-4 text-sm text-slate-600">
-                      <p>Available categories: {Array.from(new Set(products.map(p => p.category))).join(', ')}</p>
-                      <button
-                        onClick={() => setSelectedCategory('ALL')}
-                        className="mt-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-                      >
-                        Show All Products
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="overflow-y-auto max-h-[calc(100vh-400px)] pr-2">
-                  <Table
-                    columns={[
-                      {
-                        key: 'image',
-                        header: 'Image',
-                        render: (product: any) => {
-                          const isKitchen = product.category === 'KITCHEN'
-                          const isBar = product.category === 'BAR'
-                          return (
-                            <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center">
-                              {product.image_path ? (
-                                <ProductImage imagePath={product.image_path} alt={product.name} />
-                              ) : (
-                                <div className="text-2xl">
-                                  {isKitchen ? '🍽️' : isBar ? '🍺' : '🏨'}
-                                </div>
-                              )}
-                            </div>
-                          )
-                        },
-                        headerClassName: 'px-4 py-3',
-                        className: 'px-4 py-3'
-                      },
-                      {
-                        key: 'name',
-                        header: 'Product Name',
-                        render: (product: any) => {
-                          const fridgeStock = product.fridge_stock || 0
-                          const isLowStock = fridgeStock < 5
-                          return (
-                            <>
-                              <div className="font-semibold text-slate-800">{product.name}</div>
-                              {product.description && (
-                                <div className="text-xs text-slate-500 mt-1 line-clamp-1">{product.description}</div>
-                              )}
-                              {isLowStock && (
-                                <span className="inline-block mt-1 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full font-bold">
-                                  Low Stock
-                                </span>
-                              )}
-                            </>
-                          )
-                        },
-                        headerClassName: 'px-4 py-3',
-                        className: 'px-4 py-3'
-                      },
-                      {
-                        key: 'category',
-                        header: 'Category',
-                        render: (product: any) => {
-                          const isKitchen = product.category === 'KITCHEN'
-                          const isBar = product.category === 'BAR'
-                          return (
-                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                              isKitchen ? 'bg-orange-100 text-orange-700' : 
-                              isBar ? 'bg-amber-100 text-amber-700' : 
-                              'bg-blue-100 text-blue-700'
-                            }`}>
-                              {product.category}
-                            </span>
-                          )
-                        },
-                        headerClassName: 'px-4 py-3',
-                        className: 'px-4 py-3'
-                      },
-                      {
-                        key: 'price',
-                        header: 'Price',
-                        render: (product: any) => {
-                          const isKitchen = product.category === 'KITCHEN'
-                          const isBar = product.category === 'BAR'
-                          return (
-                            <div className={`font-bold text-lg ${
-                              isKitchen ? 'text-orange-600' : isBar ? 'text-amber-600' : 'text-blue-600'
-                            }`}>
-                              ₦{product.price.toLocaleString()}
-                            </div>
-                          )
-                        },
-                        headerClassName: 'px-4 py-3',
-                        className: 'px-4 py-3'
-                      },
-                      {
-                        key: saleLocation === 'fridge' ? 'fridge_stock' : 'show_stock',
-                        header: saleLocation === 'fridge' ? 'Fridge Stock' : 'Show Stock',
-                        render: (product: any) => {
-                          const stock = saleLocation === 'fridge' ? (product.fridge_stock || 0) : (product.show_stock || 0)
-                          const isLowStock = stock < 5
-                          return (
-                            <div className={`font-semibold ${
-                              isLowStock ? 'text-red-600' : 'text-slate-700'
-                            }`}>
-                              {stock}
-                            </div>
-                          )
-                        },
-                        headerClassName: 'px-4 py-3',
-                        className: 'px-4 py-3'
-                      },
-                      {
-                        key: 'action',
-                        header: 'Action',
-                        align: 'center',
-                        render: (product: any) => (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              addToCart(product)
-                            }}
-                            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
-                          >
-                            ➕ Add
-                          </button>
-                        ),
-                        headerClassName: 'px-4 py-3',
-                        className: 'px-4 py-3'
-                      }
-                    ]}
-                    data={filteredProducts}
-                    rowKey={(product) => product.id}
-                    rowClassName={(product) => {
-                      const fridgeStock = product.fridge_stock || 0
-                      return fridgeStock < 5 ? 'bg-red-50' : ''
-                    }}
-                    emptyMessage="No products found"
-                    headerClassName="bg-slate-50 border-b border-slate-200"
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Order Summary - Modern Design */}
-          <div className="bg-gradient-to-br from-white to-blue-50 rounded-2xl shadow-xl border-2 border-blue-200 p-6 h-fit sticky top-6">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                Current Order
-              </h2>
-              {cart.length > 0 && (
-                <span className="px-3 py-1 bg-blue-500 text-white rounded-full text-sm font-bold">
-                  {cart.reduce((sum, item) => sum + item.quantity, 0)} items
-                </span>
-              )}
-            </div>
-
-            {/* Barcode Scanner Input */}
-            <div className="mb-4 bg-white rounded-xl p-4 shadow-md border border-slate-200">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                📷 Scan Barcode/Serial Number
-              </label>
-              <div className="flex gap-2">
-                <input
-                  ref={scanInputRef}
-                  type="text"
-                  value={scanInput}
-                  onChange={(e) => setScanInput(e.target.value)}
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter' && scanInput.trim()) {
-                      handleScanInput(scanInput)
-                    }
-                  }}
-                  placeholder="Scan or type barcode/serial"
-                  className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  onClick={startCameraScanner}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    isScanning
-                      ? 'bg-red-500 hover:bg-red-600 text-white'
-                      : 'bg-blue-500 hover:bg-blue-600 text-white'
-                  }`}
-                >
-                  {isScanning ? '⏹️ Stop' : '📷 Camera'}
-                </button>
-              </div>
-              {isScanning && (
-                <div className="mt-3">
-                  <div id="barcode-scanner" className="w-full rounded-lg overflow-hidden"></div>
-                  <p className="text-xs text-slate-500 mt-2 text-center">Point camera at barcode</p>
-                </div>
-              )}
-            </div>
-
-            {cart.length === 0 ? (
-              <div className="text-center text-slate-400 py-12">
-                <div className="text-6xl mb-4 opacity-50">🛒</div>
-                <p className="text-lg font-medium">Cart is empty</p>
-                <p className="text-sm mt-2">Select products to add</p>
-              </div>
-            ) : (
-              <>
-                <div className="space-y-3 mb-6 max-h-96 overflow-y-auto pr-2">
-                  {cart.map((item, index) => {
-                    const itemTotal = item.unitPrice * item.quantity
-                    return (
-                      <div key={index} className="bg-white rounded-xl p-4 shadow-md border border-slate-200 hover:shadow-lg transition-shadow">
-                        <div className="flex items-start justify-between mb-2">
-                          <div className="flex-1">
-                            <div className="font-bold text-slate-800 text-sm mb-1">{item.product.name}</div>
-                            <div className="text-slate-500 text-xs">₦{item.unitPrice.toLocaleString()} each</div>
-                          </div>
-                          <div className="text-right">
-                            <div className="font-extrabold text-blue-600 text-sm">₦{itemTotal.toLocaleString()}</div>
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-200">
-                          <span className="text-xs text-slate-500">Quantity</span>
-                          <div className="flex items-center space-x-3">
-                            <button
-                              onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
-                              className="w-8 h-8 bg-gradient-to-r from-red-400 to-red-500 hover:from-red-500 hover:to-red-600 text-white rounded-lg font-bold shadow-md hover:shadow-lg transition-all transform hover:scale-110"
-                            >
-                              −
-                            </button>
-                            <span className="w-10 text-center font-bold text-slate-800 text-lg">{item.quantity}</span>
-                            <button
-                              onClick={() => updateQuantity(item.product.id, item.quantity + 1)}
-                              className="w-8 h-8 bg-gradient-to-r from-green-400 to-green-500 hover:from-green-500 hover:to-green-600 text-white rounded-lg font-bold shadow-md hover:shadow-lg transition-all transform hover:scale-110"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-
-                <div className="border-t-2 border-blue-200 pt-4 space-y-4">
-                  <div className="bg-gradient-to-r from-blue-500 to-purple-500 rounded-xl p-4 text-white">
-                    <div className="flex justify-between items-center">
-                      <span className="text-lg font-semibold">Total Amount</span>
-                      <span className="text-3xl font-extrabold">₦{getTotal().toLocaleString()}</span>
-                    </div>
-                  </div>
-
-                  {cart.length > 0 && (
-                    <>
-                      <button
-                        onClick={() => setShowPaymentModal(true)}
-                        disabled={processingPayment}
-                        className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 disabled:from-slate-400 disabled:to-slate-500 text-white py-4 px-6 rounded-xl font-bold text-lg shadow-lg hover:shadow-xl transition-all transform hover:scale-105 disabled:transform-none"
-                      >
-                        {processingPayment ? (
-                          <span className="flex items-center justify-center">
-                            <span className="animate-spin mr-2">⏳</span>
-                            Processing...
-                          </span>
-                        ) : (
-                          <span className="flex items-center justify-center">
-                            💳 Process Payment
-                          </span>
-                        )}
-                      </button>
-
-                      <button
-                        onClick={() => setCart([])}
-                        disabled={processingPayment}
-                        className="w-full bg-gradient-to-r from-red-500 to-pink-600 hover:from-red-600 hover:to-pink-700 disabled:from-slate-400 disabled:to-slate-500 text-white py-3 px-6 rounded-xl font-semibold shadow-md hover:shadow-lg transition-all transform hover:scale-105 disabled:transform-none"
-                      >
-                        🗑️ Clear Order
-                      </button>
-                    </>
-                  )}
-                </div>
-              </>
+        {staff.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
+            <p className="font-display text-2xl font-bold text-[#121c19]">No staff records</p>
+            <p className="mt-2 text-[#2a3d36]/60">No users found for this business yet.</p>
+            {canManage && staffCount && staffCount.available?.total > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAddStaff(true)}
+                className="mt-6 bg-[#121c19] hover:bg-[#1a2924] text-white px-5 py-2.5 rounded-md text-sm font-semibold"
+              >
+                Add first staff member
+              </button>
             )}
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="md:hidden space-y-3">
+              {staff.map((user) => (
+                <article
+                  key={user.id}
+                  className="rounded-xl border border-[#d4dcd8] bg-white p-4"
+                >
+                  <p className="font-semibold text-[#121c19]">{user.name || user.username}</p>
+                  <p className="text-xs text-[#2a3d36]/50 mt-1">@{user.username}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="inline-flex px-2.5 py-1 rounded-md text-xs font-semibold bg-[#f4f6f5] border border-[#d4dcd8] text-[#121c19]">
+                      {user.role}
+                    </span>
+                    <span
+                      className={`inline-flex px-2.5 py-1 rounded-md text-xs font-semibold border ${
+                        user.is_active !== false
+                          ? 'bg-teal-50 text-teal-800 border-teal-200'
+                          : 'bg-rose-50 text-rose-700 border-rose-200'
+                      }`}
+                    >
+                      {user.is_active !== false ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  {user.email && (
+                    <p className="mt-2 text-sm text-[#2a3d36]/60 truncate">{user.email}</p>
+                  )}
+                  <p className="mt-2 text-xs text-[#2a3d36]/55">
+                    Last login: {formatLastLogin(user.last_login)}
+                  </p>
+                </article>
+              ))}
+            </div>
+
+            <div className="hidden md:block rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+              <table className="min-w-full text-left">
+                <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
+                  <tr>
+                    <th className="px-5 py-3 font-semibold">Name</th>
+                    <th className="px-5 py-3 font-semibold">Username</th>
+                    <th className="px-5 py-3 font-semibold">Role</th>
+                    <th className="px-5 py-3 font-semibold">Email</th>
+                    <th className="px-5 py-3 font-semibold">Last login</th>
+                    <th className="px-5 py-3 font-semibold">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#e8ecea]">
+                  {staff.map((user) => (
+                    <tr key={user.id} className="hover:bg-[#f4f6f5]/70">
+                      <td className="px-5 py-4 font-semibold text-[#121c19]">
+                        {user.name || '—'}
+                      </td>
+                      <td className="px-5 py-4 text-[#2a3d36]/70">@{user.username}</td>
+                      <td className="px-5 py-4">
+                        <span className="inline-flex px-2.5 py-1 rounded-md text-xs font-semibold bg-[#f4f6f5] border border-[#d4dcd8]">
+                          {user.role}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-[#2a3d36]/70">{user.email || '—'}</td>
+                      <td className="px-5 py-4 text-sm text-[#2a3d36]/70 whitespace-nowrap">
+                        {formatLastLogin(user.last_login)}
+                      </td>
+                      <td className="px-5 py-4">
+                        <span
+                          className={`inline-flex px-2.5 py-1 rounded-md text-xs font-semibold border ${
+                            user.is_active !== false
+                              ? 'bg-teal-50 text-teal-800 border-teal-200'
+                              : 'bg-rose-50 text-rose-700 border-rose-200'
+                          }`}
+                        >
+                          {user.is_active !== false ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Payment Modal */}
-      {showPaymentModal && (
-        <PaymentModal
-          total={getTotal()}
-          onPayment={processPayment}
-          onClose={() => setShowPaymentModal(false)}
-          processing={processingPayment}
+      {showAddStaff && staffCount && (
+        <AddStaffModal
+          onClose={() => setShowAddStaff(false)}
+          onSave={handleAddStaff}
+          staffLimits={staffCount}
         />
       )}
     </div>
   )
 }
 
-function PaymentModal({ total, onPayment, onClose, processing }: {
-  total: number
-  onPayment: (method: string) => void
-  onClose: () => void
-  processing: boolean
-}) {
-  const [paymentMethod, setPaymentMethod] = useState('CASH')
-  const [customerPaid, setCustomerPaid] = useState('')
-  const [change, setChange] = useState(0)
-
-  const calculateChange = (paid: string) => {
-    const paidAmount = parseFloat(paid) || 0
-    const changeAmount = Math.max(0, paidAmount - total)
-    setChange(changeAmount)
-  }
-
-  const handlePayment = () => {
-    if (paymentMethod === 'CASH' && parseFloat(customerPaid) < total) {
-      toast.error('Payment amount is less than total!')
-      return
-    }
-    onPayment(paymentMethod)
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex justify-between items-center">
-            <h2 className="text-2xl font-bold text-slate-800">Payment</h2>
-            <button
-              onClick={onClose}
-              disabled={processing}
-              className="text-slate-400 hover:text-slate-600 text-2xl disabled:opacity-50"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-
-        <div className="p-6 space-y-6">
-          <div className="bg-slate-50 rounded-lg p-4">
-            <div className="text-center">
-              <div className="text-3xl font-bold text-slate-800 mb-1">
-                ₦{total.toLocaleString()}
-              </div>
-              <div className="text-slate-600">Total Amount</div>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-3">
-              Payment Method
-            </label>
-            <div className="space-y-2">
-              {[
-                { value: 'CASH', label: '💵 Cash', icon: '💵' },
-                { value: 'CARD', label: '💳 Card', icon: '💳' },
-                { value: 'EXTERNAL_POS', label: '🖥️ External POS', icon: '🖥️' }
-              ].map(method => (
-                <button
-                  key={method.value}
-                  onClick={() => setPaymentMethod(method.value)}
-                  disabled={processing}
-                  className={`w-full p-3 rounded-lg border text-left transition-colors ${
-                    paymentMethod === method.value
-                      ? 'border-blue-500 bg-blue-50 text-blue-700'
-                      : 'border-slate-200 hover:border-slate-300 text-slate-700'
-                  } disabled:opacity-50`}
-                >
-                  <span className="font-medium">{method.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {paymentMethod === 'CASH' && (
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">
-                  Customer Paid (₦)
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={customerPaid}
-                  onChange={(e) => {
-                    setCustomerPaid(e.target.value)
-                    calculateChange(e.target.value)
-                  }}
-                  disabled={processing}
-                  className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-slate-100"
-                  placeholder="Enter amount paid"
-                />
-              </div>
-
-              {customerPaid && parseFloat(customerPaid) >= total && (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-green-700 font-medium">Change:</span>
-                    <span className="text-green-700 font-bold text-lg">
-                      ₦{change.toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="flex space-x-3 pt-4">
-            <button
-              onClick={onClose}
-              disabled={processing}
-              className="flex-1 bg-slate-200 hover:bg-slate-300 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 py-3 px-4 rounded-lg font-medium transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handlePayment}
-              disabled={processing || (paymentMethod === 'CASH' && !customerPaid)}
-              className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3 px-4 rounded-lg font-medium transition-colors"
-            >
-              {processing ? 'Processing...' : `✅ Complete Payment`}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
-  const [products, setProducts] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
-  const businessId = currentUser?.business_id
-
-  useEffect(() => {
-    if (businessId) {
-      loadProducts()
-    } else {
-      setLoading(false)
-    }
-  }, [businessId])
-
-  const loadProducts = async () => {
-    try {
-      setLoading(true)
-      if (businessId) {
-        const businessProducts = await invoke('get_products_for_business', { businessId }) as any[]
-        setProducts(businessProducts)
-      }
-    } catch (error) {
-      console.error('Failed to load products:', error)
-      toast.error('Failed to load products')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-          <p className="text-slate-600">Loading inventory...</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">Stock Check</h1>
-          <p className="text-slate-600 text-lg">View fridge stock and show stock levels (Read-only)</p>
-        </div>
-
-        <Table
-          columns={[
-            {
-              key: 'name',
-              header: 'Product Name',
-              render: (product: any) => (
-                <>
-                  <div className="font-semibold text-slate-800">{product.name}</div>
-                  <div className="text-xs text-slate-500">{product.category}</div>
-                </>
-              )
-            },
-            {
-              key: 'fridge_stock',
-              header: 'Fridge Stock',
-              align: 'center',
-              render: (product: any) => {
-                const fridgeStock = product.fridge_stock || 0
-                const isLowStock = fridgeStock < 5
-                return (
-                  <div className={`font-bold text-lg ${isLowStock ? 'text-red-600' : 'text-slate-700'}`}>
-                    {fridgeStock}
-                  </div>
-                )
-              }
-            },
-            {
-              key: 'show_stock',
-              header: 'Show Stock',
-              align: 'center',
-              render: (product: any) => {
-                const showStock = product.show_stock || 0
-                return (
-                  <div className="font-bold text-lg text-slate-700">
-                    {showStock}
-                  </div>
-                )
-              }
-            }
-          ]}
-          data={products}
-          rowKey={(product) => product.id}
-          emptyMessage="No products found"
-        />
-      </div>
-    </div>
-  )
-}
-
-// Placeholder component - replaced by ReportsDashboard which has full functionality
-// function BusinessReports() {
-//   return (
-//     <div className="flex-1 overflow-auto bg-slate-50">
-//       <div className="p-8 w-full">
-//         <h1 className="text-3xl font-bold text-slate-800 mb-2">Business Reports</h1>
-//         <p className="text-slate-600 text-lg">View sales reports and analytics</p>
-//         <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-12">
-//           <div className="text-center">
-//             <div className="text-6xl mb-4">📊</div>
-//             <h2 className="text-2xl font-bold text-slate-800 mb-2">Reports Dashboard</h2>
-//             <p className="text-slate-600">Business analytics and reporting coming next</p>
-//           </div>
-//         </div>
-//       </div>
-//     </div>
-//   )
-// }
-
 function SettingsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
-  const [activeTab, setActiveTab] = useState<'business' | 'email' | 'reports' | 'notifications' | 'system'>('business')
+  const [activeTab, setActiveTab] = useState<'business' | 'email' | 'reports' | 'notifications'>('business')
   const isSuperAdmin = currentUser?.role === 'SuperAdmin'
 
-  return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">⚙️ Settings</h1>
-          <p className="text-slate-600 text-lg">Configure your business settings</p>
-        </div>
+  const tabs: { id: typeof activeTab; label: string; desc: string; adminOnly?: boolean }[] = [
+    { id: 'business', label: 'Business', desc: 'Profile & branding' },
+    { id: 'email', label: 'Email', desc: 'Outgoing mail' },
+    { id: 'reports', label: 'Report access', desc: 'Who can view reports', adminOnly: true },
+    { id: 'notifications', label: 'Notifications', desc: 'Alerts & reminders' },
+  ]
 
-        <div className="bg-white rounded-xl shadow-lg border border-slate-200 mb-6">
-          <div className="border-b border-slate-200">
-            <div className="flex space-x-1 p-2 overflow-x-auto">
-              <button
-                onClick={() => setActiveTab('business')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'business'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                🏢 Business Settings
-              </button>
-              <button
-                onClick={() => setActiveTab('email')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'email'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                📧 Email Settings
-              </button>
-              {isSuperAdmin && (
-                <button
-                  onClick={() => setActiveTab('reports')}
-                  className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
-                    activeTab === 'reports'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-600 hover:bg-slate-100'
-                  }`}
-                >
-                  📊 Report Permissions
-                </button>
+  const visibleTabs = tabs.filter((t) => !t.adminOnly || isSuperAdmin)
+
+  return (
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 sm:mb-8">
+          <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+            Configuration
+          </p>
+          <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+            Settings
+          </h1>
+          <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+            Manage business profile, branding, and notifications.
+          </p>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <aside className="lg:col-span-3">
+            <div className="rounded-xl border border-[#d4dcd8] bg-white p-2 lg:sticky lg:top-6">
+              <div className="flex lg:flex-col gap-1 overflow-x-auto">
+                {visibleTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`min-w-[140px] lg:min-w-0 text-left rounded-lg px-4 py-3 transition-colors ${
+                      activeTab === tab.id
+                        ? 'bg-[#121c19] text-white'
+                        : 'text-[#2a3d36]/80 hover:bg-[#f4f6f5]'
+                    }`}
+                  >
+                    <p className="font-semibold text-sm">{tab.label}</p>
+                    <p
+                      className={`text-xs mt-0.5 ${
+                        activeTab === tab.id ? 'text-white/60' : 'text-[#2a3d36]/45'
+                      }`}
+                    >
+                      {tab.desc}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </aside>
+
+          <div className="lg:col-span-9">
+            <div className="rounded-xl border border-[#d4dcd8] bg-white p-5 sm:p-7 min-h-[420px]">
+              {activeTab === 'business' && (
+                <BusinessSettings currentUser={currentUser} businessInfo={businessInfo} />
               )}
-              <button
-                onClick={() => setActiveTab('notifications')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
-                  activeTab === 'notifications'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                🔔 Notifications
-              </button>
-              {isSuperAdmin && (
-                <button
-                  onClick={() => setActiveTab('system')}
-                  className={`px-6 py-3 rounded-lg font-medium transition-colors whitespace-nowrap ${
-                    activeTab === 'system'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-600 hover:bg-slate-100'
-                  }`}
-                >
-                  ⚙️ System Preferences
-                </button>
+              {activeTab === 'email' && (
+                <EmailSettings currentUser={currentUser} businessInfo={businessInfo} />
+              )}
+              {activeTab === 'reports' && isSuperAdmin && (
+                <ReportPermissionsSettings currentUser={currentUser} businessInfo={businessInfo} />
+              )}
+              {activeTab === 'notifications' && (
+                <NotificationPreferences currentUser={currentUser} businessInfo={businessInfo} />
               )}
             </div>
-          </div>
-
-          <div className="p-6">
-            {activeTab === 'business' && <BusinessSettings currentUser={currentUser} businessInfo={businessInfo} />}
-            {activeTab === 'email' && <EmailSettings currentUser={currentUser} businessInfo={businessInfo} />}
-            {activeTab === 'reports' && isSuperAdmin && <ReportPermissionsSettings currentUser={currentUser} businessInfo={businessInfo} />}
-            {activeTab === 'notifications' && <NotificationPreferences currentUser={currentUser} businessInfo={businessInfo} />}
-            {activeTab === 'system' && isSuperAdmin && <SystemPreferences currentUser={currentUser} businessInfo={businessInfo} />}
           </div>
         </div>
       </div>
@@ -5447,67 +5401,82 @@ function BusinessSettings({ currentUser, businessInfo }: { currentUser: any, bus
     )
   }
 
+  const fieldClass =
+    'w-full px-4 py-2.5 border border-[#d4dcd8] rounded-lg bg-[#f4f6f5] text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/35 focus:bg-white'
+
   return (
-    <form onSubmit={handleSave} className="space-y-6">
+    <form onSubmit={handleSave} className="space-y-8">
       <div>
-        <h2 className="text-2xl font-bold text-slate-800 mb-4">Business Information</h2>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Business information</h2>
+        <p className="text-sm text-[#2a3d36]/55 mb-5">Name, contact, and location for this venue.</p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Business Name</label>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Business name
+            </label>
             <input
               type="text"
               value={businessData.name}
-              onChange={(e) => setBusinessData(prev => ({ ...prev, name: e.target.value }))}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => setBusinessData((prev) => ({ ...prev, name: e.target.value }))}
+              className={fieldClass}
               required
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Email</label>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Email
+            </label>
             <input
               type="email"
               value={businessData.email}
-              onChange={(e) => setBusinessData(prev => ({ ...prev, email: e.target.value }))}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => setBusinessData((prev) => ({ ...prev, email: e.target.value }))}
+              className={fieldClass}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Phone</label>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Phone
+            </label>
             <input
               type="tel"
               value={businessData.phone}
-              onChange={(e) => setBusinessData(prev => ({ ...prev, phone: e.target.value }))}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => setBusinessData((prev) => ({ ...prev, phone: e.target.value }))}
+              className={fieldClass}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Address</label>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Address
+            </label>
             <input
               type="text"
               value={businessData.address}
-              onChange={(e) => setBusinessData(prev => ({ ...prev, address: e.target.value }))}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => setBusinessData((prev) => ({ ...prev, address: e.target.value }))}
+              className={fieldClass}
             />
           </div>
         </div>
       </div>
 
-      <div>
-        <h2 className="text-2xl font-bold text-slate-800 mb-4">Branding</h2>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Logo</label>
-            <div className="flex items-center gap-4">
+      <div className="border-t border-[#e8ecea] pt-8">
+        <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Branding</h2>
+        <p className="text-sm text-[#2a3d36]/55 mb-5">Logo and colors used across the POS.</p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Logo
+            </label>
+            <div className="flex flex-wrap items-center gap-4">
               {logoPreview && (
                 <img
                   src={logoPreview}
                   alt="Business Logo"
-                  className="w-24 h-24 object-contain border border-slate-300 rounded-lg"
+                  className="w-20 h-20 object-contain border border-[#d4dcd8] rounded-lg bg-[#f4f6f5]"
                 />
               )}
               <div>
@@ -5520,76 +5489,90 @@ function BusinessSettings({ currentUser, businessInfo }: { currentUser: any, bus
                 />
                 <label
                   htmlFor="logo-upload"
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg cursor-pointer inline-block"
+                  className="px-4 py-2.5 bg-[#121c19] hover:bg-[#1a2924] text-white rounded-md cursor-pointer inline-block text-sm font-semibold"
                 >
-                  {logoPreview ? 'Change Logo' : 'Upload Logo'}
+                  {logoPreview ? 'Change logo' : 'Upload logo'}
                 </label>
-                <p className="text-xs text-slate-500 mt-1">Max 5MB, PNG/JPG</p>
+                <p className="text-xs text-[#2a3d36]/45 mt-1.5">Max 5MB, PNG or JPG</p>
               </div>
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Primary Color</label>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Primary color
+            </label>
             <div className="flex items-center gap-3">
               <input
                 type="color"
                 value={businessData.primary_color}
-                onChange={(e) => setBusinessData(prev => ({ ...prev, primary_color: e.target.value }))}
-                className="w-16 h-10 border border-slate-300 rounded cursor-pointer"
+                onChange={(e) =>
+                  setBusinessData((prev) => ({ ...prev, primary_color: e.target.value }))
+                }
+                className="w-12 h-11 border border-[#d4dcd8] rounded-md cursor-pointer bg-white"
               />
               <input
                 type="text"
                 value={businessData.primary_color}
-                onChange={(e) => setBusinessData(prev => ({ ...prev, primary_color: e.target.value }))}
-                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="#3B82F6"
+                onChange={(e) =>
+                  setBusinessData((prev) => ({ ...prev, primary_color: e.target.value }))
+                }
+                className={fieldClass}
+                placeholder="#14B8A6"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Secondary Color</label>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+              Secondary color
+            </label>
             <div className="flex items-center gap-3">
               <input
                 type="color"
                 value={businessData.secondary_color}
-                onChange={(e) => setBusinessData(prev => ({ ...prev, secondary_color: e.target.value }))}
-                className="w-16 h-10 border border-slate-300 rounded cursor-pointer"
+                onChange={(e) =>
+                  setBusinessData((prev) => ({ ...prev, secondary_color: e.target.value }))
+                }
+                className="w-12 h-11 border border-[#d4dcd8] rounded-md cursor-pointer bg-white"
               />
               <input
                 type="text"
                 value={businessData.secondary_color}
-                onChange={(e) => setBusinessData(prev => ({ ...prev, secondary_color: e.target.value }))}
-                className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="#1E40AF"
+                onChange={(e) =>
+                  setBusinessData((prev) => ({ ...prev, secondary_color: e.target.value }))
+                }
+                className={fieldClass}
+                placeholder="#134E4A"
               />
             </div>
           </div>
         </div>
 
-        <div className="bg-slate-50 rounded-lg p-4 mb-6">
-          <p className="text-sm text-slate-600 mb-2">Color Preview:</p>
-          <div className="flex gap-2">
+        <div className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-3">
+            Preview
+          </p>
+          <div className="flex gap-3">
             <div
-              className="w-20 h-20 rounded-lg"
+              className="w-16 h-16 rounded-md border border-[#d4dcd8]"
               style={{ backgroundColor: businessData.primary_color }}
             />
             <div
-              className="w-20 h-20 rounded-lg"
+              className="w-16 h-16 rounded-md border border-[#d4dcd8]"
               style={{ backgroundColor: businessData.secondary_color }}
             />
           </div>
         </div>
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex justify-end pt-2">
         <button
           type="submit"
           disabled={saving}
-          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          className="px-6 py-3 bg-[#121c19] hover:bg-[#1a2924] text-white rounded-md font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {saving ? 'Saving...' : 'Save Settings'}
+          {saving ? 'Saving…' : 'Save settings'}
         </button>
       </div>
     </form>
@@ -5609,20 +5592,23 @@ function NotificationPreferences({ currentUser, businessInfo }: { currentUser: a
   const businessId = currentUser?.business_id || businessInfo?.id
 
   useEffect(() => {
-    if (businessId) {
-      loadPreferences()
+    if (!businessId) {
+      setLoading(false)
+      return
     }
+    void loadPreferences()
   }, [businessId])
 
   const loadPreferences = async () => {
     try {
       setLoading(true)
-      const config = await invoke('get_email_config', { businessId }) as any
+      const config = (await invoke('get_email_config', { businessId })) as any
+      const safe = config && typeof config === 'object' ? config : {}
       setPreferences({
-        daily_reports_enabled: config.daily_reports_enabled || false,
-        low_stock_enabled: config.low_stock_enabled !== false,
-        pending_sales_enabled: config.pending_sales_enabled !== false,
-        notification_roles: config.notification_roles || 'SuperAdmin,Manager',
+        daily_reports_enabled: Boolean(safe.daily_reports_enabled),
+        low_stock_enabled: safe.low_stock_enabled !== false,
+        pending_sales_enabled: safe.pending_sales_enabled !== false,
+        notification_roles: String(safe.notification_roles || 'SuperAdmin,Manager'),
       })
     } catch (error) {
       console.error('Failed to load notification preferences:', error)
@@ -5637,18 +5623,18 @@ function NotificationPreferences({ currentUser, businessInfo }: { currentUser: a
     setSaving(true)
 
     try {
-      const config = await invoke('get_email_config', { businessId }) as any
+      const config = (await invoke('get_email_config', { businessId })) as any
       await invoke('save_email_config', {
         request: {
           business_id: businessId,
-          ...config,
+          ...(config && typeof config === 'object' ? config : {}),
           daily_reports_enabled: preferences.daily_reports_enabled,
           low_stock_enabled: preferences.low_stock_enabled,
           pending_sales_enabled: preferences.pending_sales_enabled,
           notification_roles: preferences.notification_roles,
-        }
+        },
       })
-      toast.success('Notification preferences saved successfully!')
+      toast.success('Notification preferences saved')
       await loadPreferences()
     } catch (error) {
       console.error('Failed to save notification preferences:', error)
@@ -5661,263 +5647,110 @@ function NotificationPreferences({ currentUser, businessInfo }: { currentUser: a
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-slate-600">Loading notification preferences...</p>
+        <p className="text-[#2a3d36]/60">Loading notification preferences…</p>
       </div>
     )
   }
 
+  const Toggle = ({
+    checked,
+    onChange,
+  }: {
+    checked: boolean
+    onChange: (v: boolean) => void
+  }) => (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${
+        checked ? 'bg-[#121c19]' : 'bg-[#d4dcd8]'
+      }`}
+    >
+      <span
+        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+          checked ? 'translate-x-6' : 'translate-x-1'
+        }`}
+      />
+    </button>
+  )
+
   return (
-    <form onSubmit={handleSave} className="space-y-6">
+    <form onSubmit={handleSave} className="space-y-8">
       <div>
-        <h2 className="text-2xl font-bold text-slate-800 mb-4">Email Notifications</h2>
-        
-        <div className="space-y-4">
-          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+        <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Notifications</h2>
+        <p className="text-sm text-[#2a3d36]/55 mb-5">
+          Choose which alerts to send when email is configured.
+        </p>
+
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4">
             <div>
-              <p className="font-medium text-slate-800">Low Stock Alerts</p>
-              <p className="text-sm text-slate-600">Receive emails when products are running low</p>
+              <p className="font-semibold text-[#121c19]">Low stock alerts</p>
+              <p className="text-sm text-[#2a3d36]/55">When products fall below minimum</p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={preferences.low_stock_enabled}
-                onChange={(e) => setPreferences(prev => ({ ...prev, low_stock_enabled: e.target.checked }))}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-            </label>
+            <Toggle
+              checked={preferences.low_stock_enabled}
+              onChange={(v) => setPreferences((prev) => ({ ...prev, low_stock_enabled: v }))}
+            />
           </div>
 
-          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4">
             <div>
-              <p className="font-medium text-slate-800">Pending Sales Notifications</p>
-              <p className="text-sm text-slate-600">Receive emails when sales are pending completion</p>
+              <p className="font-semibold text-[#121c19]">Pending sales</p>
+              <p className="text-sm text-[#2a3d36]/55">When sales need completion</p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={preferences.pending_sales_enabled}
-                onChange={(e) => setPreferences(prev => ({ ...prev, pending_sales_enabled: e.target.checked }))}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-            </label>
+            <Toggle
+              checked={preferences.pending_sales_enabled}
+              onChange={(v) =>
+                setPreferences((prev) => ({ ...prev, pending_sales_enabled: v }))
+              }
+            />
           </div>
 
-          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4">
             <div>
-              <p className="font-medium text-slate-800">Daily Sales Reports</p>
-              <p className="text-sm text-slate-600">Receive daily summary emails of sales performance</p>
+              <p className="font-semibold text-[#121c19]">Daily sales reports</p>
+              <p className="text-sm text-[#2a3d36]/55">End-of-day summary email</p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={preferences.daily_reports_enabled}
-                onChange={(e) => setPreferences(prev => ({ ...prev, daily_reports_enabled: e.target.checked }))}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-            </label>
+            <Toggle
+              checked={preferences.daily_reports_enabled}
+              onChange={(v) =>
+                setPreferences((prev) => ({ ...prev, daily_reports_enabled: v }))
+              }
+            />
           </div>
         </div>
       </div>
 
       <div>
-        <h2 className="text-2xl font-bold text-slate-800 mb-4">Notification Recipients</h2>
-        <div className="p-4 bg-slate-50 rounded-lg">
-          <label className="block text-sm font-medium text-slate-700 mb-2">Roles to Receive Notifications</label>
-          <input
-            type="text"
-            value={preferences.notification_roles}
-            onChange={(e) => setPreferences(prev => ({ ...prev, notification_roles: e.target.value }))}
-            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="SuperAdmin,Manager"
-          />
-          <p className="text-xs text-slate-500 mt-1">Comma-separated list of roles (e.g., SuperAdmin,Manager,Secretary)</p>
-        </div>
+        <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Recipients</h2>
+        <p className="text-sm text-[#2a3d36]/55 mb-4">Roles that should receive alerts</p>
+        <input
+          type="text"
+          value={preferences.notification_roles}
+          onChange={(e) =>
+            setPreferences((prev) => ({ ...prev, notification_roles: e.target.value }))
+          }
+          className="w-full px-4 py-2.5 border border-[#d4dcd8] rounded-lg bg-[#f4f6f5] text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/35 focus:bg-white"
+          placeholder="SuperAdmin,Manager"
+        />
+        <p className="text-xs text-[#2a3d36]/45 mt-1.5">
+          Comma-separated roles (e.g. SuperAdmin, Manager, Secretary)
+        </p>
       </div>
 
       <div className="flex justify-end">
         <button
           type="submit"
           disabled={saving}
-          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          className="px-6 py-3 bg-[#121c19] hover:bg-[#1a2924] text-white rounded-md font-semibold disabled:opacity-50"
         >
-          {saving ? 'Saving...' : 'Save Preferences'}
+          {saving ? 'Saving…' : 'Save preferences'}
         </button>
       </div>
     </form>
-  )
-}
-
-function SystemPreferences({ }: { currentUser?: any, businessInfo?: any }) {
-  const [backingUp, setBackingUp] = useState(false)
-  const [restoring, setRestoring] = useState(false)
-  const [backupStatus, setBackupStatus] = useState<string | null>(null)
-
-  const handleExportBackup = async () => {
-    try {
-      setBackingUp(true)
-      setBackupStatus(null)
-      
-      const backupJson = await invoke('export_database_backup') as string
-      
-      // Create a blob and download
-      const blob = new Blob([backupJson], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0]
-      a.download = `pos-backup-${timestamp}.json`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-      
-      setBackupStatus('success')
-      toast.success('Backup exported successfully!')
-    } catch (error) {
-      console.error('Failed to export backup:', error)
-      setBackupStatus('error')
-      toast.error(`Failed to export backup: ${error}`)
-    } finally {
-      setBackingUp(false)
-    }
-  }
-
-  const handleImportBackup = async () => {
-    // Create file input element
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.json'
-    input.onchange = async (e: any) => {
-      const file = e.target.files?.[0]
-      if (!file) return
-
-      try {
-        setRestoring(true)
-        setBackupStatus(null)
-
-        const fileContent = await file.text()
-        
-        // Validate JSON
-        const backupData = JSON.parse(fileContent)
-        if (!backupData.data || !backupData.version) {
-          throw new Error('Invalid backup file format')
-        }
-
-        // Confirm restore (destructive operation)
-        const confirmed = window.confirm(
-          '⚠️ WARNING: Restoring from backup will replace ALL current data!\n\n' +
-          'This action cannot be undone. Are you sure you want to continue?'
-        )
-
-        if (!confirmed) {
-          setRestoring(false)
-          return
-        }
-
-        await invoke('import_database_backup', { backupJson: fileContent })
-        
-        setBackupStatus('success')
-        toast.success('Backup restored successfully! Please refresh the application.')
-        
-        // Suggest reload after a delay
-        setTimeout(() => {
-          if (window.confirm('Backup restored successfully. Reload the application now?')) {
-            window.location.reload()
-          }
-        }, 2000)
-      } catch (error) {
-        console.error('Failed to import backup:', error)
-        setBackupStatus('error')
-        toast.error(`Failed to import backup: ${error}`)
-      } finally {
-        setRestoring(false)
-      }
-    }
-    input.click()
-  }
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-800 mb-4">Backup & Restore</h2>
-        
-        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-slate-800 mb-2">📦 Export Backup</h3>
-            <p className="text-sm text-slate-600 mb-4">
-              Create a backup of all your data (users, businesses, products, sales, inventory, settings).
-              The backup is saved as a JSON file that you can restore later.
-            </p>
-            <button
-              onClick={handleExportBackup}
-              disabled={backingUp}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {backingUp ? (
-                <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                  Creating Backup...
-                </>
-              ) : (
-                <>
-                  💾 Export Backup
-                </>
-              )}
-            </button>
-          </div>
-
-          <div className="border-t border-slate-200 pt-4 mt-4">
-            <h3 className="text-lg font-semibold text-slate-800 mb-2">🔄 Restore Backup</h3>
-            <p className="text-sm text-slate-600 mb-4">
-              <strong className="text-red-600">⚠️ Warning:</strong> Restoring from a backup will replace ALL current data 
-              with the data from the backup file. This action cannot be undone. Make sure to export a backup first!
-            </p>
-            <button
-              onClick={handleImportBackup}
-              disabled={restoring}
-              className="px-6 py-3 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {restoring ? (
-                <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                  Restoring...
-                </>
-              ) : (
-                <>
-                  🔄 Import Backup
-                </>
-              )}
-            </button>
-          </div>
-
-          {backupStatus === 'success' && (
-            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-              <p className="text-sm text-green-800">✅ Operation completed successfully!</p>
-            </div>
-          )}
-
-          {backupStatus === 'error' && (
-            <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-sm text-red-800">❌ Operation failed. Please check the console for details.</p>
-            </div>
-          )}
-        </div>
-
-        <div className="bg-blue-50 rounded-lg border border-blue-200 p-4">
-          <h4 className="font-semibold text-blue-900 mb-2">💡 Backup Tips</h4>
-          <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-            <li>Export backups regularly (recommended: weekly or before major changes)</li>
-            <li>Store backups in a safe location (external drive, cloud storage)</li>
-            <li>Backup files contain all your business data - keep them secure</li>
-            <li>Email passwords are not included in backups for security</li>
-            <li>After restoring, you may need to reconfigure email settings</li>
-          </ul>
-        </div>
-      </div>
-    </div>
   )
 }
 
@@ -5925,27 +5758,39 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [permissions, setPermissions] = useState({
-    manager_can_view: false,
+    manager_can_view: true,
     secretary_can_view: false,
-    staff_can_view: false
+    staff_can_view: false,
   })
 
   const businessId = currentUser?.business_id || businessInfo?.id
 
   useEffect(() => {
-    if (businessId) {
-      loadPermissions()
+    if (!businessId) {
+      setLoading(false)
+      return
     }
+    void loadPermissions()
   }, [businessId])
 
   const loadPermissions = async () => {
     try {
       setLoading(true)
-      const perms = await invoke('get_report_permissions', { businessId }) as any
-      setPermissions(perms)
+      const perms = (await invoke('get_report_permissions', { businessId })) as any
+      const safe = perms && typeof perms === 'object' ? perms : {}
+      setPermissions({
+        manager_can_view: Boolean(safe.manager_can_view),
+        secretary_can_view: Boolean(safe.secretary_can_view),
+        staff_can_view: Boolean(safe.staff_can_view),
+      })
     } catch (error) {
       console.error('Failed to load report permissions:', error)
       toast.error('Failed to load report permissions')
+      setPermissions({
+        manager_can_view: true,
+        secretary_can_view: false,
+        staff_can_view: false,
+      })
     } finally {
       setLoading(false)
     }
@@ -5954,15 +5799,14 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
-
     try {
       await invoke('save_report_permissions', {
         businessId,
         managerCanView: permissions.manager_can_view,
         secretaryCanView: permissions.secretary_can_view,
-        staffCanView: permissions.staff_can_view
+        staffCanView: permissions.staff_can_view,
       })
-      toast.success('Report permissions saved successfully!')
+      toast.success('Report permissions saved')
     } catch (error) {
       console.error('Failed to save report permissions:', error)
       toast.error(`Failed to save report permissions: ${error}`)
@@ -5974,68 +5818,50 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
   if (loading) {
     return (
       <div className="text-center py-12">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-        <p className="text-slate-600">Loading permissions...</p>
+        <p className="text-[#2a3d36]/60">Loading permissions…</p>
       </div>
     )
   }
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-slate-800 mb-4">Report Access Permissions</h2>
-      <p className="text-slate-600 mb-6">
+      <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Report access</h2>
+      <p className="text-sm text-[#2a3d36]/55 mb-6">
         Control which roles can view reports. SuperAdmin always has access.
       </p>
 
-      <form onSubmit={handleSave} className="space-y-6">
-        <div className="space-y-4">
-          <label className="flex items-center cursor-pointer p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors">
+      <form onSubmit={handleSave} className="space-y-4">
+        {(
+          [
+            { key: 'manager_can_view' as const, title: 'Manager', desc: 'Allow Managers to view reports and analytics' },
+            { key: 'secretary_can_view' as const, title: 'Secretary', desc: 'Allow Secretaries to view reports and analytics' },
+            { key: 'staff_can_view' as const, title: 'Staff', desc: 'Allow Staff to view reports and analytics' },
+          ]
+        ).map((item) => (
+          <label
+            key={item.key}
+            className="flex items-center cursor-pointer p-4 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] hover:bg-white transition-colors"
+          >
             <input
               type="checkbox"
-              checked={permissions.manager_can_view}
-              onChange={(e) => setPermissions({ ...permissions, manager_can_view: e.target.checked })}
-              className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+              checked={Boolean(permissions[item.key])}
+              onChange={(e) => setPermissions({ ...permissions, [item.key]: e.target.checked })}
+              className="w-5 h-5 accent-[#121c19] rounded"
             />
             <div className="ml-3 flex-1">
-              <p className="font-semibold text-slate-800">Manager</p>
-              <p className="text-sm text-slate-600">Allow Managers to view reports and analytics</p>
+              <p className="font-semibold text-[#121c19]">{item.title}</p>
+              <p className="text-sm text-[#2a3d36]/55">{item.desc}</p>
             </div>
           </label>
+        ))}
 
-          <label className="flex items-center cursor-pointer p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors">
-            <input
-              type="checkbox"
-              checked={permissions.secretary_can_view}
-              onChange={(e) => setPermissions({ ...permissions, secretary_can_view: e.target.checked })}
-              className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-            />
-            <div className="ml-3 flex-1">
-              <p className="font-semibold text-slate-800">Secretary</p>
-              <p className="text-sm text-slate-600">Allow Secretaries to view reports and analytics</p>
-            </div>
-          </label>
-
-          <label className="flex items-center cursor-pointer p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors">
-            <input
-              type="checkbox"
-              checked={permissions.staff_can_view}
-              onChange={(e) => setPermissions({ ...permissions, staff_can_view: e.target.checked })}
-              className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-            />
-            <div className="ml-3 flex-1">
-              <p className="font-semibold text-slate-800">Staff</p>
-              <p className="text-sm text-slate-600">Allow Staff members to view reports and analytics</p>
-            </div>
-          </label>
-        </div>
-
-        <div className="flex space-x-4 pt-4 border-t border-slate-200">
+        <div className="flex justify-end pt-2">
           <button
             type="submit"
             disabled={saving}
-            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-6 py-3 bg-[#121c19] hover:bg-[#1a2924] text-white rounded-md font-semibold disabled:opacity-50"
           >
-            {saving ? 'Saving...' : '💾 Save Permissions'}
+            {saving ? 'Saving…' : 'Save permissions'}
           </button>
         </div>
       </form>
@@ -6074,7 +5900,19 @@ function EmailSettings({ currentUser, businessInfo }: { currentUser: any, busine
     try {
       setLoading(true)
       const config = await invoke('get_email_config', { businessId }) as any
-      setEmailConfig(config)
+      setEmailConfig({
+        smtp_server: config?.smtp_server || 'smtp.gmail.com',
+        smtp_port: Number(config?.smtp_port) || 587,
+        username: config?.username || '',
+        password: config?.password || '',
+        from_email: config?.from_email || '',
+        from_name: config?.from_name || 'POS System',
+        use_tls: config?.use_tls !== false,
+        enabled: Boolean(config?.enabled),
+        notification_roles: config?.notification_roles || 'SuperAdmin,Manager',
+        low_stock_enabled: config?.low_stock_enabled !== false,
+        pending_sales_enabled: config?.pending_sales_enabled !== false,
+      })
     } catch (error) {
       console.error('Failed to load email config:', error)
       toast.error('Failed to load email configuration')
@@ -6353,634 +6191,378 @@ function EmailSettings({ currentUser, businessInfo }: { currentUser: any, busine
 }
 
 function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   const [loading, setLoading] = useState(true)
   const [hasAccess, setHasAccess] = useState(false)
-  const [activeTab, setActiveTab] = useState<'sales' | 'revenue' | 'products' | 'staff' | 'inventory'>('sales')
-  const [salesReport, setSalesReport] = useState<any>(null)
-  const [revenueAnalytics, setRevenueAnalytics] = useState<any>(null)
-  const [topProducts, setTopProducts] = useState<any[]>([])
-  const [staffPerformance, setStaffPerformance] = useState<any[]>([])
-  const [inventoryMovements, setInventoryMovements] = useState<any[]>([])
-  // Reserved for future use
-  // const [inventoryTransfers, setInventoryTransfers] = useState<any[]>([])
-  // const [inventoryAdjustments, setInventoryAdjustments] = useState<any[]>([])
-  const [inventorySummary, setInventorySummary] = useState<any>(null)
-  const [dateRange, setDateRange] = useState({
-    start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-    end: new Date().toISOString().split('T')[0]
-  })
+  const [reportDate, setReportDate] = useState(yesterday)
+  const [report, setReport] = useState<any>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [view, setView] = useState<'all' | 'sold' | 'remaining'>('all')
 
   const businessId = currentUser?.business_id || businessInfo?.id
   const userRole = currentUser?.role || ''
+  const roleAllows =
+    userRole === 'SuperAdmin' || userRole === 'Manager' || userRole === 'Secretary'
+
+  const formatMoney = (n: number) =>
+    `₦${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+  const formatDateLabel = (iso: string) => {
+    const d = new Date(`${iso}T12:00:00`)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleDateString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    })
+  }
 
   useEffect(() => {
-    if (businessId) {
-      checkAccess()
+    if (!businessId) {
+      setLoading(false)
+      return
     }
+    void checkAccess()
   }, [businessId, userRole])
-
-  const checkAccess = async () => {
-    try {
-      const canView = await invoke('can_user_view_reports', { businessId, userRole: userRole }) as boolean
-      setHasAccess(canView)
-      if (canView) {
-        loadRevenueAnalytics()
-        loadSalesReport()
-      }
-    } catch (error) {
-      console.error('Failed to check report access:', error)
-      setHasAccess(false)
-    }
-  }
-
-
-  const loadRevenueAnalytics = async () => {
-    try {
-      const analytics = await invoke('get_revenue_analytics', { businessId }) as any
-      setRevenueAnalytics(analytics)
-    } catch (error) {
-      console.error('Failed to load revenue analytics:', error)
-      toast.error('Failed to load revenue analytics')
-    }
-  }
-
-  const loadSalesReport = async () => {
-    try {
-      setLoading(true)
-      const [report, products, staff] = await Promise.all([
-        invoke('get_sales_report', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any>,
-        invoke('get_top_products', { businessId, startDate: dateRange.start, endDate: dateRange.end, limit: 10 }) as Promise<any[]>,
-        invoke('get_staff_performance', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
-      ])
-      setSalesReport(report)
-      setTopProducts(products)
-      setStaffPerformance(staff)
-    } catch (error) {
-      console.error('Failed to load sales report:', error)
-      toast.error('Failed to load sales report')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const loadInventoryReport = async () => {
-    try {
-      setLoading(true)
-      const [summary, movements] = await Promise.all([
-        invoke('get_inventory_summary', { businessId }) as Promise<any>,
-        invoke('get_inventory_movements', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
-        // Reserved for future use
-        // invoke('get_inventory_transfers', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
-        // invoke('get_inventory_adjustments', { businessId, startDate: dateRange.start, endDate: dateRange.end }) as Promise<any[]>,
-      ])
-      setInventorySummary(summary)
-      setInventoryMovements(movements)
-      // Reserved for future use
-      // setInventoryTransfers(transfers)
-      // setInventoryAdjustments(adjustments)
-    } catch (error) {
-      console.error('Failed to load inventory report:', error)
-      toast.error('Failed to load inventory report')
-    } finally {
-      setLoading(false)
-    }
-  }
 
   useEffect(() => {
     if (hasAccess && businessId) {
-      if (activeTab === 'inventory') {
-        loadInventoryReport()
-      } else {
-        loadRevenueAnalytics()
-        loadSalesReport()
-      }
+      void loadReport()
     }
-  }, [businessId, dateRange, hasAccess, activeTab])
+  }, [hasAccess, businessId, reportDate])
 
-  const exportToExcel = (data: any[], filename: string, sheetName: string) => {
+  const checkAccess = async () => {
+    try {
+      const canView = await invoke('can_user_view_reports', {
+        businessId,
+        userRole,
+      }) as boolean | null
+      setHasAccess(canView === true || (canView == null && roleAllows))
+    } catch {
+      setHasAccess(roleAllows)
+    }
+  }
+
+  const loadReport = async () => {
+    try {
+      setLoading(true)
+      const data = await invoke('get_daily_stock_report', {
+        businessId,
+        reportDate,
+      }) as any
+      setReport(data)
+    } catch (error) {
+      console.error('Failed to load daily stock report:', error)
+      toast.error('Failed to load daily stock report')
+      setReport(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const rows: any[] = Array.isArray(report?.rows) ? report.rows : []
+  const filtered = rows.filter((row) => {
+    const q = searchQuery.trim().toLowerCase()
+    const matches =
+      !q ||
+      String(row.name || '').toLowerCase().includes(q) ||
+      String(row.packaging || '').toLowerCase().includes(q)
+    if (!matches) return false
+    if (view === 'sold') return Number(row.sold_qty) > 0
+    if (view === 'remaining') return Number(row.remaining_stock) > 0
+    return true
+  })
+
+  const exportReport = () => {
+    if (!report) return
+    const data = filtered.map((row) => ({
+      Product: row.name,
+      Packaging: row.packaging || '',
+      'Unit price': row.price,
+      Opening: row.opening_stock,
+      Sold: row.sold_qty,
+      'Sold value (₦)': row.sold_value,
+      Remaining: row.remaining_stock,
+      'Remaining value (₦)': row.remaining_value,
+      Fridge: row.fridge_stock,
+      Show: row.show_stock,
+      Store: row.store_stock,
+    }))
     const ws = XLSX.utils.json_to_sheet(data)
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, sheetName)
-    XLSX.writeFile(wb, `${filename}.xlsx`)
-    toast.success(`Exported to ${filename}.xlsx`)
+    XLSX.utils.book_append_sheet(wb, ws, 'Daily Stock')
+    XLSX.writeFile(wb, `Daily_Stock_${report.report_date || reportDate}.xlsx`)
+    toast.success('Exported daily stock report')
   }
-
-  const exportSalesReport = () => {
-    if (!salesReport) return
-    const data = salesReport.daily_sales?.map((day: any) => ({
-      Date: day.date,
-      'Total Revenue': day.total,
-      'Transaction Count': day.count
-    })) || []
-    exportToExcel(data, `Sales_Report_${dateRange.start}_to_${dateRange.end}`, 'Sales Report')
-  }
-
-  const exportProductsReport = () => {
-    const data = topProducts.map((product: any) => ({
-      'Product Name': product.name,
-      Category: product.category,
-      'Quantity Sold': product.total_quantity,
-      'Total Revenue': product.total_revenue,
-      'Sales Count': product.sale_count,
-      Price: product.price
-    }))
-    exportToExcel(data, `Products_Report_${dateRange.start}_to_${dateRange.end}`, 'Product Performance')
-  }
-
-  const exportStaffReport = () => {
-    const data = staffPerformance.map((staff: any) => ({
-      'Staff Name': staff.name || 'Unknown',
-      Role: staff.role,
-      'Sales Count': staff.sale_count,
-      'Total Revenue': staff.total_revenue,
-      'Average Sale': staff.average_sale
-    }))
-    exportToExcel(data, `Staff_Report_${dateRange.start}_to_${dateRange.end}`, 'Staff Performance')
-  }
-
-  const exportInventoryMovements = () => {
-    const data = inventoryMovements.map((movement: any) => ({
-      Date: movement.created_at,
-      'Product Name': movement.product_name,
-      Category: movement.category,
-      'Transaction Type': movement.transaction_type,
-      Quantity: movement.quantity,
-      Reason: movement.reason || '',
-      'User Name': movement.user_name || 'Unknown',
-      'User Role': movement.user_role
-    }))
-    exportToExcel(data, `Inventory_Movements_${dateRange.start}_to_${dateRange.end}`, 'Inventory Movements')
-  }
-
-  // Reserved for future use - Export inventory transfers to Excel
-  // const exportInventoryTransfers = () => {
-  //   const data = inventoryTransfers.map((transfer: any) => ({
-  //     Date: transfer.created_at,
-  //     'Product Name': transfer.product_name,
-  //     Category: transfer.category,
-  //     'Transfer Type': transfer.transaction_type,
-  //     Quantity: transfer.quantity,
-  //     Reason: transfer.reason || '',
-  //     'User Name': transfer.user_name || 'Unknown'
-  //   }))
-  //   exportToExcel(data, `Inventory_Transfers_${dateRange.start}_to_${dateRange.end}`, 'Inventory Transfers')
-  // }
-
-  // Reserved for future use - Export inventory adjustments to Excel
-  // const exportInventoryAdjustments = () => {
-  //   const data = inventoryAdjustments.map((adjustment: any) => ({
-  //     Date: adjustment.created_at,
-  //     'Product Name': adjustment.product_name,
-  //     Category: adjustment.category,
-  //     Quantity: adjustment.quantity,
-  //     Reason: adjustment.reason || '',
-  //     'User Name': adjustment.user_name || 'Unknown'
-  //   }))
-  //   exportToExcel(data, `Inventory_Adjustments_${dateRange.start}_to_${dateRange.end}`, 'Inventory Adjustments')
-  // }
 
   if (!hasAccess) {
     return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="max-w-md mx-auto mt-20">
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
-              <div className="text-6xl mb-4">🚫</div>
-              <h2 className="text-2xl font-bold text-slate-800 mb-2">Access Denied</h2>
-              <p className="text-slate-600">You don't have permission to view reports. Please contact your administrator.</p>
-            </div>
-          </div>
+      <div className="min-h-full bg-[#f4f6f5] flex items-center justify-center px-4">
+        <div className="max-w-md w-full rounded-xl border border-[#d4dcd8] bg-white p-8 text-center">
+          <p className="font-display text-2xl font-bold text-[#121c19]">Access denied</p>
+          <p className="mt-2 text-[#2a3d36]/65">
+            You don&apos;t have permission to view reports. Contact your administrator.
+          </p>
         </div>
       </div>
     )
   }
 
-  if (loading && !salesReport) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-slate-600">Loading reports...</p>
-          </div>
-        </div>
-      </div>
-    )
+  if (loading && !report) {
+    return <PageLoader label="Loading reports…" />
+  }
+
+  const displayDate = report?.report_date || reportDate
+  const totals = report?.totals || {
+    sold_qty: 0,
+    sold_value: 0,
+    remaining_stock: 0,
+    remaining_value: 0,
+    opening_stock: 0,
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">📊 Reports & Analytics</h1>
-          <p className="text-slate-600 text-lg">Comprehensive business insights and performance metrics</p>
-        </div>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 sm:mb-8 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Analytics
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Daily stock report
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base max-w-2xl">
+              Opening stock, what sold, and what remains — with money values for{' '}
+              {formatDateLabel(displayDate)}.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 rounded-md border border-[#d4dcd8] bg-white px-3 py-2 text-sm">
+              <span className="text-[#2a3d36]/55 font-medium">Date</span>
+              <input
+                type="date"
+                value={reportDate}
+                max={new Date().toISOString().slice(0, 10)}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (!next || next === reportDate) return
+                  setReportDate(next)
+                  setReport(null)
+                  setLoading(true)
+                }}
+                className="border-0 bg-transparent text-[#121c19] font-semibold focus:outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void loadReport()}
+              disabled={loading}
+              className="border border-[#121c19]/15 hover:bg-white disabled:opacity-50 text-[#121c19] px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              {loading ? 'Loading…' : 'Refresh'}
+            </button>
+            <button
+              type="button"
+              onClick={exportReport}
+              className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Export Excel
+            </button>
+          </div>
+        </header>
 
-        {revenueAnalytics && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">Today's Revenue</p>
-                  <p className="text-2xl font-bold text-blue-600">₦{revenueAnalytics.today?.revenue?.toLocaleString() || '0'}</p>
-                  <p className="text-xs text-slate-500 mt-1">{revenueAnalytics.today?.count || 0} sales</p>
-                </div>
-                <div className="text-4xl">💰</div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">This Week</p>
-                  <p className="text-2xl font-bold text-green-600">₦{revenueAnalytics.week?.revenue?.toLocaleString() || '0'}</p>
-                </div>
-                <div className="text-4xl">📈</div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">This Month</p>
-                  <p className="text-2xl font-bold text-amber-600">₦{revenueAnalytics.month?.revenue?.toLocaleString() || '0'}</p>
-                </div>
-                <div className="text-4xl">📅</div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">All Time</p>
-                  <p className="text-2xl font-bold text-purple-600">₦{revenueAnalytics.all_time?.revenue?.toLocaleString() || '0'}</p>
-                </div>
-                <div className="text-4xl">🏆</div>
-              </div>
-            </div>
+        {loading && (
+          <div className="mb-4 rounded-lg border border-[#d4dcd8] bg-white px-4 py-3 text-sm text-[#2a3d36]/70">
+            Loading sales for {formatDateLabel(reportDate)}…
           </div>
         )}
 
-        <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
-          <div className="flex items-center gap-4">
-            <label className="text-sm font-medium text-slate-700">Date Range:</label>
-            <input
-              type="date"
-              value={dateRange.start}
-              onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
-              className="px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <span className="text-slate-600">to</span>
-            <input
-              type="date"
-              value={dateRange.end}
-              onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
-              className="px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              onClick={loadSalesReport}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
-            >
-              🔄 Refresh
-            </button>
-          </div>
+        <div className={`grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6 ${loading ? 'opacity-60' : ''}`}>
+          <MetricCard
+            title="Day sales"
+            value={formatMoney(report?.day_sales_total || totals.sold_value)}
+            hint={`${report?.day_sales_count || 0} transactions`}
+            accent="teal"
+          />
+          <MetricCard
+            title="Units sold"
+            value={String(totals.sold_qty || 0)}
+            hint={formatMoney(totals.sold_value || 0)}
+            accent="copper"
+          />
+          <MetricCard
+            title="Stock left"
+            value={String(totals.remaining_stock || 0)}
+            hint={formatMoney(totals.remaining_value || 0)}
+            accent="ink"
+          />
+          <MetricCard
+            title="Opening stock"
+            value={String(totals.opening_stock || 0)}
+            hint="Remaining + sold"
+            accent="rose"
+          />
         </div>
 
-        <div className="bg-white rounded-xl shadow-lg border border-slate-200 mb-6">
-          <div className="border-b border-slate-200">
-            <div className="flex space-x-1 p-2">
-              <button
-                onClick={() => setActiveTab('sales')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
-                  activeTab === 'sales' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                💰 Sales Report
-              </button>
-              <button
-                onClick={() => setActiveTab('products')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
-                  activeTab === 'products' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                🛍️ Product Performance
-              </button>
-              <button
-                onClick={() => setActiveTab('staff')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
-                  activeTab === 'staff' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                👥 Staff Performance
-              </button>
-              <button
-                onClick={() => setActiveTab('inventory')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
-                  activeTab === 'inventory' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                📦 Inventory Reports
-              </button>
+        <div className="rounded-xl border border-[#d4dcd8] bg-white p-4 sm:p-5 mb-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  { id: 'all', label: 'All products' },
+                  { id: 'sold', label: 'Sold that day' },
+                  { id: 'remaining', label: 'Still in stock' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setView(tab.id)}
+                  className={`px-3.5 py-2 rounded-md text-sm font-semibold transition-colors ${
+                    view === tab.id
+                      ? 'bg-[#121c19] text-white'
+                      : 'bg-[#f4f6f5] text-[#2a3d36]/70 hover:text-[#121c19]'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
-          </div>
-
-          <div className="p-6">
-            {activeTab === 'sales' && salesReport && (
-              <div className="space-y-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-2xl font-bold text-slate-800">Sales Report</h2>
-                  <button
-                    onClick={exportSalesReport}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
-                  >
-                    📊 Export to Excel
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
-                    <p className="text-sm font-medium text-blue-900 mb-1">Total Sales</p>
-                    <p className="text-3xl font-bold text-blue-600">₦{salesReport.total_sales?.toLocaleString() || '0'}</p>
-                  </div>
-                  <div className="bg-green-50 rounded-lg p-6 border border-green-200">
-                    <p className="text-sm font-medium text-green-900 mb-1">Total Transactions</p>
-                    <p className="text-3xl font-bold text-green-600">{salesReport.total_count || 0}</p>
-                  </div>
-                  <div className="bg-purple-50 rounded-lg p-6 border border-purple-200">
-                    <p className="text-sm font-medium text-purple-900 mb-1">Average Sale</p>
-                    <p className="text-3xl font-bold text-purple-600">₦{salesReport.average_sale?.toFixed(2) || '0'}</p>
-                  </div>
-                </div>
-
-                {salesReport.daily_sales && salesReport.daily_sales.length > 0 && (
-                  <div className="bg-slate-50 rounded-lg p-6">
-                    <h3 className="text-xl font-bold text-slate-800 mb-4">Daily Sales Trend</h3>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={salesReport.daily_sales}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="date" />
-                        <YAxis />
-                        <Tooltip formatter={(value: any) => `₦${value.toLocaleString()}`} />
-                        <Legend />
-                        <Line type="monotone" dataKey="total" stroke="#3b82f6" strokeWidth={2} name="Revenue" />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-
-                {salesReport.payment_methods && salesReport.payment_methods.length > 0 && (
-                  <div className="bg-slate-50 rounded-lg p-6">
-                    <h3 className="text-xl font-bold text-slate-800 mb-4">Payment Methods</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      {salesReport.payment_methods.map((method: any) => (
-                        <div key={method.method} className="bg-white rounded-lg p-4 border border-slate-200">
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <p className="font-semibold text-slate-800">{method.method}</p>
-                              <p className="text-sm text-slate-600">{method.count} transactions</p>
-                            </div>
-                            <p className="text-xl font-bold text-blue-600">₦{method.total.toLocaleString()}</p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {activeTab === 'products' && (
-              <div>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-slate-800">Top Selling Products</h2>
-                  <button
-                    onClick={exportProductsReport}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
-                  >
-                    📊 Export to Excel
-                  </button>
-                </div>
-                {topProducts.length === 0 ? (
-                  <div className="text-center py-12">
-                    <p className="text-xl font-semibold text-slate-700">No Product Sales</p>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="bg-slate-50 rounded-lg p-6">
-                      <h3 className="text-lg font-bold text-slate-800 mb-4">Revenue by Product</h3>
-                      <ResponsiveContainer width="100%" height={400}>
-                        <BarChart data={topProducts.slice(0, 10)}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
-                          <YAxis />
-                          <Tooltip formatter={(value: any) => `₦${value.toLocaleString()}`} />
-                          <Legend />
-                          <Bar dataKey="total_revenue" fill="#3b82f6" name="Revenue" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
-                        <thead className="bg-slate-50 border-b border-slate-200">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Quantity Sold</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Revenue</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Sales Count</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {topProducts.map((product: any) => (
-                            <tr key={product.id} className="border-b border-slate-100 hover:bg-slate-50">
-                              <td className="px-4 py-3 font-semibold text-slate-800">{product.name}</td>
-                              <td className="px-4 py-3">
-                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                  {product.category}
-                                </span>
-                              </td>
-                              <td className="px-4 py-3 text-slate-700">{product.total_quantity}</td>
-                              <td className="px-4 py-3 font-bold text-blue-600">₦{product.total_revenue.toLocaleString()}</td>
-                              <td className="px-4 py-3 text-slate-700">{product.sale_count}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {activeTab === 'staff' && (
-              <div>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-slate-800">Staff Performance</h2>
-                  <button
-                    onClick={exportStaffReport}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
-                  >
-                    📊 Export to Excel
-                  </button>
-                </div>
-                {staffPerformance.length === 0 ? (
-                  <div className="text-center py-12">
-                    <p className="text-xl font-semibold text-slate-700">No Staff Performance Data</p>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="bg-slate-50 rounded-lg p-6">
-                      <h3 className="text-lg font-bold text-slate-800 mb-4">Revenue by Staff</h3>
-                      <ResponsiveContainer width="100%" height={300}>
-                        <BarChart data={staffPerformance}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="name" />
-                          <YAxis />
-                          <Tooltip formatter={(value: any) => `₦${value.toLocaleString()}`} />
-                          <Legend />
-                          <Bar dataKey="total_revenue" fill="#10b981" name="Revenue" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
-                        <thead className="bg-slate-50 border-b border-slate-200">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Staff Name</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Role</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Sales Count</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Total Revenue</th>
-                            <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Average Sale</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {staffPerformance.map((staff: any) => (
-                            <tr key={staff.id} className="border-b border-slate-100 hover:bg-slate-50">
-                              <td className="px-4 py-3 font-semibold text-slate-800">{staff.name || 'Unknown'}</td>
-                              <td className="px-4 py-3">
-                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                                  {staff.role}
-                                </span>
-                              </td>
-                              <td className="px-4 py-3 text-slate-700">{staff.sale_count}</td>
-                              <td className="px-4 py-3 font-bold text-green-600">₦{staff.total_revenue.toLocaleString()}</td>
-                              <td className="px-4 py-3 text-slate-700">₦{staff.average_sale.toFixed(2)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {activeTab === 'inventory' && (
-              <div>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-slate-800">Inventory Reports</h2>
-                  <button
-                    onClick={exportInventoryMovements}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium flex items-center gap-2"
-                  >
-                    📊 Export to Excel
-                  </button>
-                </div>
-
-                {/* Inventory Summary */}
-                {inventorySummary && (
-                  <div className="grid grid-cols-1 md:grid-cols-5 gap-6 mb-6">
-                    <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
-                      <p className="text-sm font-medium text-blue-900 mb-1">Total Products</p>
-                      <p className="text-3xl font-bold text-blue-600">{inventorySummary.total_products || 0}</p>
-                    </div>
-                    <div className="bg-green-50 rounded-lg p-6 border border-green-200">
-                      <p className="text-sm font-medium text-green-900 mb-1">Total Stock Value</p>
-                      <p className="text-3xl font-bold text-green-600">₦{inventorySummary.total_stock_value?.toLocaleString() || '0'}</p>
-                    </div>
-                    <div className="bg-purple-50 rounded-lg p-6 border border-purple-200">
-                      <p className="text-sm font-medium text-purple-900 mb-1">Total Stock Qty</p>
-                      <p className="text-3xl font-bold text-purple-600">{inventorySummary.total_stock_quantity || 0}</p>
-                    </div>
-                    <div className="bg-amber-50 rounded-lg p-6 border border-amber-200">
-                      <p className="text-sm font-medium text-amber-900 mb-1">Low Stock</p>
-                      <p className="text-3xl font-bold text-amber-600">{inventorySummary.low_stock_count || 0}</p>
-                    </div>
-                    <div className="bg-red-50 rounded-lg p-6 border border-red-200">
-                      <p className="text-sm font-medium text-red-900 mb-1">Out of Stock</p>
-                      <p className="text-3xl font-bold text-red-600">{inventorySummary.out_of_stock_count || 0}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Inventory Movements */}
-                <div className="bg-slate-50 rounded-lg p-6 mb-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-xl font-bold text-slate-800">Stock Movements</h3>
-                    <button
-                      onClick={exportInventoryMovements}
-                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium text-sm"
-                    >
-                      📊 Export
-                    </button>
-                  </div>
-                {/* Inventory Movements Table */}
-                {inventoryMovements.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="text-6xl mb-4">📦</div>
-                    <p className="text-xl font-semibold text-slate-700">No Inventory Movements</p>
-                    <p className="text-slate-600 mt-2">No inventory transactions found in the selected date range</p>
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead className="bg-slate-50 border-b border-slate-200">
-                        <tr>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Date</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Type</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Quantity</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Reason</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">User</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {inventoryMovements.map((movement: any) => {
-                          const isPositive = movement.quantity > 0
-                          return (
-                            <tr key={movement.id} className="border-b border-slate-100 hover:bg-slate-50">
-                              <td className="px-4 py-3 text-sm text-slate-700">{movement.created_at}</td>
-                              <td className="px-4 py-3 font-semibold text-slate-800">{movement.product_name}</td>
-                              <td className="px-4 py-3">
-                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                  {movement.category}
-                                </span>
-                              </td>
-                              <td className="px-4 py-3">
-                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                                  movement.transaction_type.includes('IN') || movement.transaction_type.includes('TRANSFER') 
-                                    ? 'bg-green-100 text-green-700' 
-                                    : 'bg-red-100 text-red-700'
-                                }`}>
-                                  {movement.transaction_type}
-                                </span>
-                              </td>
-                              <td className={`px-4 py-3 font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                                {isPositive ? '+' : ''}{movement.quantity}
-                              </td>
-                              <td className="px-4 py-3 text-sm text-slate-600">{movement.reason || '-'}</td>
-                              <td className="px-4 py-3 text-sm text-slate-700">
-                                {movement.user_name || 'Unknown'} ({movement.user_role})
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-                </div>
-              </div>
-            )}
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search product…"
+              className="w-full lg:w-72 px-4 py-2.5 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] text-sm focus:outline-none focus:ring-2 focus:ring-[#c4783a]/35"
+            />
           </div>
         </div>
+
+        {filtered.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
+            <p className="font-display text-2xl font-bold text-[#121c19]">No stock rows</p>
+            <p className="mt-2 text-[#2a3d36]/60">
+              Nothing matched this date or filter.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="md:hidden space-y-3">
+              {filtered.map((row) => (
+                <article
+                  key={row.id}
+                  className="rounded-xl border border-[#d4dcd8] bg-white p-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-semibold text-[#121c19]">{row.name}</p>
+                      <p className="text-xs text-[#2a3d36]/50 mt-1">
+                        {row.packaging || '—'} · {formatMoney(row.price)}
+                      </p>
+                    </div>
+                    <span className="text-xs font-semibold text-teal-800 bg-teal-50 border border-teal-200 px-2 py-1 rounded-md">
+                      Sold {row.sold_qty}
+                    </span>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wide text-[#2a3d36]/45">Opening</p>
+                      <p className="font-semibold text-[#121c19]">{row.opening_stock}</p>
+                    </div>
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wide text-[#2a3d36]/45">Sold value</p>
+                      <p className="font-semibold text-[#121c19]">{formatMoney(row.sold_value)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wide text-[#2a3d36]/45">Left</p>
+                      <p className="font-semibold text-[#121c19]">{row.remaining_stock}</p>
+                    </div>
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wide text-[#2a3d36]/45">Left value</p>
+                      <p className="font-semibold text-[#121c19]">{formatMoney(row.remaining_value)}</p>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-xs text-[#2a3d36]/50">
+                    Fridge {row.fridge_stock} · Show {row.show_stock} · Store {row.store_stock}
+                  </p>
+                </article>
+              ))}
+            </div>
+
+            <div className="hidden md:block rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left">
+                  <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
+                    <tr>
+                      <th className="px-5 py-3 font-semibold">Product</th>
+                      <th className="px-5 py-3 font-semibold">Price</th>
+                      <th className="px-5 py-3 font-semibold text-right">Opening</th>
+                      <th className="px-5 py-3 font-semibold text-right">Sold</th>
+                      <th className="px-5 py-3 font-semibold text-right">Sold value</th>
+                      <th className="px-5 py-3 font-semibold text-right">Left</th>
+                      <th className="px-5 py-3 font-semibold text-right">Left value</th>
+                      <th className="px-5 py-3 font-semibold">Locations</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#e8ecea]">
+                    {filtered.map((row) => (
+                      <tr key={row.id} className="hover:bg-[#f4f6f5]/70">
+                        <td className="px-5 py-4">
+                          <p className="font-semibold text-[#121c19]">{row.name}</p>
+                          <p className="text-xs text-[#2a3d36]/50 mt-0.5">
+                            {row.packaging || '—'}
+                          </p>
+                        </td>
+                        <td className="px-5 py-4 text-[#2a3d36]/70 whitespace-nowrap">
+                          {formatMoney(row.price)}
+                        </td>
+                        <td className="px-5 py-4 text-right font-medium text-[#121c19]">
+                          {row.opening_stock}
+                        </td>
+                        <td className="px-5 py-4 text-right font-semibold text-[#c4783a]">
+                          {row.sold_qty}
+                        </td>
+                        <td className="px-5 py-4 text-right font-semibold text-[#121c19] whitespace-nowrap">
+                          {formatMoney(row.sold_value)}
+                        </td>
+                        <td className="px-5 py-4 text-right font-medium text-[#121c19]">
+                          {row.remaining_stock}
+                        </td>
+                        <td className="px-5 py-4 text-right font-semibold text-teal-800 whitespace-nowrap">
+                          {formatMoney(row.remaining_value)}
+                        </td>
+                        <td className="px-5 py-4 text-xs text-[#2a3d36]/55 whitespace-nowrap">
+                          F {row.fridge_stock} · S {row.show_stock} · St {row.store_stock}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-[#f4f6f5] border-t border-[#d4dcd8]">
+                    <tr>
+                      <td className="px-5 py-4 font-bold text-[#121c19]" colSpan={2}>
+                        Totals
+                      </td>
+                      <td className="px-5 py-4 text-right font-bold">{totals.opening_stock}</td>
+                      <td className="px-5 py-4 text-right font-bold text-[#c4783a]">
+                        {totals.sold_qty}
+                      </td>
+                      <td className="px-5 py-4 text-right font-bold whitespace-nowrap">
+                        {formatMoney(totals.sold_value)}
+                      </td>
+                      <td className="px-5 py-4 text-right font-bold">{totals.remaining_stock}</td>
+                      <td className="px-5 py-4 text-right font-bold text-teal-800 whitespace-nowrap">
+                        {formatMoney(totals.remaining_value)}
+                      </td>
+                      <td />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
@@ -6989,7 +6571,12 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
 function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'summary' | 'sales' | 'low_stock' | 'out_of_stock'>('summary')
-  const [summary, setSummary] = useState<any>(null)
+  const [summary, setSummary] = useState<any>({
+    pending_sales: 0,
+    low_stock_products: 0,
+    out_of_stock_products: 0,
+    total_pending: 0,
+  })
   const [pendingSales, setPendingSales] = useState<any[]>([])
   const [lowStockProducts, setLowStockProducts] = useState<any[]>([])
   const [outOfStockProducts, setOutOfStockProducts] = useState<any[]>([])
@@ -6998,7 +6585,9 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
 
   useEffect(() => {
     if (businessId) {
-      loadAllData()
+      void loadAllData()
+    } else {
+      setLoading(false)
     }
   }, [businessId])
 
@@ -7011,13 +6600,29 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
         invoke('get_low_stock_products_for_business', { businessId }) as Promise<any[]>,
         invoke('get_out_of_stock_products_for_business', { businessId }) as Promise<any[]>,
       ])
-      setSummary(summaryData)
-      setPendingSales(sales)
-      setLowStockProducts(lowStock)
-      setOutOfStockProducts(outOfStock)
+      setSummary(
+        summaryData || {
+          pending_sales: 0,
+          low_stock_products: 0,
+          out_of_stock_products: 0,
+          total_pending: 0,
+        }
+      )
+      setPendingSales(Array.isArray(sales) ? sales : [])
+      setLowStockProducts(Array.isArray(lowStock) ? lowStock : [])
+      setOutOfStockProducts(Array.isArray(outOfStock) ? outOfStock : [])
     } catch (error) {
       console.error('Failed to load pending items:', error)
       toast.error('Failed to load pending items')
+      setSummary({
+        pending_sales: 0,
+        low_stock_products: 0,
+        out_of_stock_products: 0,
+        total_pending: 0,
+      })
+      setPendingSales([])
+      setLowStockProducts([])
+      setOutOfStockProducts([])
     } finally {
       setLoading(false)
     }
@@ -7029,446 +6634,349 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
       toast.success('Sale marked as completed')
       await loadAllData()
     } catch (error) {
-      console.error('Failed to mark sale as completed:', error)
       toast.error(`Failed to mark sale as completed: ${error}`)
     }
   }
 
   if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-slate-600">Loading pending items...</p>
-          </div>
-        </div>
-      </div>
-    )
+    return <PageLoader label="Loading pending items…" />
   }
 
+  const tabs: { id: typeof activeTab; label: string; count?: number }[] = [
+    { id: 'summary', label: 'Overview' },
+    { id: 'sales', label: 'Pending sales', count: summary.pending_sales || 0 },
+    { id: 'low_stock', label: 'Low stock', count: summary.low_stock_products || 0 },
+    { id: 'out_of_stock', label: 'Out of stock', count: summary.out_of_stock_products || 0 },
+  ]
+
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">📋 Pending Items Dashboard</h1>
-          <p className="text-slate-600 text-lg">View and manage all pending tasks and alerts</p>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 sm:mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Alerts
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Pending items
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+              Track unfinished sales and stock that needs attention.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadAllData()}
+            className="border border-[#121c19]/15 hover:border-[#121c19]/35 hover:bg-white text-[#121c19] px-5 py-2.5 rounded-md text-sm font-semibold transition-colors self-start"
+          >
+            Refresh
+          </button>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+          <MetricCard title="Total pending" value={String(summary.total_pending || 0)} accent="ink" />
+          <MetricCard title="Pending sales" value={String(summary.pending_sales || 0)} accent="copper" />
+          <MetricCard title="Low stock" value={String(summary.low_stock_products || 0)} accent="teal" />
+          <MetricCard title="Out of stock" value={String(summary.out_of_stock_products || 0)} accent="rose" />
         </div>
 
-        {/* Summary Cards */}
-        {summary && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">Total Pending</p>
-                  <p className="text-3xl font-bold text-slate-800">{summary.total_pending || 0}</p>
-                </div>
-                <div className="text-4xl">📋</div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">Pending Sales</p>
-                  <p className="text-3xl font-bold text-blue-600">{summary.pending_sales || 0}</p>
-                </div>
-                <div className="text-4xl">💰</div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">Low Stock</p>
-                  <p className="text-3xl font-bold text-amber-600">{summary.low_stock_products || 0}</p>
-                </div>
-                <div className="text-4xl">⚠️</div>
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg border border-slate-200 p-6 hover:shadow-xl transition-shadow">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-slate-600 mb-1">Out of Stock</p>
-                  <p className="text-3xl font-bold text-red-600">{summary.out_of_stock_products || 0}</p>
-                </div>
-                <div className="text-4xl">🚨</div>
-              </div>
-            </div>
-          </div>
-        )}
+        <div className="mb-6 flex gap-2 overflow-x-auto pb-1">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`shrink-0 inline-flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-[#121c19] text-white'
+                  : 'bg-white text-[#121c19] border border-[#d4dcd8] hover:bg-[#f4f6f5]'
+              }`}
+            >
+              {tab.label}
+              {typeof tab.count === 'number' && tab.count > 0 && (
+                <span
+                  className={`min-w-[1.25rem] h-5 px-1.5 rounded-md text-[11px] font-bold inline-flex items-center justify-center ${
+                    activeTab === tab.id ? 'bg-white/15 text-white' : 'bg-[#c4783a]/15 text-[#a35f2a]'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
 
-        {/* Tabs */}
-        <div className="bg-white rounded-xl shadow-lg border border-slate-200 mb-6">
-          <div className="border-b border-slate-200">
-            <div className="flex space-x-1 p-2">
-              <button
-                onClick={() => setActiveTab('summary')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors ${
-                  activeTab === 'summary'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                📊 Summary
-              </button>
-              <button
-                onClick={() => setActiveTab('sales')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors relative ${
-                  activeTab === 'sales'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                💰 Pending Sales
-                {summary?.pending_sales > 0 && (
-                  <span className="ml-2 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
-                    {summary.pending_sales}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={() => setActiveTab('low_stock')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors relative ${
-                  activeTab === 'low_stock'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                ⚠️ Low Stock
-                {summary?.low_stock_products > 0 && (
-                  <span className="ml-2 px-2 py-0.5 bg-amber-500 text-white text-xs rounded-full">
-                    {summary.low_stock_products}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={() => setActiveTab('out_of_stock')}
-                className={`px-6 py-3 rounded-lg font-medium transition-colors relative ${
-                  activeTab === 'out_of_stock'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                🚨 Out of Stock
-                {summary?.out_of_stock_products > 0 && (
-                  <span className="ml-2 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
-                    {summary.out_of_stock_products}
-                  </span>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Tab Content */}
-          <div className="p-6">
-            {activeTab === 'summary' && (
-              <div className="space-y-6">
-                <h2 className="text-2xl font-bold text-slate-800 mb-4">Overview</h2>
-                
-                {/* Pending Sales Summary */}
-                <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-blue-900">💰 Pending Sales</h3>
-                    <span className="px-3 py-1 bg-blue-600 text-white rounded-full font-bold">
-                      {summary?.pending_sales || 0}
-                    </span>
-                  </div>
-                  {pendingSales.length > 0 ? (
-                    <div className="space-y-2">
-                      {pendingSales.slice(0, 3).map((sale: any) => (
-                        <div key={sale.id} className="bg-white rounded-lg p-4 flex items-center justify-between">
-                          <div>
-                            <p className="font-semibold text-slate-800">Sale #{sale.id}</p>
-                            <p className="text-sm text-slate-600">
-                              {sale.user_name || 'Unknown'} • {sale.item_count} items • ₦{sale.total_amount.toLocaleString()}
-                            </p>
-                            <p className="text-xs text-slate-500">{sale.created_at}</p>
-                          </div>
-                          <button
-                            onClick={() => handleMarkSaleCompleted(sale.id)}
-                            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium"
-                          >
-                            Mark Complete
-                          </button>
-                        </div>
-                      ))}
-                      {pendingSales.length > 3 && (
-                        <p className="text-sm text-slate-600 text-center pt-2">
-                          +{pendingSales.length - 3} more pending sales
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-slate-600">No pending sales</p>
-                  )}
-                </div>
-
-                {/* Low Stock Summary */}
-                <div className="bg-amber-50 rounded-lg p-6 border border-amber-200">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-amber-900">⚠️ Low Stock Products</h3>
-                    <span className="px-3 py-1 bg-amber-600 text-white rounded-full font-bold">
-                      {summary?.low_stock_products || 0}
-                    </span>
-                  </div>
-                  {lowStockProducts.length > 0 ? (
-                    <div className="space-y-2">
-                      {lowStockProducts.slice(0, 3).map((product: any) => (
-                        <div key={product.id} className="bg-white rounded-lg p-4">
-                          <p className="font-semibold text-slate-800">{product.name}</p>
-                          <div className="flex gap-4 mt-2 text-sm">
-                            <span className="text-slate-600">Fridge: <strong className={product.fridge_stock <= product.min_stock_level ? 'text-red-600' : ''}>{product.fridge_stock}</strong></span>
-                            <span className="text-slate-600">Show: <strong className={product.show_stock <= product.min_stock_level ? 'text-red-600' : ''}>{product.show_stock}</strong></span>
-                            <span className="text-slate-600">Store: <strong className={product.store_stock <= product.min_stock_level ? 'text-red-600' : ''}>{product.store_stock}</strong></span>
-                            <span className="text-slate-600">Min: {product.min_stock_level}</span>
-                          </div>
-                        </div>
-                      ))}
-                      {lowStockProducts.length > 3 && (
-                        <p className="text-sm text-slate-600 text-center pt-2">
-                          +{lowStockProducts.length - 3} more low stock products
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-slate-600">No low stock products</p>
-                  )}
-                </div>
-
-                {/* Out of Stock Summary */}
-                <div className="bg-red-50 rounded-lg p-6 border border-red-200">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-red-900">🚨 Out of Stock Products</h3>
-                    <span className="px-3 py-1 bg-red-600 text-white rounded-full font-bold">
-                      {summary?.out_of_stock_products || 0}
-                    </span>
-                  </div>
-                  {outOfStockProducts.length > 0 ? (
-                    <div className="space-y-2">
-                      {outOfStockProducts.slice(0, 3).map((product: any) => (
-                        <div key={product.id} className="bg-white rounded-lg p-4">
-                          <p className="font-semibold text-slate-800">{product.name}</p>
-                          <p className="text-sm text-red-600 mt-1">Completely out of stock - urgent restock needed!</p>
-                        </div>
-                      ))}
-                      {outOfStockProducts.length > 3 && (
-                        <p className="text-sm text-slate-600 text-center pt-2">
-                          +{outOfStockProducts.length - 3} more out of stock products
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-slate-600">No out of stock products</p>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'sales' && (
+        <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+          {activeTab === 'summary' && (
+            <div className="p-5 sm:p-6 space-y-5">
               <div>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-slate-800">Pending Sales</h2>
-                  <button
-                    onClick={loadAllData}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
-                  >
-                    🔄 Refresh
-                  </button>
+                <h2 className="font-display text-lg font-bold text-[#121c19]">Overview</h2>
+                <p className="text-sm text-[#2a3d36]/55 mt-1">Quick look at what needs action</p>
+              </div>
+
+              <section className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4 sm:p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-[#121c19]">Pending sales</h3>
+                  <span className="text-sm font-bold text-[#121c19]">{pendingSales.length}</span>
                 </div>
                 {pendingSales.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="text-6xl mb-4">✅</div>
-                    <p className="text-xl font-semibold text-slate-700">No Pending Sales</p>
-                    <p className="text-slate-600 mt-2">All sales have been completed!</p>
-                  </div>
+                  <p className="text-sm text-[#2a3d36]/55">No pending sales</p>
                 ) : (
-                  <div className="space-y-4">
-                    {pendingSales.map((sale: any) => (
-                      <div key={sale.id} className="bg-slate-50 rounded-lg p-6 border border-slate-200 hover:shadow-md transition-shadow">
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-4 mb-3">
-                              <h3 className="text-xl font-bold text-slate-800">Sale #{sale.id}</h3>
-                              <span className="px-3 py-1 bg-amber-500 text-white rounded-full text-sm font-semibold">
-                                PENDING
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                              <div>
-                                <p className="text-slate-600">Total Amount</p>
-                                <p className="font-bold text-lg text-blue-600">₦{sale.total_amount.toLocaleString()}</p>
-                              </div>
-                              <div>
-                                <p className="text-slate-600">Items</p>
-                                <p className="font-semibold text-slate-800">{sale.item_count}</p>
-                              </div>
-                              <div>
-                                <p className="text-slate-600">Payment Method</p>
-                                <p className="font-semibold text-slate-800">{sale.payment_method}</p>
-                              </div>
-                              <div>
-                                <p className="text-slate-600">Staff</p>
-                                <p className="font-semibold text-slate-800">{sale.user_name || 'Unknown'}</p>
-                              </div>
-                            </div>
-                            <div className="mt-3">
-                              <p className="text-xs text-slate-500">Created: {sale.created_at}</p>
-                              {sale.notes && (
-                                <p className="text-sm text-slate-600 mt-1">Notes: {sale.notes}</p>
-                              )}
-                            </div>
-                          </div>
-                          <div className="ml-6">
-                            <button
-                              onClick={() => handleMarkSaleCompleted(sale.id)}
-                              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
-                            >
-                              ✅ Mark Complete
-                            </button>
-                          </div>
+                  <div className="space-y-2">
+                    {pendingSales.slice(0, 3).map((sale) => (
+                      <div
+                        key={sale.id}
+                        className="rounded-md bg-white border border-[#d4dcd8] px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                      >
+                        <div>
+                          <p className="font-semibold text-[#121c19]">Sale #{sale.id}</p>
+                          <p className="text-sm text-[#2a3d36]/60">
+                            {sale.user_name || 'Unknown'} · {sale.item_count || 0} items · ₦
+                            {Number(sale.total_amount || 0).toLocaleString()}
+                          </p>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleMarkSaleCompleted(sale.id)}
+                          className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2 rounded-md text-sm font-semibold"
+                        >
+                          Mark complete
+                        </button>
                       </div>
                     ))}
                   </div>
                 )}
-              </div>
-            )}
+              </section>
 
-            {activeTab === 'low_stock' && (
-              <div>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-slate-800">Low Stock Products</h2>
-                  <button
-                    onClick={loadAllData}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
-                  >
-                    🔄 Refresh
-                  </button>
+              <section className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4 sm:p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-[#121c19]">Low stock</h3>
+                  <span className="text-sm font-bold text-[#c4783a]">{lowStockProducts.length}</span>
                 </div>
                 {lowStockProducts.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="text-6xl mb-4">✅</div>
-                    <p className="text-xl font-semibold text-slate-700">No Low Stock Products</p>
-                    <p className="text-slate-600 mt-2">All products are well stocked!</p>
-                  </div>
+                  <p className="text-sm text-[#2a3d36]/55">No low stock products</p>
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead className="bg-slate-50 border-b border-slate-200">
-                        <tr>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product Name</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Fridge Stock</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Show Stock</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Store Stock</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Price</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {lowStockProducts.map((product: any) => {
-                          const isLow = product.fridge_stock <= product.min_stock_level || 
-                                       product.show_stock <= product.min_stock_level ||
-                                       product.store_stock <= product.min_stock_level
-                          return (
-                            <tr key={product.id} className={isLow ? 'bg-red-50' : ''}>
-                              <td className="px-4 py-3">
-                                <div className="font-semibold text-slate-800">{product.name}</div>
-                                {product.description && (
-                                  <div className="text-xs text-slate-500 mt-1">{product.description}</div>
-                                )}
-                              </td>
-                              <td className="px-4 py-3">
-                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                  {product.category}
-                                </span>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className={`font-semibold ${product.fridge_stock <= product.min_stock_level ? 'text-red-600' : 'text-slate-700'}`}>
-                                  {product.fridge_stock} / {product.min_stock_level}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className={`font-semibold ${product.show_stock <= product.min_stock_level ? 'text-red-600' : 'text-slate-700'}`}>
-                                  {product.show_stock} / {product.min_stock_level}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className={`font-semibold ${product.store_stock <= product.min_stock_level ? 'text-red-600' : 'text-slate-700'}`}>
-                                  {product.store_stock} / {product.min_stock_level}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="font-semibold text-slate-800">₦{product.price.toLocaleString()}</div>
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
+                  <div className="space-y-2">
+                    {lowStockProducts.slice(0, 4).map((product) => (
+                      <div
+                        key={product.id}
+                        className="rounded-md bg-white border border-[#d4dcd8] px-4 py-3"
+                      >
+                        <p className="font-semibold text-[#121c19]">{product.name}</p>
+                        <p className="text-xs text-[#2a3d36]/55 mt-1">
+                          Fridge {product.fridge_stock || 0} · Show {product.show_stock || 0} · Store{' '}
+                          {product.store_stock || 0} · Min {product.min_stock_level || 0}
+                        </p>
+                      </div>
+                    ))}
+                    {lowStockProducts.length > 4 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('low_stock')}
+                        className="text-sm font-semibold text-[#c4783a]"
+                      >
+                        View all {lowStockProducts.length} low stock items
+                      </button>
+                    )}
                   </div>
                 )}
-              </div>
-            )}
+              </section>
 
-            {activeTab === 'out_of_stock' && (
-              <div>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-slate-800">Out of Stock Products</h2>
-                  <button
-                    onClick={loadAllData}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
-                  >
-                    🔄 Refresh
-                  </button>
+              <section className="rounded-lg border border-rose-200 bg-rose-50/50 p-4 sm:p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-[#121c19]">Out of stock</h3>
+                  <span className="text-sm font-bold text-rose-600">{outOfStockProducts.length}</span>
                 </div>
                 {outOfStockProducts.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="text-6xl mb-4">✅</div>
-                    <p className="text-xl font-semibold text-slate-700">No Out of Stock Products</p>
-                    <p className="text-slate-600 mt-2">All products have stock available!</p>
-                  </div>
+                  <p className="text-sm text-[#2a3d36]/55">No out of stock products</p>
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead className="bg-slate-50 border-b border-slate-200">
+                  <div className="space-y-2">
+                    {outOfStockProducts.slice(0, 4).map((product) => (
+                      <div
+                        key={product.id}
+                        className="rounded-md bg-white border border-rose-100 px-4 py-3"
+                      >
+                        <p className="font-semibold text-[#121c19]">{product.name}</p>
+                        <p className="text-xs text-rose-600 mt-1">All locations at 0</p>
+                      </div>
+                    ))}
+                    {outOfStockProducts.length > 4 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('out_of_stock')}
+                        className="text-sm font-semibold text-rose-600"
+                      >
+                        View all {outOfStockProducts.length} out of stock items
+                      </button>
+                    )}
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeTab === 'sales' && (
+            <div className="p-5 sm:p-6">
+              <h2 className="font-display text-lg font-bold text-[#121c19] mb-4">Pending sales</h2>
+              {pendingSales.length === 0 ? (
+                <p className="text-sm text-[#2a3d36]/55 py-8 text-center">No pending sales</p>
+              ) : (
+                <div className="space-y-3">
+                  {pendingSales.map((sale) => (
+                    <article
+                      key={sale.id}
+                      className="rounded-lg border border-[#d4dcd8] p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                    >
+                      <div>
+                        <p className="font-semibold text-[#121c19]">Sale #{sale.id}</p>
+                        <p className="text-sm text-[#2a3d36]/60 mt-1">
+                          {sale.user_name || 'Unknown'} · {sale.item_count || 0} items ·{' '}
+                          {sale.payment_method || 'N/A'}
+                        </p>
+                        <p className="text-xs text-[#2a3d36]/45 mt-1">{sale.created_at || '—'}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <p className="font-bold text-[#121c19]">
+                          ₦{Number(sale.total_amount || 0).toLocaleString()}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => void handleMarkSaleCompleted(sale.id)}
+                          className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2 rounded-md text-sm font-semibold"
+                        >
+                          Mark complete
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'low_stock' && (
+            <div className="p-5 sm:p-6">
+              <h2 className="font-display text-lg font-bold text-[#121c19] mb-4">Low stock</h2>
+              {lowStockProducts.length === 0 ? (
+                <p className="text-sm text-[#2a3d36]/55 py-8 text-center">No low stock products</p>
+              ) : (
+                <>
+                  <div className="md:hidden space-y-3">
+                    {lowStockProducts.map((product) => (
+                      <article key={product.id} className="rounded-lg border border-[#d4dcd8] p-4">
+                        <p className="font-semibold text-[#121c19]">{product.name}</p>
+                        <p className="text-xs text-[#2a3d36]/50 mt-1">{product.packaging || product.category}</p>
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
+                          <div>
+                            <p className="text-[10px] uppercase text-[#2a3d36]/45">Fridge</p>
+                            <p className="font-semibold text-rose-600">{product.fridge_stock || 0}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase text-[#2a3d36]/45">Show</p>
+                            <p className="font-semibold">{product.show_stock || 0}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase text-[#2a3d36]/45">Store</p>
+                            <p className="font-semibold">{product.store_stock || 0}</p>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                  <div className="hidden md:block overflow-x-auto">
+                    <table className="min-w-full text-left">
+                      <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
                         <tr>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Product Name</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Category</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Stock Status</th>
-                          <th className="px-4 py-3 text-left text-sm font-semibold text-slate-700">Price</th>
+                          <th className="px-4 py-3 font-semibold">Product</th>
+                          <th className="px-4 py-3 font-semibold text-center">Fridge</th>
+                          <th className="px-4 py-3 font-semibold text-center">Show</th>
+                          <th className="px-4 py-3 font-semibold text-center">Store</th>
+                          <th className="px-4 py-3 font-semibold text-center">Min</th>
+                          <th className="px-4 py-3 font-semibold">Price</th>
                         </tr>
                       </thead>
-                      <tbody>
-                        {outOfStockProducts.map((product: any) => (
-                          <tr key={product.id} className="bg-red-50">
-                            <td className="px-4 py-3">
-                              <div className="font-semibold text-red-600">{product.name}</div>
-                              {product.description && (
-                                <div className="text-xs text-slate-500 mt-1">{product.description}</div>
-                              )}
+                      <tbody className="divide-y divide-[#e8ecea]">
+                        {lowStockProducts.map((product) => (
+                          <tr key={product.id} className="hover:bg-[#f4f6f5]/70">
+                            <td className="px-4 py-3 font-semibold text-[#121c19]">{product.name}</td>
+                            <td className="px-4 py-3 text-center font-semibold text-rose-600">
+                              {product.fridge_stock || 0}
                             </td>
-                            <td className="px-4 py-3">
-                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                {product.category}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="px-3 py-1 bg-red-600 text-white rounded-full text-sm font-bold">
-                                OUT OF STOCK
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="font-semibold text-slate-800">₦{product.price.toLocaleString()}</div>
+                            <td className="px-4 py-3 text-center">{product.show_stock || 0}</td>
+                            <td className="px-4 py-3 text-center">{product.store_stock || 0}</td>
+                            <td className="px-4 py-3 text-center">{product.min_stock_level || 0}</td>
+                            <td className="px-4 py-3 font-semibold">
+                              ₦{Number(product.price || 0).toLocaleString()}
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                )}
-              </div>
-            )}
-          </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'out_of_stock' && (
+            <div className="p-5 sm:p-6">
+              <h2 className="font-display text-lg font-bold text-[#121c19] mb-4">Out of stock</h2>
+              {outOfStockProducts.length === 0 ? (
+                <p className="text-sm text-[#2a3d36]/55 py-8 text-center">No out of stock products</p>
+              ) : (
+                <>
+                  <div className="md:hidden space-y-3">
+                    {outOfStockProducts.map((product) => (
+                      <article
+                        key={product.id}
+                        className="rounded-lg border border-rose-200 bg-rose-50/40 p-4"
+                      >
+                        <p className="font-semibold text-[#121c19]">{product.name}</p>
+                        <div className="mt-2 flex items-center justify-between gap-3">
+                          <span className="inline-flex px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-rose-500 text-white">
+                            Out of stock
+                          </span>
+                          <span className="font-semibold text-[#121c19]">
+                            ₦{Number(product.price || 0).toLocaleString()}
+                          </span>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                  <div className="hidden md:block overflow-x-auto">
+                    <table className="min-w-full text-left">
+                      <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
+                        <tr>
+                          <th className="px-4 py-3 font-semibold">Product</th>
+                          <th className="px-4 py-3 font-semibold">Packaging</th>
+                          <th className="px-4 py-3 font-semibold">Status</th>
+                          <th className="px-4 py-3 font-semibold">Price</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#e8ecea]">
+                        {outOfStockProducts.map((product) => (
+                          <tr key={product.id} className="bg-rose-50/40">
+                            <td className="px-4 py-3 font-semibold text-[#121c19]">{product.name}</td>
+                            <td className="px-4 py-3 text-[#2a3d36]/60">
+                              {product.packaging || '—'}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="inline-flex px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-rose-500 text-white">
+                                Out of stock
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 font-semibold">
+                              ₦{Number(product.price || 0).toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -7492,385 +7000,6 @@ function AccessDenied() {
   )
 }
 
-function ImportProductsModal({ onClose, onImportComplete, businessId }: {
-  onClose: () => void
-  onImportComplete: () => void
-  businessId: number
-}) {
-  const [importing, setImporting] = useState(false)
-  const [importResults, setImportResults] = useState<any>(null)
-
-  const downloadTemplate = () => {
-    try {
-      console.log('Starting template download...')
-
-      // Create a sample CSV template with proper formatting
-      const csvContent = `Product Name,Description,Category,Selling Price,Cost Price,Stock Quantity,Min Stock Level,Barcode
-Beer Sample,Sample beer description,BAR,500,300,50,10,123456789
-Wine Sample,Sample wine description,BAR,2000,1200,25,5,987654321
-Burger Sample,Sample burger description,KITCHEN,1500,800,30,5,456789123
-Room Service Sample,Sample room service,ROOM,5000,2500,10,2,789123456
-Cocktail Sample,Sample cocktail,BAR,1800,900,20,3,321654987
-Juice Sample,Fresh orange juice,BAR,800,400,40,8,654987321
-Pizza Sample,Margherita pizza,KITCHEN,2500,1200,15,3,987321654
-Spa Treatment Sample,Full body massage,ROOM,15000,5000,5,1,147258369`
-
-      console.log('CSV content created, length:', csvContent.length)
-
-      // Check if browser supports downloads
-      const supportsDownload = 'download' in document.createElement('a')
-
-      console.log('Browser supports download attribute:', supportsDownload)
-
-      // Try multiple download methods for better compatibility
-      try {
-        // Method 1: Standard blob download
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
-        const url = window.URL.createObjectURL(blob)
-
-        console.log('Blob created, size:', blob.size, 'bytes')
-        console.log('Blob URL created:', url)
-
-        // Create and trigger download
-        const a = document.createElement('a')
-        a.href = url
-        a.download = 'product_import_template.csv'
-        a.style.display = 'none'
-
-        // Add click event listener for debugging
-        a.addEventListener('click', () => {
-          console.log('Download link clicked')
-        })
-
-        document.body.appendChild(a)
-        console.log('Download link created and added to DOM')
-
-        // Force download
-        console.log('Triggering click...')
-        a.click()
-        console.log('Click triggered')
-
-        // Give the browser time to process the download
-        setTimeout(() => {
-          document.body.removeChild(a)
-          console.log('Download element removed from DOM')
-        }, 100)
-
-        // Cleanup blob URL after a longer delay
-        setTimeout(() => {
-          window.URL.revokeObjectURL(url)
-          console.log('Blob URL cleaned up')
-        }, 10000) // Increased delay to ensure download completes
-
-        console.log('Download initiated successfully')
-
-      } catch (error) {
-        console.error('Primary download method failed, trying fallback:', error)
-
-        // Method 2: Data URL fallback (for older browsers)
-        try {
-          const dataUrl = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent)
-          const a = document.createElement('a')
-          a.href = dataUrl
-          a.download = 'product_import_template.csv'
-          a.style.display = 'none'
-          document.body.appendChild(a)
-          a.click()
-          document.body.removeChild(a)
-          console.log('Fallback download method succeeded')
-        } catch (fallbackError) {
-          console.error('Primary download methods failed:', fallbackError)
-
-          // Method 3: Open in new tab as last resort
-          try {
-            const dataUrl = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent)
-            const newWindow = window.open(dataUrl, '_blank')
-
-            if (newWindow) {
-              console.log('File opened in new tab')
-              toast('Template opened in new tab. Right-click and "Save as..." to download as CSV file.', {
-              duration: 6000,
-            })
-              return
-            } else {
-              console.error('Popup blocked or failed to open')
-            }
-          } catch (tabError) {
-            console.error('All download methods failed:', tabError)
-          }
-
-          throw new Error('Download failed with all available methods')
-        }
-      }
-
-      console.log('Template download completed successfully')
-
-      // Show detailed success message with location info
-      toast.success(`Template downloaded successfully!
-
-📂 Check your browser's Downloads folder
-Open with Excel, Google Sheets, or any CSV editor.`, {
-        duration: 6000,
-      })
-
-    } catch (error) {
-      console.error('Template download failed:', error)
-      toast.error('Failed to download template. Please try again.')
-    }
-  }
-
-  // Simple CSV parser that handles quoted fields
-  const parseCSVLine = (line: string): string[] => {
-    const result: string[] = []
-    let current = ''
-    let inQuotes = false
-
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i]
-
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          // Escaped quote
-          current += '"'
-          i++ // Skip next quote
-        } else {
-          // Toggle quote state
-          inQuotes = !inQuotes
-        }
-      } else if (char === ',' && !inQuotes) {
-        // Field separator
-        result.push(current.trim())
-        current = ''
-      } else {
-        current += char
-      }
-    }
-
-    // Add the last field
-    result.push(current.trim())
-    return result
-  }
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
-    setImporting(true)
-    try {
-      const text = await file.text()
-      const lines = text.split('\n').filter(line => line.trim())
-      const headers = parseCSVLine(lines[0])
-
-      console.log('Parsed headers:', headers)
-
-      // Validate headers
-      const requiredHeaders = ['Product Name', 'Category', 'Selling Price', 'Cost Price', 'Stock Quantity']
-      const missingHeaders = requiredHeaders.filter(h => !headers.includes(h))
-
-      if (missingHeaders.length > 0) {
-        toast.error(`Missing required columns: ${missingHeaders.join(', ')}\n\nExpected: ${requiredHeaders.join(', ')}`, {
-          duration: 8000,
-        })
-        setImporting(false)
-        return
-      }
-
-      // Parse products
-      let successCount = 0
-      let errorCount = 0
-      const errors: string[] = []
-
-      for (let i = 1; i < lines.length; i++) {
-        const values = parseCSVLine(lines[i])
-        console.log(`Row ${i + 1} values:`, values)
-
-        if (values.length < 5) {
-          errors.push(`Row ${i + 1}: Not enough columns (found ${values.length}, need at least 5)`)
-          errorCount++
-          continue
-        }
-
-        try {
-          const product = {
-            name: values[0] || '',
-            description: values[1] || '',
-            category: values[2] || '',
-            price: parseFloat(values[3]) || 0,
-            cost_price: parseFloat(values[4]) || 0,
-            stock_quantity: parseInt(values[5]) || 0,
-            min_stock_level: parseInt(values[6]) || 0,
-            barcode: values[7] || '',
-            business_id: businessId
-          }
-
-          // Validate required fields
-          if (!product.name.trim() || !product.category.trim() || isNaN(product.price) || isNaN(product.cost_price)) {
-            errors.push(`Row ${i + 1}: Missing or invalid required fields (Name: "${product.name}", Category: "${product.category}", Price: ${product.price}, Cost: ${product.cost_price})`)
-            errorCount++
-            continue
-          }
-
-          console.log(`Creating product:`, product)
-
-          // Import product
-          await invoke('create_product', { request: product })
-          successCount++
-        } catch (error) {
-          console.error(`Error on row ${i + 1}:`, error)
-          errors.push(`Row ${i + 1}: ${error}`)
-          errorCount++
-        }
-      }
-
-      setImportResults({
-        successCount,
-        errorCount,
-        errors: errors.slice(0, 10) // Show first 10 errors
-      })
-
-      if (successCount > 0) {
-        toast.success(`Successfully imported ${successCount} product(s)!`, {
-          duration: 3000,
-        })
-        // Wait a bit to ensure database commits, then refresh
-        setTimeout(() => {
-          onImportComplete()
-        }, 500)
-      } else if (errorCount > 0) {
-        toast.error(`Failed to import ${errorCount} product(s). Check the errors below.`, {
-          duration: 5000,
-        })
-      }
-
-    } catch (error) {
-      console.error('Import failed:', error)
-      toast.error('Failed to import products. Please check your file format.')
-    } finally {
-      setImporting(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex justify-between items-center">
-            <h2 className="text-2xl font-bold text-slate-800">Import Products from Excel</h2>
-            <button
-              onClick={onClose}
-              disabled={importing}
-              className="text-slate-400 hover:text-slate-600 text-2xl disabled:opacity-50"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-
-        <div className="p-6 space-y-6">
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <h3 className="font-semibold text-blue-800 mb-2">📋 Import Instructions</h3>
-            <ol className="text-blue-700 text-sm space-y-1">
-              <li>1. Download the CSV template below</li>
-              <li>2. Fill in your product data following the format</li>
-              <li>3. Upload your completed CSV file</li>
-              <li>4. Review and confirm the import</li>
-            </ol>
-          </div>
-
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-            <h3 className="font-semibold text-slate-800 mb-3">📊 CSV Template Format</h3>
-            <div className="bg-white border border-slate-300 rounded p-3 font-mono text-xs text-slate-700 overflow-x-auto">
-              Product Name,Description,Category,Selling Price,Cost Price,Stock Quantity,Min Stock Level,Barcode<br/>
-              Beer Sample,Sample beer,BAR,500,300,50,10,123456789<br/>
-              Burger Sample,Sample burger,KITCHEN,1500,800,30,5,456789123
-            </div>
-            <div className="mt-3 text-sm text-slate-600">
-              <strong>Required:</strong> Product Name, Category, Selling Price, Cost Price<br/>
-              <strong>Categories:</strong> BAR, KITCHEN, ROOM (based on your business setup)
-            </div>
-          </div>
-
-          <div className="flex space-x-4">
-            <button
-              onClick={downloadTemplate}
-              className="flex-1 bg-green-600 hover:bg-green-700 text-white py-3 px-4 rounded-lg font-medium transition-colors"
-            >
-              📥 Download Template
-            </button>
-
-            <div className="flex-1">
-              <input
-                type="file"
-                accept=".csv"
-                onChange={handleFileUpload}
-                disabled={importing}
-                className="hidden"
-                id="csv-upload"
-              />
-              <label
-                htmlFor="csv-upload"
-                className={`block w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium transition-colors text-center cursor-pointer ${
-                  importing ? 'opacity-50 cursor-not-allowed' : ''
-                }`}
-              >
-                {importing ? '📤 Importing...' : '📤 Upload CSV File'}
-              </label>
-            </div>
-          </div>
-
-          {importResults && (
-            <div className={`border rounded-lg p-4 ${
-              importResults.errorCount === 0
-                ? 'bg-green-50 border-green-200'
-                : 'bg-yellow-50 border-yellow-200'
-            }`}>
-              <h4 className={`font-semibold mb-2 ${
-                importResults.errorCount === 0 ? 'text-green-800' : 'text-yellow-800'
-              }`}>
-                📊 Import Results
-              </h4>
-              <div className="space-y-1 text-sm">
-                <div className="flex justify-between">
-                  <span>✅ Successfully imported:</span>
-                  <span className="font-medium text-green-600">{importResults.successCount} products</span>
-                </div>
-                {importResults.errorCount > 0 && (
-                  <div className="flex justify-between">
-                    <span>❌ Failed to import:</span>
-                    <span className="font-medium text-red-600">{importResults.errorCount} products</span>
-                  </div>
-                )}
-              </div>
-
-              {importResults.errors.length > 0 && (
-                <div className="mt-3">
-                  <h5 className="font-medium text-red-800 mb-2">Error Details:</h5>
-                  <div className="bg-red-50 border border-red-200 rounded p-2 max-h-32 overflow-y-auto">
-                    {importResults.errors.map((error: string, index: number) => (
-                      <div key={index} className="text-xs text-red-700">{error}</div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="flex space-x-3 pt-4 border-t border-slate-200">
-            <button
-              onClick={onClose}
-              disabled={importing}
-              className="flex-1 bg-slate-200 hover:bg-slate-300 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 py-3 px-4 rounded-lg font-medium transition-colors"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Add Staff Modal Component
 function AddStaffModal({ onClose, onSave, staffLimits }: {
   onClose: () => void
   onSave: (staffData: any) => void
@@ -7880,133 +7009,207 @@ function AddStaffModal({ onClose, onSave, staffLimits }: {
     username: '',
     name: '',
     email: '',
-    role: 'Staff'
+    role: 'Staff',
   })
+  const [submitting, setSubmitting] = useState(false)
 
   const updateFormData = (field: string, value: string) => {
-    setFormData(prev => ({ ...prev, [field]: value }))
+    setFormData((prev) => ({ ...prev, [field]: value }))
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
+  const canAddRole = (role: string) => {
+    if (!staffLimits?.available) return false
+    switch (role) {
+      case 'Manager':
+        return staffLimits.available.manager > 0
+      case 'Secretary':
+        return staffLimits.available.secretary > 0
+      case 'Staff':
+      case 'BarStaff':
+        return staffLimits.available.staff > 0
+      default:
+        return true
+    }
+  }
 
-    // Validate staff limits
-    if (formData.role === 'Manager' && staffLimits.available.manager <= 0) {
-      toast.error('Manager limit reached')
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!formData.username.trim() || !formData.name.trim()) {
+      toast.error('Name and username are required')
       return
     }
-    if (formData.role === 'Secretary' && staffLimits.available.secretary <= 0) {
-      toast.error('Secretary limit reached')
+    if (!canAddRole(formData.role)) {
+      toast.error(`${formData.role} limit reached`)
       return
     }
-    if (formData.role === 'Staff' && staffLimits.available.staff <= 0) {
+    if (staffLimits.available?.total <= 0) {
       toast.error('Staff limit reached')
       return
     }
 
-    onSave(formData)
-  }
-
-  const canAddRole = (role: string) => {
-    switch (role) {
-      case 'Manager': return staffLimits.available.manager > 0
-      case 'Secretary': return staffLimits.available.secretary > 0
-      case 'Staff': return staffLimits.available.staff > 0
-      default: return true
+    setSubmitting(true)
+    try {
+      await onSave({
+        ...formData,
+        username: formData.username.trim(),
+        name: formData.name.trim(),
+        email: formData.email.trim(),
+      })
+    } finally {
+      setSubmitting(false)
     }
   }
 
+  const roles = [
+    {
+      value: 'Staff',
+      label: 'Bar Staff',
+      hint: `${staffLimits.staff}/${staffLimits.limits.max_staff} seats`,
+      available: canAddRole('Staff'),
+    },
+    {
+      value: 'Manager',
+      label: 'Manager',
+      hint: `${staffLimits.manager}/${staffLimits.limits.max_manager} seats`,
+      available: canAddRole('Manager'),
+    },
+    {
+      value: 'Secretary',
+      label: 'Secretary',
+      hint: `${staffLimits.secretary}/${staffLimits.limits.max_secretary} seats`,
+      available: canAddRole('Secretary'),
+    },
+  ]
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex justify-between items-center">
-            <h2 className="text-2xl font-bold text-slate-800">Add Staff Member</h2>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <button
+        type="button"
+        className="absolute inset-0 bg-[#121c19]/55 backdrop-blur-[2px]"
+        aria-label="Close"
+        onClick={onClose}
+      />
+      <div className="relative w-full sm:max-w-lg bg-[#f4f6f5] sm:rounded-2xl shadow-2xl border border-[#d4dcd8] max-h-[92vh] overflow-y-auto animate-fade-in">
+        <div className="px-6 sm:px-8 pt-6 sm:pt-8 pb-4 border-b border-[#d4dcd8]/80 bg-white sm:rounded-t-2xl">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-1">
+                New member
+              </p>
+              <h2 className="font-display text-2xl font-bold text-[#121c19]">Add staff</h2>
+              <p className="mt-1 text-sm text-[#2a3d36]/60">
+                A temporary password will be generated after you save.
+              </p>
+            </div>
             <button
+              type="button"
               onClick={onClose}
-              className="text-slate-400 hover:text-slate-600 text-2xl"
+              className="h-9 w-9 rounded-md border border-[#d4dcd8] text-[#2a3d36]/60 hover:text-[#121c19] hover:bg-[#f4f6f5] text-xl leading-none"
             >
               ×
             </button>
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-6">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Username *
-            </label>
-            <input
-              type="text"
-              required
-              value={formData.username}
-              onChange={(e) => updateFormData('username', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter username"
-            />
+        <form onSubmit={handleSubmit} className="px-6 sm:px-8 py-6 space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/55 mb-2">
+                Full name *
+              </label>
+              <input
+                type="text"
+                required
+                value={formData.name}
+                onChange={(e) => updateFormData('name', e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/40 focus:border-[#c4783a]"
+                placeholder="e.g. Ada Okonkwo"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/55 mb-2">
+                Username *
+              </label>
+              <input
+                type="text"
+                required
+                value={formData.username}
+                onChange={(e) => updateFormData('username', e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/40 focus:border-[#c4783a]"
+                placeholder="login name"
+                autoComplete="off"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/55 mb-2">
+                Email
+              </label>
+              <input
+                type="email"
+                value={formData.email}
+                onChange={(e) => updateFormData('email', e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/40 focus:border-[#c4783a]"
+                placeholder="optional"
+              />
+            </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Full Name *
-            </label>
-            <input
-              type="text"
-              required
-              value={formData.name}
-              onChange={(e) => updateFormData('name', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter full name"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Email
-            </label>
-            <input
-              type="email"
-              value={formData.email}
-              onChange={(e) => updateFormData('email', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter email (optional)"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/55 mb-2">
               Role *
             </label>
-            <select
-              value={formData.role}
-              onChange={(e) => updateFormData('role', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            >
-              <option value="Staff" disabled={!canAddRole('Staff')}>
-                Staff {staffLimits.available.staff <= 0 ? '(Limit reached)' : `(${staffLimits.staff}/${staffLimits.limits.max_staff})`}
-              </option>
-              <option value="Manager" disabled={!canAddRole('Manager')}>
-                Manager {staffLimits.available.manager <= 0 ? '(Limit reached)' : `(${staffLimits.manager}/${staffLimits.limits.max_manager})`}
-              </option>
-              <option value="Secretary" disabled={!canAddRole('Secretary')}>
-                Secretary {staffLimits.available.secretary <= 0 ? '(Limit reached)' : `(${staffLimits.secretary}/${staffLimits.limits.max_secretary})`}
-              </option>
-            </select>
+            <div className="grid grid-cols-1 gap-2">
+              {roles.map((role) => (
+                <button
+                  key={role.value}
+                  type="button"
+                  disabled={!role.available}
+                  onClick={() => updateFormData('role', role.value)}
+                  className={`text-left rounded-lg border px-4 py-3 transition-colors ${
+                    formData.role === role.value
+                      ? 'border-[#121c19] bg-[#121c19] text-white'
+                      : role.available
+                        ? 'border-[#d4dcd8] bg-white hover:border-[#c4783a]/50 text-[#121c19]'
+                        : 'border-[#e8ecea] bg-[#f4f6f5] text-[#2a3d36]/35 cursor-not-allowed'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold">{role.label}</span>
+                    <span
+                      className={`text-xs ${
+                        formData.role === role.value ? 'text-white/70' : 'text-[#2a3d36]/50'
+                      }`}
+                    >
+                      {role.available ? role.hint : 'Limit reached'}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="flex space-x-4 pt-4">
+          <div className="rounded-lg border border-[#d4dcd8] bg-white px-4 py-3 text-sm text-[#2a3d36]/70">
+            Seats left:{' '}
+            <span className="font-semibold text-[#121c19]">
+              {staffLimits.available?.total ?? 0}
+            </span>{' '}
+            of {staffLimits.limits?.max_total ?? 0}
+          </div>
+
+          <div className="flex flex-col-reverse sm:flex-row gap-3 pt-2 pb-2">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 py-3 px-4 rounded-lg font-medium transition-colors"
+              className="flex-1 border border-[#d4dcd8] hover:bg-white text-[#121c19] py-3 px-4 rounded-lg font-semibold transition-colors"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium transition-colors"
+              disabled={submitting || !canAddRole(formData.role)}
+              className="flex-1 bg-[#121c19] hover:bg-[#1a2924] disabled:opacity-50 text-white py-3 px-4 rounded-lg font-semibold transition-colors"
             >
-              Add Staff
+              {submitting ? 'Adding…' : 'Create staff account'}
             </button>
           </div>
         </form>

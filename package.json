@@ -6,24 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "preview": "vite preview"
   },
   "keywords": [
     "pos",
     "point-of-sale",
     "restaurant",
-    "hotel",
-    "tauri"
+    "hotel"
   ],
   "author": "",
   "license": "ISC",
   "description": "Multi-module POS system for BAR, Kitchen, and Room services",
   "dependencies": {
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.9.0",
+    "@supabase/supabase-js": "^2.110.8",
     "html5-qrcode": "^2.3.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -32,8 +27,6 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@tauri-apps/api": "^2.9.1",
-    "@tauri-apps/cli": "^2.9.6",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
