@@ -21,3 +21,9 @@ src-tauri/target/
 Thumbs.db
 
 
+
+.tools/
+.vercel/
+
+.vercel
+.env*
