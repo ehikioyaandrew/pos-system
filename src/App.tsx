@@ -1160,7 +1160,13 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         case 'sales-log':
           return <SalesLogDashboard currentUser={currentUser} businessInfo={businessInfo} ownOnly />
         case 'debt':
-          return <DebtManagementDashboard currentUser={currentUser} businessInfo={businessInfo} />
+          return (
+            <DebtManagementDashboard
+              currentUser={currentUser}
+              businessInfo={businessInfo}
+              ownOnly
+            />
+          )
         case 'pending':
           return <PendingItemsDashboard currentUser={currentUser} businessInfo={businessInfo} />
         default:
@@ -4984,9 +4990,17 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
   const [staffCount, setStaffCount] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [showAddStaff, setShowAddStaff] = useState(false)
+  const [resettingId, setResettingId] = useState<number | null>(null)
+  const [actionId, setActionId] = useState<number | null>(null)
   const businessId = currentUser?.business_id || businessInfo?.id
   const canManage =
     currentUser?.role === 'SuperAdmin' || currentUser?.role === 'Manager'
+  const canResetPassword =
+    currentUser?.role === 'SuperAdmin' ||
+    currentUser?.role === 'Manager' ||
+    currentUser?.role === 'Secretary'
+  const canDeactivate = canResetPassword
+  const canDelete = canManage
 
   useEffect(() => {
     if (!businessId) {
@@ -5041,6 +5055,103 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
     }
   }
 
+  const handleResetPassword = async (user: any) => {
+    if (!user?.id) return
+    if (Number(user.id) === Number(currentUser?.id)) {
+      toast.error('Use your account settings to change your own password')
+      return
+    }
+    const ok = confirm(
+      `Reset password for ${user.name || user.username}?\nA new temporary password will be created.`
+    )
+    if (!ok) return
+    try {
+      setResettingId(Number(user.id))
+      const tempPassword = `Staff${Math.random().toString(36).slice(-6)}!`
+      const result = (await invoke('reset_staff_password', {
+        request: {
+          user_id: user.id,
+          temporary_password: tempPassword,
+        },
+      })) as any
+      toast.success(
+        `Password reset for ${result?.username || user.username}.\nNew password: ${result?.temporary_password || tempPassword}\nShare it securely — they will be asked to change it on next login.`,
+        { duration: 12000 }
+      )
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to reset password')
+    } finally {
+      setResettingId(null)
+    }
+  }
+
+  const handleToggleActive = async (user: any) => {
+    if (!user?.id) return
+    if (Number(user.id) === Number(currentUser?.id)) {
+      toast.error('You cannot deactivate your own account')
+      return
+    }
+    const currentlyActive = user.is_active !== false
+    const ok = confirm(
+      currentlyActive
+        ? `Deactivate ${user.name || user.username}?\nThey will not be able to sign in. You can reactivate later.`
+        : `Reactivate ${user.name || user.username}?\nThey will be able to sign in again.`
+    )
+    if (!ok) return
+    try {
+      setActionId(Number(user.id))
+      await invoke('set_staff_active', {
+        request: {
+          user_id: user.id,
+          is_active: !currentlyActive,
+        },
+      })
+      toast.success(
+        currentlyActive
+          ? `${user.name || user.username} deactivated`
+          : `${user.name || user.username} reactivated`
+      )
+      await loadStaff()
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to update staff status')
+    } finally {
+      setActionId(null)
+    }
+  }
+
+  const handleDeleteStaff = async (user: any) => {
+    if (!user?.id) return
+    if (Number(user.id) === Number(currentUser?.id)) {
+      toast.error('You cannot delete your own account')
+      return
+    }
+    if (String(user.role) === 'SuperAdmin') {
+      toast.error('SuperAdmin accounts cannot be deleted. Deactivate instead.')
+      return
+    }
+    const ok = confirm(
+      `Permanently delete ${user.name || user.username}?\nThis cannot be undone. Prefer Deactivate if they might return.`
+    )
+    if (!ok) return
+    const typed = prompt(`Type DELETE to confirm removing @${user.username}`)
+    if (typed !== 'DELETE') {
+      toast.error('Delete cancelled')
+      return
+    }
+    try {
+      setActionId(Number(user.id))
+      await invoke('delete_staff_user', {
+        request: { user_id: user.id },
+      })
+      toast.success(`${user.name || user.username} deleted`)
+      await loadStaff()
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to delete staff')
+    } finally {
+      setActionId(null)
+    }
+  }
+
   const formatLastLogin = (value?: string | null) => {
     if (!value) return 'Never'
     const date = new Date(value)
@@ -5068,8 +5179,10 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
             </h1>
             <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
               {canManage
-                ? 'View and manage team members for this business.'
-                : 'View team members for this business.'}
+                ? 'Add staff, reset passwords, deactivate leavers, or delete accounts.'
+                : canResetPassword
+                  ? 'Reset passwords and deactivate staff who have left.'
+                  : 'View team members for this business.'}
             </p>
           </div>
           {canManage && staffCount && (
@@ -5143,6 +5256,46 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
                   <p className="mt-2 text-xs text-[#2a3d36]/55">
                     Last login: {formatLastLogin(user.last_login)}
                   </p>
+                  {(canResetPassword || canDeactivate || canDelete) && (
+                    <div className="mt-3 flex flex-col gap-2">
+                      {canResetPassword && (
+                        <button
+                          type="button"
+                          disabled={resettingId === Number(user.id) || actionId === Number(user.id)}
+                          onClick={() => void handleResetPassword(user)}
+                          className="w-full border border-[#121c19]/20 hover:bg-[#f4f6f5] py-2 rounded-md text-sm font-semibold disabled:opacity-50"
+                        >
+                          {resettingId === Number(user.id) ? 'Resetting…' : 'Reset password'}
+                        </button>
+                      )}
+                      {canDeactivate && Number(user.id) !== Number(currentUser?.id) && (
+                        <button
+                          type="button"
+                          disabled={actionId === Number(user.id)}
+                          onClick={() => void handleToggleActive(user)}
+                          className="w-full border border-[#121c19]/20 hover:bg-[#f4f6f5] py-2 rounded-md text-sm font-semibold disabled:opacity-50"
+                        >
+                          {actionId === Number(user.id)
+                            ? 'Updating…'
+                            : user.is_active !== false
+                              ? 'Deactivate'
+                              : 'Reactivate'}
+                        </button>
+                      )}
+                      {canDelete &&
+                        Number(user.id) !== Number(currentUser?.id) &&
+                        String(user.role) !== 'SuperAdmin' && (
+                          <button
+                            type="button"
+                            disabled={actionId === Number(user.id)}
+                            onClick={() => void handleDeleteStaff(user)}
+                            className="w-full border border-rose-300 text-rose-700 hover:bg-rose-50 py-2 rounded-md text-sm font-semibold disabled:opacity-50"
+                          >
+                            Delete
+                          </button>
+                        )}
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
@@ -5157,6 +5310,9 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
                     <th className="px-5 py-3 font-semibold">Email</th>
                     <th className="px-5 py-3 font-semibold">Last login</th>
                     <th className="px-5 py-3 font-semibold">Status</th>
+                    {(canResetPassword || canDeactivate || canDelete) && (
+                      <th className="px-5 py-3 font-semibold text-right">Actions</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e8ecea]">
@@ -5186,6 +5342,46 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
                           {user.is_active !== false ? 'Active' : 'Inactive'}
                         </span>
                       </td>
+                      {(canResetPassword || canDeactivate || canDelete) && (
+                        <td className="px-5 py-4 text-right">
+                          <div className="inline-flex flex-wrap justify-end gap-2">
+                            {canResetPassword && (
+                              <button
+                                type="button"
+                                disabled={
+                                  resettingId === Number(user.id) || actionId === Number(user.id)
+                                }
+                                onClick={() => void handleResetPassword(user)}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                              >
+                                {resettingId === Number(user.id) ? 'Resetting…' : 'Reset password'}
+                              </button>
+                            )}
+                            {canDeactivate && Number(user.id) !== Number(currentUser?.id) && (
+                              <button
+                                type="button"
+                                disabled={actionId === Number(user.id)}
+                                onClick={() => void handleToggleActive(user)}
+                                className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                              >
+                                {user.is_active !== false ? 'Deactivate' : 'Reactivate'}
+                              </button>
+                            )}
+                            {canDelete &&
+                              Number(user.id) !== Number(currentUser?.id) &&
+                              String(user.role) !== 'SuperAdmin' && (
+                                <button
+                                  type="button"
+                                  disabled={actionId === Number(user.id)}
+                                  onClick={() => void handleDeleteStaff(user)}
+                                  className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                                >
+                                  Delete
+                                </button>
+                              )}
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

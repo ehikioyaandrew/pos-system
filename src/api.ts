@@ -338,15 +338,20 @@ async function processSale(request: Record<string, unknown>) {
   const paymentMethod = String(request.payment_method || 'CASH').toUpperCase()
   const rawLocation = String(request.location || 'fridge').toLowerCase()
   const location = rawLocation === 'show' ? 'show' : 'fridge'
-  const customerName = request.customer_name ? String(request.customer_name).trim() : ''
+  let customerName = request.customer_name ? String(request.customer_name).trim() : ''
+  if (paymentMethod === 'DEBT') {
+    if (!customerName) throw new Error('Customer name is required for debt sales')
+    if (normalizeCustomerKey(customerName) === normalizeCustomerKey(WALK_IN_CUSTOMER)) {
+      throw new Error('Walk-in customer cannot hold debt. Enter a real customer name.')
+    }
+  } else if (!customerName) {
+    customerName = WALK_IN_CUSTOMER
+  }
+
   const notes =
     (request.notes ? String(request.notes) : '') ||
-    (paymentMethod === 'DEBT' && customerName ? `DEBT:${customerName}` : customerName) ||
+    (paymentMethod === 'DEBT' ? `DEBT:${customerName}` : customerName) ||
     null
-
-  if (paymentMethod === 'DEBT' && !customerName) {
-    throw new Error('Customer name is required for debt sales')
-  }
 
   // Validate stock in the selected location before writing the sale
   for (const item of items) {
@@ -427,10 +432,28 @@ async function processSale(request: Record<string, unknown>) {
     })
   }
 
+  if (paymentMethod === 'DEBT') {
+    try {
+      await chargeSaleToDebt({
+        businessId,
+        customerName,
+        amount: totalAmount,
+        saleId,
+        staffId,
+      })
+    } catch (e) {
+      console.error('Failed to add sale to debt ledger:', e)
+      throw new Error(
+        `Sale saved but debt ledger update failed: ${e instanceof Error ? e.message : e}`
+      )
+    }
+  }
+
   return {
     sale_id: saleId,
     total_amount: totalAmount,
     payment_method: paymentMethod,
+    customer_name: customerName,
     items: items.length,
     timestamp: new Date().toISOString(),
   }
@@ -462,9 +485,103 @@ async function getSalesLog(businessId: number, staffId?: number | null) {
     return {
       ...s,
       staff_name: u?.name || u?.username || 'Unknown',
-      customer_name: parseDebtCustomer(s.notes),
+      customer_name: parseDebtCustomer(s.notes) || WALK_IN_CUSTOMER,
     }
   })
+}
+
+async function getSaleItemsForSale(saleId: number) {
+  const tables = ['sale_items_backup', 'sale_items_sync', 'sale_items']
+  for (const table of tables) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('product_id, quantity, total_price, unit_price, sale_id')
+      .eq('sale_id', saleId)
+    if (!error && data) return data as any[]
+  }
+  return []
+}
+
+async function getSaleReceipt(saleId: number, businessId?: number | null) {
+  const { data: sale, error: saleError } = await supabase
+    .from('sales_backup')
+    .select('*')
+    .eq('id', saleId)
+    .maybeSingle()
+  if (saleError) throw new Error(saleError.message)
+  if (!sale) throw new Error('Sale not found')
+
+  let staffName = 'Staff'
+  if (sale.user_id) {
+    const { data: user } = await supabase
+      .from('users_backup')
+      .select('id, name, username, business_id')
+      .eq('id', sale.user_id)
+      .maybeSingle()
+    if (user) staffName = user.name || user.username || staffName
+    if (!businessId && user?.business_id) businessId = user.business_id
+  }
+
+  let businessName = 'POS System'
+  let businessAddress: string | null = null
+  let businessPhone: string | null = null
+  if (businessId) {
+    const { data: business } = await supabase
+      .from('businesses_backup')
+      .select('*')
+      .eq('id', businessId)
+      .maybeSingle()
+    if (business) {
+      businessName = business.name || businessName
+      businessAddress = (business as any).address || null
+      businessPhone = (business as any).phone || null
+    }
+  }
+
+  const rawItems = await getSaleItemsForSale(saleId)
+  const productIds = [
+    ...new Set(rawItems.map((i) => Number(i.product_id)).filter(Boolean)),
+  ]
+  const productMap = new Map<number, any>()
+  if (productIds.length) {
+    const { data: products } = await supabase
+      .from('products_backup')
+      .select('id, name, packaging')
+      .in('id', productIds)
+    for (const p of products || []) productMap.set(Number(p.id), p)
+  }
+
+  const items = rawItems.map((item) => {
+    const product = productMap.get(Number(item.product_id))
+    const qty = Number(item.quantity || 0)
+    const unitPrice = Number(item.unit_price || 0)
+    const total =
+      Number(item.total_price || 0) || qty * unitPrice
+    const name = product?.name || `Product #${item.product_id}`
+    const packaging = product?.packaging ? ` (${product.packaging})` : ''
+    return {
+      product_id: Number(item.product_id),
+      name: `${name}${packaging}`,
+      quantity: qty,
+      unit_price: unitPrice,
+      total_price: total,
+    }
+  })
+
+  return {
+    id: sale.id,
+    created_at: sale.created_at,
+    total_amount: Number(sale.total_amount || 0),
+    payment_method: sale.payment_method || 'CASH',
+    payment_status: sale.payment_status || 'COMPLETED',
+    staff_name: staffName,
+    customer_name: parseDebtCustomer(sale.notes) || WALK_IN_CUSTOMER,
+    location: sale.location || null,
+    business_name: businessName,
+    business_address: businessAddress,
+    business_phone: businessPhone,
+    items,
+  }
 }
 
 function parseDebtCustomer(notes?: string | null) {
@@ -472,6 +589,474 @@ function parseDebtCustomer(notes?: string | null) {
   const text = String(notes)
   if (text.toUpperCase().startsWith('DEBT:')) return text.slice(5).trim() || null
   return text.trim() || null
+}
+
+const WALK_IN_CUSTOMER = 'Walk-in customer'
+
+function normalizeCustomerKey(name: string) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
+function debtLocalKey(businessId: number) {
+  return `pos_customer_debts_${businessId}`
+}
+
+function debtEntriesLocalKey(businessId: number) {
+  return `pos_debt_entries_${businessId}`
+}
+
+function readLocalDebts(businessId: number): any[] {
+  try {
+    const raw = localStorage.getItem(debtLocalKey(businessId))
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function writeLocalDebts(businessId: number, rows: any[]) {
+  localStorage.setItem(debtLocalKey(businessId), JSON.stringify(rows))
+}
+
+function readLocalDebtEntries(businessId: number): any[] {
+  try {
+    const raw = localStorage.getItem(debtEntriesLocalKey(businessId))
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function writeLocalDebtEntries(businessId: number, rows: any[]) {
+  localStorage.setItem(debtEntriesLocalKey(businessId), JSON.stringify(rows))
+}
+
+function mapDebtRow(row: any) {
+  if (!row) return null
+  const charged = Number(row.total_charged || 0)
+  const paid = Number(row.total_paid || 0)
+  const balance = Math.max(0, charged - paid)
+  return {
+    ...row,
+    total_charged: charged,
+    total_paid: paid,
+    balance,
+    status: balance <= 0.0001 ? 'SETTLED' : row.status || 'OPEN',
+  }
+}
+
+let debtsRemoteCache: boolean | null = null
+
+async function debtsTableAvailable() {
+  if (debtsRemoteCache !== null) return debtsRemoteCache
+  const { error } = await supabase.from('customer_debts_backup').select('id').limit(1)
+  if (!error) {
+    debtsRemoteCache = true
+    return true
+  }
+  const msg = String(error.message || '')
+  if (/relation|does not exist|Could not find the table|PGRST/i.test(msg) || error.code === 'PGRST205') {
+    debtsRemoteCache = false
+    return false
+  }
+  // Transient/other errors: prefer remote attempt
+  return true
+}
+
+async function findOrCreateDebtAccount(opts: {
+  businessId: number
+  customerName: string
+  debtDate?: string | null
+  notes?: string | null
+  useRemote: boolean
+}) {
+  const customerName = String(opts.customerName || '').trim()
+  if (!customerName) throw new Error('Customer name is required')
+  if (normalizeCustomerKey(customerName) === normalizeCustomerKey(WALK_IN_CUSTOMER)) {
+    throw new Error('Walk-in customer cannot hold debt. Enter a real customer name.')
+  }
+
+  const customerKey = normalizeCustomerKey(customerName)
+  const now = new Date().toISOString()
+
+  if (opts.useRemote) {
+    const { data: existing, error } = await supabase
+      .from('customer_debts_backup')
+      .select('*')
+      .eq('business_id', opts.businessId)
+      .eq('customer_key', customerKey)
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (existing) return mapDebtRow(existing)
+
+    const id = Date.now()
+    const payload = {
+      id,
+      business_id: opts.businessId,
+      customer_name: customerName,
+      customer_key: customerKey,
+      total_charged: 0,
+      total_paid: 0,
+      debt_date: opts.debtDate || now,
+      notes: opts.notes || null,
+      status: 'OPEN',
+      created_at: now,
+      updated_at: now,
+      synced_at: now,
+    }
+    const { data, error: insertError } = await supabase
+      .from('customer_debts_backup')
+      .insert(payload)
+      .select('*')
+      .single()
+    if (insertError) throw new Error(insertError.message)
+    return mapDebtRow(data)
+  }
+
+  const rows = readLocalDebts(opts.businessId)
+  const existing = rows.find((r) => r.customer_key === customerKey)
+  if (existing) return mapDebtRow(existing)
+  const created = {
+    id: Date.now(),
+    business_id: opts.businessId,
+    customer_name: customerName,
+    customer_key: customerKey,
+    total_charged: 0,
+    total_paid: 0,
+    debt_date: opts.debtDate || now,
+    notes: opts.notes || null,
+    status: 'OPEN',
+    created_at: now,
+    updated_at: now,
+    synced_at: now,
+  }
+  rows.unshift(created)
+  writeLocalDebts(opts.businessId, rows)
+  return mapDebtRow(created)
+}
+
+async function appendDebtEntry(opts: {
+  businessId: number
+  debtId: number
+  entryType: 'CHARGE' | 'PAYMENT' | 'MANUAL'
+  amount: number
+  saleId?: number | null
+  note?: string | null
+  entryDate?: string | null
+  staffId?: number | null
+  useRemote: boolean
+}) {
+  const amount = Number(opts.amount || 0)
+  if (!(amount > 0)) throw new Error('Amount must be greater than zero')
+  const now = new Date().toISOString()
+  const entry = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    debt_id: opts.debtId,
+    business_id: opts.businessId,
+    entry_type: opts.entryType,
+    amount,
+    sale_id: opts.saleId || null,
+    note: opts.note || null,
+    entry_date: opts.entryDate || now,
+    staff_id: opts.staffId || null,
+    created_at: now,
+    synced_at: now,
+  }
+
+  if (opts.useRemote) {
+    const { error } = await supabase.from('debt_entries_backup').insert(entry)
+    if (error) throw new Error(error.message)
+
+    const { data: debt, error: debtError } = await supabase
+      .from('customer_debts_backup')
+      .select('*')
+      .eq('id', opts.debtId)
+      .single()
+    if (debtError) throw new Error(debtError.message)
+
+    const charged =
+      Number(debt.total_charged || 0) +
+      (opts.entryType === 'PAYMENT' ? 0 : amount)
+    const paid =
+      Number(debt.total_paid || 0) + (opts.entryType === 'PAYMENT' ? amount : 0)
+    const balance = charged - paid
+    const status = balance <= 0.0001 ? 'SETTLED' : 'OPEN'
+    const { data: updated, error: updateError } = await supabase
+      .from('customer_debts_backup')
+      .update({
+        total_charged: charged,
+        total_paid: paid,
+        status,
+        updated_at: now,
+        synced_at: now,
+      })
+      .eq('id', opts.debtId)
+      .select('*')
+      .single()
+    if (updateError) throw new Error(updateError.message)
+    return { debt: mapDebtRow(updated), entry }
+  }
+
+  const entries = readLocalDebtEntries(opts.businessId)
+  entries.unshift(entry)
+  writeLocalDebtEntries(opts.businessId, entries)
+
+  const rows = readLocalDebts(opts.businessId)
+  const idx = rows.findIndex((r) => Number(r.id) === Number(opts.debtId))
+  if (idx < 0) throw new Error('Debt account not found')
+  const debt = rows[idx]
+  debt.total_charged =
+    Number(debt.total_charged || 0) + (opts.entryType === 'PAYMENT' ? 0 : amount)
+  debt.total_paid =
+    Number(debt.total_paid || 0) + (opts.entryType === 'PAYMENT' ? amount : 0)
+  debt.status = Number(debt.total_charged) - Number(debt.total_paid) <= 0.0001 ? 'SETTLED' : 'OPEN'
+  debt.updated_at = now
+  rows[idx] = debt
+  writeLocalDebts(opts.businessId, rows)
+  return { debt: mapDebtRow(debt), entry }
+}
+
+async function settleCustomerDebtSales(businessId: number, customerName: string) {
+  const sales = await getDebtSales(businessId)
+  const key = normalizeCustomerKey(customerName)
+  for (const sale of sales) {
+    const name = parseDebtCustomer(sale.notes) || sale.customer_name
+    if (normalizeCustomerKey(String(name || '')) === key) {
+      await markSaleAsCompleted(Number(sale.id))
+    }
+  }
+}
+
+async function migrateLegacyDebtSales(businessId: number, useRemote: boolean) {
+  const sales = await getDebtSales(businessId)
+  for (const sale of sales) {
+    const customerName =
+      parseDebtCustomer(sale.notes) || sale.customer_name || 'Unnamed customer'
+    const amount = Number(sale.total_amount || 0)
+    if (!(amount > 0)) continue
+
+    const account = await findOrCreateDebtAccount({
+      businessId,
+      customerName,
+      debtDate: sale.created_at,
+      useRemote,
+    })
+
+    // Skip if this sale was already charged into the ledger
+    if (useRemote) {
+      const { data: existing } = await supabase
+        .from('debt_entries_backup')
+        .select('id')
+        .eq('sale_id', sale.id)
+        .limit(1)
+      if (existing && existing.length) continue
+    } else {
+      const entries = readLocalDebtEntries(businessId)
+      if (entries.some((e) => Number(e.sale_id) === Number(sale.id))) continue
+    }
+
+    await appendDebtEntry({
+      businessId,
+      debtId: Number(account.id),
+      entryType: 'CHARGE',
+      amount,
+      saleId: Number(sale.id),
+      note: `Migrated sale #${sale.id}`,
+      entryDate: sale.created_at,
+      staffId: sale.user_id || null,
+      useRemote,
+    })
+  }
+}
+
+async function getDebtors(
+  businessId: number,
+  opts?: { openOnly?: boolean; staffId?: number | null }
+) {
+  const useRemote = await debtsTableAvailable()
+  try {
+    await migrateLegacyDebtSales(businessId, useRemote)
+  } catch (e) {
+    console.warn('Debt migration skipped:', e)
+  }
+
+  let rows: any[] = []
+  if (useRemote) {
+    const { data, error } = await supabase
+      .from('customer_debts_backup')
+      .select('*')
+      .eq('business_id', businessId)
+      .order('updated_at', { ascending: false })
+    if (error) throw new Error(error.message)
+    rows = (data || []).map(mapDebtRow).filter(Boolean)
+  } else {
+    rows = readLocalDebts(businessId).map(mapDebtRow).filter(Boolean)
+  }
+
+  const staffId = opts?.staffId ? Number(opts.staffId) : null
+  if (staffId) {
+    let allowedDebtIds = new Set<number>()
+    if (useRemote) {
+      const { data: entries, error } = await supabase
+        .from('debt_entries_backup')
+        .select('debt_id')
+        .eq('business_id', businessId)
+        .eq('staff_id', staffId)
+      if (error) throw new Error(error.message)
+      allowedDebtIds = new Set(
+        (entries || []).map((e: any) => Number(e.debt_id)).filter(Boolean)
+      )
+    } else {
+      allowedDebtIds = new Set(
+        readLocalDebtEntries(businessId)
+          .filter((e) => Number(e.staff_id) === staffId)
+          .map((e) => Number(e.debt_id))
+          .filter(Boolean)
+      )
+    }
+
+    // Also include open DEBT sales created by this staff (covers edge cases)
+    try {
+      const ownSales = await getDebtSales(businessId)
+      for (const sale of ownSales) {
+        if (Number(sale.user_id) !== staffId) continue
+        const customerName =
+          parseDebtCustomer(sale.notes) || sale.customer_name || ''
+        const key = normalizeCustomerKey(String(customerName))
+        for (const row of rows) {
+          if (normalizeCustomerKey(String(row.customer_name || '')) === key) {
+            allowedDebtIds.add(Number(row.id))
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    rows = rows.filter((r) => allowedDebtIds.has(Number(r.id)))
+  }
+
+  if (opts?.openOnly !== false) {
+    rows = rows.filter((r) => Number(r.balance) > 0.0001)
+  }
+  return rows
+}
+
+async function addManualDebt(request: Record<string, unknown>) {
+  const businessId = argNumber(request, 'business_id', 'businessId')
+  if (!businessId) throw new Error('businessId is required')
+  const customerName = String(request.customer_name || request.customerName || '').trim()
+  const amount = Number(request.amount || 0)
+  const debtDate = request.debt_date || request.debtDate || new Date().toISOString()
+  const notes = request.notes ? String(request.notes) : null
+  const staffId = argNumber(request, 'staff_id', 'staffId')
+
+  if (!customerName) throw new Error('Customer name is required')
+  if (!(amount > 0)) throw new Error('Amount must be greater than zero')
+
+  const useRemote = await debtsTableAvailable()
+  const account = await findOrCreateDebtAccount({
+    businessId,
+    customerName,
+    debtDate: String(debtDate),
+    notes,
+    useRemote,
+  })
+
+  const result = await appendDebtEntry({
+    businessId,
+    debtId: Number(account.id),
+    entryType: 'MANUAL',
+    amount,
+    note: notes || 'Manual / old debt',
+    entryDate: String(debtDate),
+    staffId,
+    useRemote,
+  })
+  return result.debt
+}
+
+async function recordDebtPayment(request: Record<string, unknown>) {
+  const businessId = argNumber(request, 'business_id', 'businessId')
+  const debtId = argNumber(request, 'debt_id', 'debtId')
+  const amount = Number(request.amount || 0)
+  const staffId = argNumber(request, 'staff_id', 'staffId')
+  const note = request.note ? String(request.note) : 'Payment received'
+
+  if (!businessId) throw new Error('businessId is required')
+  if (!debtId) throw new Error('debtId is required')
+  if (!(amount > 0)) throw new Error('Payment amount must be greater than zero')
+
+  const useRemote = await debtsTableAvailable()
+  let debt: any
+  if (useRemote) {
+    const { data, error } = await supabase
+      .from('customer_debts_backup')
+      .select('*')
+      .eq('id', debtId)
+      .eq('business_id', businessId)
+      .single()
+    if (error) throw new Error(error.message)
+    debt = mapDebtRow(data)
+  } else {
+    debt = mapDebtRow(
+      readLocalDebts(businessId).find((r) => Number(r.id) === debtId) || null
+    )
+    if (!debt?.id) throw new Error('Debt account not found')
+  }
+
+  if (amount > Number(debt.balance) + 0.0001) {
+    throw new Error(`Payment exceeds balance of ₦${Number(debt.balance).toFixed(2)}`)
+  }
+
+  const result = await appendDebtEntry({
+    businessId,
+    debtId,
+    entryType: 'PAYMENT',
+    amount,
+    note,
+    staffId,
+    useRemote,
+  })
+
+  if (Number(result.debt.balance) <= 0.0001) {
+    try {
+      await settleCustomerDebtSales(businessId, result.debt.customer_name)
+    } catch (e) {
+      console.warn('Could not auto-complete related debt sales:', e)
+    }
+  }
+
+  return result.debt
+}
+
+async function chargeSaleToDebt(opts: {
+  businessId: number
+  customerName: string
+  amount: number
+  saleId: number
+  staffId?: number | null
+}) {
+  const useRemote = await debtsTableAvailable()
+  const account = await findOrCreateDebtAccount({
+    businessId: opts.businessId,
+    customerName: opts.customerName,
+    useRemote,
+  })
+  const result = await appendDebtEntry({
+    businessId: opts.businessId,
+    debtId: Number(account.id),
+    entryType: 'CHARGE',
+    amount: opts.amount,
+    saleId: opts.saleId,
+    note: `Sale #${opts.saleId}`,
+    staffId: opts.staffId,
+    useRemote,
+  })
+  return result.debt
 }
 
 async function getDebtSales(businessId: number) {
@@ -486,6 +1071,84 @@ async function getDebtSales(businessId: number) {
 
 async function markDebtPaid(saleId: number) {
   return markSaleAsCompleted(saleId)
+}
+
+async function resetStaffPassword(request: Record<string, unknown>) {
+  const userId = argNumber(request, 'user_id', 'userId')
+  if (!userId) throw new Error('userId is required')
+  const temporaryPassword = String(
+    request.temporary_password || request.temporaryPassword || ''
+  ).trim()
+  if (!temporaryPassword || temporaryPassword.length < 6) {
+    throw new Error('Temporary password must be at least 6 characters')
+  }
+  const passwordHash = btoa(temporaryPassword)
+  const { data, error } = await supabase
+    .from('users_backup')
+    .update({
+      password_hash: passwordHash,
+      temporary_password: temporaryPassword,
+      synced_at: new Date().toISOString(),
+    })
+    .eq('id', userId)
+    .select('id, username, name, role')
+    .single()
+  if (error) throw new Error(error.message)
+  return { ...data, temporary_password: temporaryPassword }
+}
+
+async function setStaffActive(request: Record<string, unknown>) {
+  const userId = argNumber(request, 'user_id', 'userId')
+  if (!userId) throw new Error('userId is required')
+  const isActive = Boolean(
+    request.is_active ?? request.isActive ?? false
+  )
+
+  const { data: existing, error: findError } = await supabase
+    .from('users_backup')
+    .select('id, username, name, role, is_active, is_hidden')
+    .eq('id', userId)
+    .maybeSingle()
+  if (findError) throw new Error(findError.message)
+  if (!existing) throw new Error('Staff member not found')
+  if ((existing as any).is_hidden === true) {
+    throw new Error('This account cannot be changed from staff management')
+  }
+
+  const { data, error } = await supabase
+    .from('users_backup')
+    .update({
+      is_active: isActive,
+      synced_at: new Date().toISOString(),
+    })
+    .eq('id', userId)
+    .select('id, username, name, role, is_active')
+    .single()
+  if (error) throw new Error(error.message)
+  return data
+}
+
+async function deleteStaffUser(request: Record<string, unknown>) {
+  const userId = argNumber(request, 'user_id', 'userId')
+  if (!userId) throw new Error('userId is required')
+
+  const { data: existing, error: findError } = await supabase
+    .from('users_backup')
+    .select('id, username, name, role, is_hidden')
+    .eq('id', userId)
+    .maybeSingle()
+  if (findError) throw new Error(findError.message)
+  if (!existing) throw new Error('Staff member not found')
+  if ((existing as any).is_hidden === true) {
+    throw new Error('This account cannot be deleted from staff management')
+  }
+  if (String(existing.role) === 'SuperAdmin') {
+    throw new Error('SuperAdmin accounts cannot be deleted. Deactivate instead.')
+  }
+
+  const { error } = await supabase.from('users_backup').delete().eq('id', userId)
+  if (error) throw new Error(error.message)
+  return { id: userId, deleted: true, username: existing.username }
 }
 
 async function getUsersForBusiness(businessId: number) {
@@ -1360,15 +2023,66 @@ export async function invoke<T = unknown>(
         const staffId = argNumber(args, 'staffId', 'staff_id')
         return (await getSalesLog(businessId, staffId)) as T
       }
+      case 'get_sale_receipt': {
+        const saleId = argNumber(args, 'saleId', 'sale_id')
+        if (!saleId) throw new Error('saleId is required')
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        return (await getSaleReceipt(saleId, businessId)) as T
+      }
       case 'get_debt_sales': {
         const businessId = argNumber(args, 'businessId', 'business_id')
         if (!businessId) throw new Error('businessId is required')
         return (await getDebtSales(businessId)) as T
       }
+      case 'get_debtors': {
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        if (!businessId) throw new Error('businessId is required')
+        const openOnly = (args as any)?.openOnly ?? (args as any)?.open_only
+        const staffId = argNumber(args, 'staffId', 'staff_id')
+        return (await getDebtors(businessId, {
+          openOnly: openOnly === undefined ? true : Boolean(openOnly),
+          staffId,
+        })) as T
+      }
+      case 'add_manual_debt': {
+        const request =
+          args && typeof args === 'object' && 'request' in args
+            ? (args.request as Record<string, unknown>)
+            : ((args || {}) as Record<string, unknown>)
+        return (await addManualDebt(request)) as T
+      }
+      case 'record_debt_payment': {
+        const request =
+          args && typeof args === 'object' && 'request' in args
+            ? (args.request as Record<string, unknown>)
+            : ((args || {}) as Record<string, unknown>)
+        return (await recordDebtPayment(request)) as T
+      }
       case 'mark_debt_paid': {
         const saleId = argNumber(args, 'saleId', 'sale_id')
         if (!saleId) throw new Error('saleId is required')
         return (await markDebtPaid(saleId)) as T
+      }
+      case 'reset_staff_password': {
+        const request =
+          args && typeof args === 'object' && 'request' in args
+            ? (args.request as Record<string, unknown>)
+            : ((args || {}) as Record<string, unknown>)
+        return (await resetStaffPassword(request)) as T
+      }
+      case 'set_staff_active': {
+        const request =
+          args && typeof args === 'object' && 'request' in args
+            ? (args.request as Record<string, unknown>)
+            : ((args || {}) as Record<string, unknown>)
+        return (await setStaffActive(request)) as T
+      }
+      case 'delete_staff_user': {
+        const request =
+          args && typeof args === 'object' && 'request' in args
+            ? (args.request as Record<string, unknown>)
+            : ((args || {}) as Record<string, unknown>)
+        return (await deleteStaffUser(request)) as T
       }
       case 'get_users_for_business':
       case 'get_staff_for_business': {

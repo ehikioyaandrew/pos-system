@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
 import { invoke } from './api'
 import { Table } from './components/Table'
+import { printReceipt } from './receiptPrint'
 
 function money(n: number) {
   return `₦${Number(n || 0).toLocaleString(undefined, {
@@ -15,6 +16,11 @@ function formatWhen(value?: string | null) {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return '—'
   return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function saleCustomerName(sale: any) {
+  const name = String(sale?.customer_name || '').trim()
+  return name || 'Walk-in customer'
 }
 
 export function StaffPOSInterface({
@@ -180,14 +186,16 @@ export function StaffPOSInterface({
           staff_id: currentUser?.id,
           business_id: businessId,
           location: saleLocation,
-          customer_name: customerName || null,
+          customer_name: customerName?.trim() || null,
         },
       })) as any
 
       setCart([])
       setShowPaymentModal(false)
       toast.success(
-        `Sale #${result.sale_id} · ${money(result.total_amount)} · ${result.payment_method} · from ${saleLocation}`,
+        `Sale #${result.sale_id} · ${money(result.total_amount)} · ${result.payment_method}${
+          result.customer_name ? ` · ${result.customer_name}` : ''
+        } · from ${saleLocation}`,
         { duration: 5000 }
       )
       await loadProducts()
@@ -437,6 +445,7 @@ export function StaffPOSInterface({
       {showPaymentModal && (
         <PaymentModal
           total={getTotal()}
+          businessId={businessId}
           processing={processingPayment}
           onClose={() => setShowPaymentModal(false)}
           onPayment={processPayment}
@@ -448,11 +457,13 @@ export function StaffPOSInterface({
 
 function PaymentModal({
   total,
+  businessId,
   onPayment,
   onClose,
   processing,
 }: {
   total: number
+  businessId?: number | string | null
   onPayment: (method: string, customerName?: string) => void
   onClose: () => void
   processing: boolean
@@ -460,6 +471,9 @@ function PaymentModal({
   const [paymentMethod, setPaymentMethod] = useState('CASH')
   const [customerPaid, setCustomerPaid] = useState('')
   const [customerName, setCustomerName] = useState('')
+  const [debtorMode, setDebtorMode] = useState<'existing' | 'new'>('existing')
+  const [debtors, setDebtors] = useState<any[]>([])
+  const [loadingDebtors, setLoadingDebtors] = useState(false)
   const change = Math.max(0, (parseFloat(customerPaid) || 0) - total)
 
   const methods = [
@@ -469,13 +483,40 @@ function PaymentModal({
     { value: 'DEBT', label: 'Debt / credit' },
   ]
 
+  useEffect(() => {
+    if (paymentMethod !== 'DEBT' || !businessId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        setLoadingDebtors(true)
+        const rows = (await invoke('get_debtors', {
+          businessId,
+          openOnly: false,
+        })) as any[]
+        if (!cancelled) {
+          const list = Array.isArray(rows) ? rows : []
+          setDebtors(list.filter((d) => Number(d.balance) > 0 || d.status === 'OPEN'))
+          if (list.some((d) => Number(d.balance) > 0)) setDebtorMode('existing')
+          else setDebtorMode('new')
+        }
+      } catch {
+        if (!cancelled) setDebtors([])
+      } finally {
+        if (!cancelled) setLoadingDebtors(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [paymentMethod, businessId])
+
   const handlePay = () => {
     if (paymentMethod === 'CASH' && (parseFloat(customerPaid) || 0) < total) {
       toast.error('Amount paid is less than total')
       return
     }
     if (paymentMethod === 'DEBT' && !customerName.trim()) {
-      toast.error('Enter customer name for debt')
+      toast.error('Select or enter a debtor name')
       return
     }
     onPayment(paymentMethod, customerName.trim() || undefined)
@@ -538,18 +579,96 @@ function PaymentModal({
             </div>
           )}
 
-          {paymentMethod === 'DEBT' && (
+          {paymentMethod !== 'DEBT' && (
             <div>
               <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
-                Customer name *
+                Customer name
               </label>
               <input
                 type="text"
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
                 className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white"
-                placeholder="Who owes this?"
+                placeholder="Leave blank for Walk-in customer"
               />
+            </div>
+          )}
+
+          {paymentMethod === 'DEBT' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={processing || loadingDebtors || debtors.length === 0}
+                  onClick={() => {
+                    setDebtorMode('existing')
+                    setCustomerName('')
+                  }}
+                  className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+                    debtorMode === 'existing'
+                      ? 'border-[#121c19] bg-white'
+                      : 'border-[#d4dcd8] bg-[#f4f6f5] text-[#2a3d36]/60'
+                  }`}
+                >
+                  Existing debtor
+                </button>
+                <button
+                  type="button"
+                  disabled={processing}
+                  onClick={() => {
+                    setDebtorMode('new')
+                    setCustomerName('')
+                  }}
+                  className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+                    debtorMode === 'new'
+                      ? 'border-[#121c19] bg-white'
+                      : 'border-[#d4dcd8] bg-[#f4f6f5] text-[#2a3d36]/60'
+                  }`}
+                >
+                  New debtor
+                </button>
+              </div>
+
+              {debtorMode === 'existing' ? (
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                    Select debtor *
+                  </label>
+                  {loadingDebtors ? (
+                    <p className="mt-2 text-sm text-[#2a3d36]/55">Loading debtors…</p>
+                  ) : debtors.length === 0 ? (
+                    <p className="mt-2 text-sm text-[#2a3d36]/55">
+                      No debtors yet — switch to New debtor.
+                    </p>
+                  ) : (
+                    <select
+                      value={customerName}
+                      onChange={(e) => setCustomerName(e.target.value)}
+                      className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white"
+                    >
+                      <option value="">Choose customer…</option>
+                      {debtors.map((d) => (
+                        <option key={d.id} value={d.customer_name}>
+                          {d.customer_name} · owed {money(d.balance)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                    New customer name *
+                  </label>
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white"
+                    placeholder="Who owes this?"
+                  />
+                </div>
+              )}
             </div>
           )}
 
@@ -824,6 +943,7 @@ export function SalesLogDashboard({
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
+  const [printingId, setPrintingId] = useState<number | null>(null)
   const businessId = currentUser?.business_id || businessInfo?.id
 
   useEffect(() => {
@@ -847,6 +967,30 @@ export function SalesLogDashboard({
     }
   }
 
+  const handlePrint = async (sale: any) => {
+    if (!sale?.id) return
+    try {
+      setPrintingId(Number(sale.id))
+      const receipt = (await invoke('get_sale_receipt', {
+        saleId: sale.id,
+        businessId,
+      })) as any
+      printReceipt({
+        ...receipt,
+        business_name: receipt.business_name || businessInfo?.name || 'POS System',
+        business_address: receipt.business_address || businessInfo?.address || null,
+        business_phone: receipt.business_phone || businessInfo?.phone || null,
+        staff_name: receipt.staff_name || sale.staff_name,
+        customer_name:
+          receipt.customer_name || sale.customer_name || 'Walk-in customer',
+      })
+    } catch (error) {
+      toast.error(`Print failed: ${error}`)
+    } finally {
+      setPrintingId(null)
+    }
+  }
+
   const filtered = rows.filter((r) => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return true
@@ -855,7 +999,7 @@ export function SalesLogDashboard({
       String(r.payment_method || '').toLowerCase().includes(q) ||
       String(r.payment_status || '').toLowerCase().includes(q) ||
       String(r.id).includes(q) ||
-      String(r.customer_name || '').toLowerCase().includes(q)
+      saleCustomerName(r).toLowerCase().includes(q)
     )
   })
 
@@ -908,7 +1052,7 @@ export function SalesLogDashboard({
           type="search"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search by staff, method, status, id…"
+          placeholder="Search by customer, staff, method, status, id…"
           className="w-full mb-4 px-4 py-2.5 rounded-lg border border-[#d4dcd8] bg-white text-sm"
         />
 
@@ -919,15 +1063,24 @@ export function SalesLogDashboard({
                 <p className="font-semibold text-[#121c19]">#{sale.id}</p>
                 <p className="font-bold text-[#121c19]">{money(sale.total_amount)}</p>
               </div>
-              <p className="text-sm text-[#2a3d36]/60 mt-1">{sale.staff_name}</p>
+              <p className="text-sm text-[#121c19] mt-1">{saleCustomerName(sale)}</p>
+              <p className="text-sm text-[#2a3d36]/60 mt-0.5">{sale.staff_name}</p>
               <p className="text-xs text-[#2a3d36]/45 mt-2">{formatWhen(sale.created_at)}</p>
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-wrap gap-2 items-center">
                 <span className="text-xs font-semibold px-2 py-1 rounded-md border border-[#d4dcd8] bg-[#f4f6f5]">
                   {sale.payment_method}
                 </span>
                 <span className="text-xs font-semibold px-2 py-1 rounded-md border border-[#d4dcd8] bg-[#f4f6f5]">
                   {sale.payment_status}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => void handlePrint(sale)}
+                  disabled={printingId === Number(sale.id)}
+                  className="ml-auto text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                >
+                  {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
+                </button>
               </div>
             </article>
           ))}
@@ -938,23 +1091,36 @@ export function SalesLogDashboard({
             <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
               <tr>
                 <th className="px-5 py-3 font-semibold">Sale</th>
+                <th className="px-5 py-3 font-semibold">Customer</th>
                 <th className="px-5 py-3 font-semibold">Staff</th>
                 <th className="px-5 py-3 font-semibold">Method</th>
                 <th className="px-5 py-3 font-semibold">Status</th>
                 <th className="px-5 py-3 font-semibold text-right">Amount</th>
                 <th className="px-5 py-3 font-semibold">When</th>
+                <th className="px-5 py-3 font-semibold text-right">Print</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#e8ecea]">
               {filtered.map((sale) => (
                 <tr key={sale.id} className="hover:bg-[#f4f6f5]/70">
                   <td className="px-5 py-4 font-semibold text-[#121c19]">#{sale.id}</td>
+                  <td className="px-5 py-4 text-[#121c19]">{saleCustomerName(sale)}</td>
                   <td className="px-5 py-4 text-[#2a3d36]/70">{sale.staff_name}</td>
                   <td className="px-5 py-4">{sale.payment_method}</td>
                   <td className="px-5 py-4">{sale.payment_status}</td>
                   <td className="px-5 py-4 text-right font-semibold">{money(sale.total_amount)}</td>
                   <td className="px-5 py-4 text-sm text-[#2a3d36]/60 whitespace-nowrap">
                     {formatWhen(sale.created_at)}
+                  </td>
+                  <td className="px-5 py-4 text-right">
+                    <button
+                      type="button"
+                      onClick={() => void handlePrint(sale)}
+                      disabled={printingId === Number(sale.id)}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                    >
+                      {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -972,24 +1138,33 @@ export function SalesLogDashboard({
 export function DebtManagementDashboard({
   currentUser,
   businessInfo,
+  ownOnly = false,
 }: {
   currentUser: any
   businessInfo: any
+  ownOnly?: boolean
 }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
+  const [showAddDebt, setShowAddDebt] = useState(false)
+  const [payTarget, setPayTarget] = useState<any | null>(null)
+  const [saving, setSaving] = useState(false)
   const businessId = currentUser?.business_id || businessInfo?.id
 
   useEffect(() => {
     if (businessId) void load()
     else setLoading(false)
-  }, [businessId])
+  }, [businessId, ownOnly, currentUser?.id])
 
   const load = async () => {
     try {
       setLoading(true)
-      const data = (await invoke('get_debt_sales', { businessId })) as any[]
+      const data = (await invoke('get_debtors', {
+        businessId,
+        openOnly: true,
+        staffId: ownOnly ? currentUser?.id : null,
+      })) as any[]
       setRows(Array.isArray(data) ? data : [])
     } catch (error) {
       toast.error(`Failed to load debts: ${error}`)
@@ -999,27 +1174,73 @@ export function DebtManagementDashboard({
     }
   }
 
-  const markPaid = async (saleId: number) => {
-    try {
-      await invoke('mark_debt_paid', { saleId })
-      toast.success('Debt marked as paid')
-      await load()
-    } catch (error) {
-      toast.error(`Failed: ${error}`)
-    }
-  }
-
   const filtered = rows.filter((r) => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return true
     return (
       String(r.customer_name || '').toLowerCase().includes(q) ||
-      String(r.staff_name || '').toLowerCase().includes(q) ||
+      String(r.notes || '').toLowerCase().includes(q) ||
       String(r.id).includes(q)
     )
   })
 
-  const outstanding = filtered.reduce((s, r) => s + Number(r.total_amount || 0), 0)
+  const outstanding = filtered.reduce((s, r) => s + Number(r.balance || 0), 0)
+
+  const handleAddManual = async (form: {
+    customerName: string
+    amount: string
+    debtDate: string
+    notes: string
+  }) => {
+    try {
+      setSaving(true)
+      await invoke('add_manual_debt', {
+        request: {
+          business_id: businessId,
+          customer_name: form.customerName.trim(),
+          amount: Number(form.amount),
+          debt_date: form.debtDate
+            ? new Date(`${form.debtDate}T12:00:00`).toISOString()
+            : new Date().toISOString(),
+          notes: form.notes.trim() || null,
+          staff_id: currentUser?.id,
+        },
+      })
+      toast.success('Old debt added')
+      setShowAddDebt(false)
+      await load()
+    } catch (error) {
+      toast.error(`Failed: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleRecordPayment = async (amount: string) => {
+    if (!payTarget) return
+    try {
+      setSaving(true)
+      const updated = (await invoke('record_debt_payment', {
+        request: {
+          business_id: businessId,
+          debt_id: payTarget.id,
+          amount: Number(amount),
+          staff_id: currentUser?.id,
+        },
+      })) as any
+      toast.success(
+        Number(updated?.balance) <= 0
+          ? `${payTarget.customer_name} fully settled`
+          : `Payment recorded · balance ${money(updated?.balance || 0)}`
+      )
+      setPayTarget(null)
+      await load()
+    } catch (error) {
+      toast.error(`Failed: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -1041,21 +1262,32 @@ export function DebtManagementDashboard({
               Debt management
             </h1>
             <p className="mt-2 text-[#2a3d36]/70">
-              Open credit sales waiting to be collected.
+              {ownOnly
+                ? 'Your debt customers and balances from sales you charged on credit.'
+                : 'Track customer balances, add old debts, and record payments.'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
-          >
-            Refresh
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAddDebt(true)}
+              className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              + Add old debt
+            </button>
+          </div>
         </header>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
           <div className="rounded-xl border border-[#d4dcd8] bg-white p-5">
-            <p className="text-sm text-[#2a3d36]/55">Open debts</p>
+            <p className="text-sm text-[#2a3d36]/55">Open debtors</p>
             <p className="font-display text-3xl font-bold text-[#121c19] mt-1">{filtered.length}</p>
           </div>
           <div className="rounded-xl border border-[#d4dcd8] bg-white p-5">
@@ -1070,7 +1302,7 @@ export function DebtManagementDashboard({
           type="search"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search customer or staff…"
+          placeholder="Search customer…"
           className="w-full mb-4 px-4 py-2.5 rounded-lg border border-[#d4dcd8] bg-white text-sm"
         />
 
@@ -1078,30 +1310,38 @@ export function DebtManagementDashboard({
           <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
             <p className="font-display text-2xl font-bold text-[#121c19]">No open debts</p>
             <p className="mt-2 text-[#2a3d36]/55">
-              Debt sales from POS will appear here until marked paid.
+              Add an old debt, or charge a customer on credit from POS.
             </p>
           </div>
         ) : (
           <>
             <div className="md:hidden space-y-3">
-              {filtered.map((sale) => (
-                <article key={sale.id} className="rounded-xl border border-[#d4dcd8] bg-white p-4">
-                  <p className="font-semibold text-[#121c19]">
-                    {sale.customer_name || 'Unnamed customer'}
+              {filtered.map((debt) => (
+                <article key={debt.id} className="rounded-xl border border-[#d4dcd8] bg-white p-4">
+                  <p className="font-semibold text-[#121c19]">{debt.customer_name}</p>
+                  <p className="text-xs text-[#2a3d36]/45 mt-1">
+                    Since {formatWhen(debt.debt_date || debt.created_at)}
                   </p>
-                  <p className="text-sm text-[#2a3d36]/55 mt-1">
-                    #{sale.id} · by {sale.staff_name}
-                  </p>
-                  <p className="font-display text-xl font-bold text-[#121c19] mt-3">
-                    {money(sale.total_amount)}
-                  </p>
-                  <p className="text-xs text-[#2a3d36]/45 mt-1">{formatWhen(sale.created_at)}</p>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                    <div>
+                      <p className="text-[10px] uppercase text-[#2a3d36]/45">Charged</p>
+                      <p className="text-sm font-semibold">{money(debt.total_charged)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-[#2a3d36]/45">Paid</p>
+                      <p className="text-sm font-semibold text-teal-800">{money(debt.total_paid)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-[#2a3d36]/45">Balance</p>
+                      <p className="text-sm font-bold text-[#c4783a]">{money(debt.balance)}</p>
+                    </div>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => void markPaid(sale.id)}
+                    onClick={() => setPayTarget(debt)}
                     className="mt-4 w-full bg-[#121c19] text-white py-2.5 rounded-md text-sm font-semibold"
                   >
-                    Mark paid
+                    Record payment
                   </button>
                 </article>
               ))}
@@ -1112,34 +1352,36 @@ export function DebtManagementDashboard({
                 <thead className="bg-[#f4f6f5] text-xs uppercase tracking-wide text-[#2a3d36]/50">
                   <tr>
                     <th className="px-5 py-3 font-semibold">Customer</th>
-                    <th className="px-5 py-3 font-semibold">Sale</th>
-                    <th className="px-5 py-3 font-semibold">Staff</th>
-                    <th className="px-5 py-3 font-semibold text-right">Amount</th>
-                    <th className="px-5 py-3 font-semibold">When</th>
+                    <th className="px-5 py-3 font-semibold text-right">Charged</th>
+                    <th className="px-5 py-3 font-semibold text-right">Paid</th>
+                    <th className="px-5 py-3 font-semibold text-right">Balance</th>
+                    <th className="px-5 py-3 font-semibold">Date</th>
                     <th className="px-5 py-3 font-semibold" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e8ecea]">
-                  {filtered.map((sale) => (
-                    <tr key={sale.id} className="hover:bg-[#f4f6f5]/70">
+                  {filtered.map((debt) => (
+                    <tr key={debt.id} className="hover:bg-[#f4f6f5]/70">
                       <td className="px-5 py-4 font-semibold text-[#121c19]">
-                        {sale.customer_name || '—'}
+                        {debt.customer_name}
                       </td>
-                      <td className="px-5 py-4">#{sale.id}</td>
-                      <td className="px-5 py-4 text-[#2a3d36]/70">{sale.staff_name}</td>
-                      <td className="px-5 py-4 text-right font-semibold">
-                        {money(sale.total_amount)}
+                      <td className="px-5 py-4 text-right">{money(debt.total_charged)}</td>
+                      <td className="px-5 py-4 text-right text-teal-800 font-semibold">
+                        {money(debt.total_paid)}
+                      </td>
+                      <td className="px-5 py-4 text-right font-bold text-[#c4783a]">
+                        {money(debt.balance)}
                       </td>
                       <td className="px-5 py-4 text-sm text-[#2a3d36]/60 whitespace-nowrap">
-                        {formatWhen(sale.created_at)}
+                        {formatWhen(debt.debt_date || debt.created_at)}
                       </td>
                       <td className="px-5 py-4 text-right">
                         <button
                           type="button"
-                          onClick={() => void markPaid(sale.id)}
+                          onClick={() => setPayTarget(debt)}
                           className="bg-[#121c19] hover:bg-[#1a2924] text-white px-3 py-2 rounded-md text-sm font-semibold"
                         >
-                          Mark paid
+                          Record payment
                         </button>
                       </td>
                     </tr>
@@ -1150,6 +1392,184 @@ export function DebtManagementDashboard({
           </>
         )}
       </div>
+
+      {showAddDebt && (
+        <AddOldDebtModal
+          saving={saving}
+          onClose={() => setShowAddDebt(false)}
+          onSave={handleAddManual}
+        />
+      )}
+      {payTarget && (
+        <RecordDebtPaymentModal
+          debt={payTarget}
+          saving={saving}
+          onClose={() => setPayTarget(null)}
+          onSave={handleRecordPayment}
+        />
+      )}
     </div>
   )
 }
+
+function AddOldDebtModal({
+  saving,
+  onClose,
+  onSave,
+}: {
+  saving: boolean
+  onClose: () => void
+  onSave: (form: {
+    customerName: string
+    amount: string
+    debtDate: string
+    notes: string
+  }) => void
+}) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [customerName, setCustomerName] = useState('')
+  const [amount, setAmount] = useState('')
+  const [debtDate, setDebtDate] = useState(today)
+  const [notes, setNotes] = useState('')
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <button type="button" className="absolute inset-0 bg-[#121c19]/55" onClick={onClose} />
+      <div className="relative w-full sm:max-w-md bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
+        <h2 className="font-display text-xl font-bold text-[#121c19]">Add old debt</h2>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+            Customer name *
+          </label>
+          <input
+            value={customerName}
+            onChange={(e) => setCustomerName(e.target.value)}
+            className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+            placeholder="Customer name"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+            Amount owed *
+          </label>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+            placeholder="0.00"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+            Debt date
+          </label>
+          <input
+            type="date"
+            value={debtDate}
+            onChange={(e) => setDebtDate(e.target.value)}
+            className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+            Notes
+          </label>
+          <input
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+            placeholder="Optional"
+          />
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={saving || !customerName.trim() || !(Number(amount) > 0)}
+            onClick={() => onSave({ customerName, amount, debtDate, notes })}
+            className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save debt'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RecordDebtPaymentModal({
+  debt,
+  saving,
+  onClose,
+  onSave,
+}: {
+  debt: any
+  saving: boolean
+  onClose: () => void
+  onSave: (amount: string) => void
+}) {
+  const [amount, setAmount] = useState('')
+  const balance = Number(debt.balance || 0)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <button type="button" className="absolute inset-0 bg-[#121c19]/55" onClick={onClose} />
+      <div className="relative w-full sm:max-w-md bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
+        <div>
+          <h2 className="font-display text-xl font-bold text-[#121c19]">Record payment</h2>
+          <p className="mt-1 text-sm text-[#2a3d36]/60">
+            {debt.customer_name} · balance {money(balance)}
+          </p>
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+            Amount paid *
+          </label>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+            placeholder="0.00"
+          />
+          <button
+            type="button"
+            className="mt-2 text-xs font-semibold text-teal-800"
+            onClick={() => setAmount(String(balance))}
+          >
+            Pay full balance
+          </button>
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={saving || !(Number(amount) > 0)}
+            onClick={() => onSave(amount)}
+            className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save payment'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
