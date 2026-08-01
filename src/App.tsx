@@ -3415,6 +3415,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
           packaging: productData.packaging || null,
           price: productData.price || 0,
+          staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
           cost_price: productData.costPrice || productData.cost_price || 0,
           stock_quantity: productData.stockQuantity || productData.stock_quantity || 0,
           min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
@@ -3452,6 +3453,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
           packaging: productData.packaging || null,
           price: productData.price || 0,
+          staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
           cost_price: productData.costPrice || productData.cost_price || 0,
           min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
           fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
@@ -3636,7 +3638,10 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
                             {product.packaging || 'No packaging'}
                           </span>
                           <span className="font-semibold text-[#121c19]">
-                            ₦{Number(product.price || 0).toFixed(2)}
+                            N ₦{Number(product.price || 0).toFixed(2)}
+                          </span>
+                          <span className="font-semibold text-[#2a3d36]/70">
+                            S ₦{Number(product.staff_price || product.price || 0).toFixed(2)}
                           </span>
                         </div>
                       </div>
@@ -3678,7 +3683,8 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
                   <tr>
                     <th className="px-5 py-3 font-semibold">Product</th>
                     <th className="px-5 py-3 font-semibold">Packaging</th>
-                    <th className="px-5 py-3 font-semibold">Price</th>
+                    <th className="px-5 py-3 font-semibold">Normal</th>
+                    <th className="px-5 py-3 font-semibold">Staff</th>
                     <th className="px-5 py-3 font-semibold text-center">Fridge</th>
                     <th className="px-5 py-3 font-semibold text-center">Show</th>
                     <th className="px-5 py-3 font-semibold text-center">Store</th>
@@ -3716,6 +3722,9 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
                         </td>
                         <td className="px-5 py-4 font-semibold text-[#121c19] whitespace-nowrap">
                           ₦{Number(product.price || 0).toFixed(2)}
+                        </td>
+                        <td className="px-5 py-4 font-semibold text-[#121c19] whitespace-nowrap">
+                          ₦{Number(product.staff_price || product.price || 0).toFixed(2)}
                         </td>
                         <td className={`px-5 py-4 text-center font-semibold ${fridge < 5 ? 'text-rose-600' : 'text-[#121c19]'}`}>
                           {fridge}
@@ -3984,6 +3993,12 @@ function ProductFormModal({
     category: String(product?.category || 'BAR').toUpperCase() === 'SPORTS' ? 'SPORTS' : 'BAR',
     packaging: product?.packaging || packagingTypes[0] || '',
     price: product?.price != null ? String(product.price) : '',
+    staffPrice:
+      product?.staff_price != null
+        ? String(product.staff_price)
+        : product?.price != null
+          ? String(product.price)
+          : '',
     costPrice: product?.cost_price != null ? String(product.cost_price) : '',
     minStockLevel: product?.min_stock_level != null ? String(product.min_stock_level) : '5',
     fridgeStock: product?.fridge_stock != null ? String(product.fridge_stock) : '',
@@ -4048,9 +4063,20 @@ function ProductFormModal({
       }))
       return
     }
-    if (isSwimmingAmenity && (!formData.durationValue || formData.durationValue === '1')) {
-      setFormData((prev) => ({ ...prev, durationValue: prev.durationValue || '2' }))
+    if (isSwimmingAmenity) {
+      setFormData((prev) => ({
+        ...prev,
+        durationValue:
+          !prev.durationValue || prev.durationValue === '0' ? '2' : prev.durationValue,
+      }))
+      return
     }
+    // Table Tennis / Pool / Snooker — default 1 day when empty
+    setFormData((prev) => ({
+      ...prev,
+      durationValue:
+        !prev.durationValue || prev.durationValue === '0' ? '1' : prev.durationValue,
+    }))
   }, [formData.packaging, formData.category])
 
   const fieldClass =
@@ -4061,18 +4087,41 @@ function ProductFormModal({
     setSaving(true)
     try {
       const isSports = formData.category === 'SPORTS'
-      const durationValue = isShishaAmenity ? 1 : Number(formData.durationValue)
-      if (isSports && !isShishaAmenity && !(durationValue > 0)) {
+      const normalPrice = parseFloat(String(formData.price).trim())
+      const staffPriceRaw = parseFloat(String(formData.staffPrice).trim())
+      const staffPrice =
+        Number.isFinite(staffPriceRaw) && staffPriceRaw > 0
+          ? staffPriceRaw
+          : normalPrice
+      const durationRaw = String(formData.durationValue ?? '').trim()
+      const durationValue = isShishaAmenity
+        ? 1
+        : durationRaw === ''
+          ? NaN
+          : Number(durationRaw)
+      if (isSports && !(normalPrice > 0)) {
         toast.error(
-          isSwimmingAmenity
-            ? 'Enter swimming duration in hours'
-            : 'Enter sports duration in days'
+          isShishaAmenity ? 'Enter shisha price per coal' : 'Enter normal price'
         )
         setSaving(false)
         return
       }
-      if (isSports && isShishaAmenity && !(parseFloat(formData.price) > 0)) {
-        toast.error('Enter shisha price per coal')
+      if (isSports && !isShishaAmenity && !(durationValue > 0)) {
+        toast.error(
+          isSwimmingAmenity
+            ? 'Enter swimming duration in hours'
+            : 'Enter sports duration in days (e.g. 1)'
+        )
+        setSaving(false)
+        return
+      }
+      if (!isSports && !(normalPrice > 0)) {
+        toast.error('Enter normal price')
+        setSaving(false)
+        return
+      }
+      if (!isSports && !(staffPrice > 0)) {
+        toast.error('Enter staff price')
         setSaving(false)
         return
       }
@@ -4081,7 +4130,10 @@ function ProductFormModal({
         id: product?.id,
         category: isSports ? 'SPORTS' : 'BAR',
         packaging: formData.packaging || null,
-        price: parseFloat(formData.price) || (isShishaAmenity ? 1500 : 0),
+        price: normalPrice || (isShishaAmenity ? 1500 : 0),
+        staffPrice: isSports
+          ? normalPrice || (isShishaAmenity ? 1500 : 0)
+          : staffPrice,
         costPrice: isSports ? parseFloat(formData.costPrice) || 0 : parseFloat(formData.costPrice),
         minStockLevel: isSports ? 0 : parseInt(formData.minStockLevel) || 0,
         fridgeStock: isSports ? 0 : parseInt(formData.fridgeStock) || 0,
@@ -4259,17 +4311,21 @@ function ProductFormModal({
               {!(formData.category === 'SPORTS' && isShishaAmenity) && (
                 <div>
                   <label className="block text-sm font-semibold text-[#121c19] mb-2">
-                    Selling price (₦) *
+                    Normal price (₦) *
                   </label>
                   <input
                     type="number"
-                    step="0.01"
+                    step="any"
+                    min="0"
                     required
                     value={formData.price}
                     onChange={(e) => updateFormData('price', e.target.value)}
                     className={fieldClass}
                     placeholder="0.00"
                   />
+                  <p className="mt-1 text-xs text-[#2a3d36]/50">
+                    Regular customer price on POS.
+                  </p>
                 </div>
               )}
               {formData.category === 'SPORTS' ? (
@@ -4280,7 +4336,7 @@ function ProductFormModal({
                     </label>
                     <input
                       type="number"
-                      step="0.01"
+                      step="any"
                       min="0"
                       required
                       value={formData.price}
@@ -4299,8 +4355,8 @@ function ProductFormModal({
                     </label>
                     <input
                       type="number"
-                      step={isSwimmingAmenity ? '0.5' : '1'}
-                      min="0.25"
+                      step={isSwimmingAmenity ? 'any' : '1'}
+                      min={isSwimmingAmenity ? '0.25' : '1'}
                       required
                       value={formData.durationValue}
                       onChange={(e) => updateFormData('durationValue', e.target.value)}
@@ -4310,25 +4366,48 @@ function ProductFormModal({
                     <p className="mt-1 text-xs text-[#2a3d36]/50">
                       {isSwimmingAmenity
                         ? 'Used for the swimming countdown timer when this is sold.'
-                        : 'Session length in days — shown when selling this amenity.'}
+                        : 'Session length in whole days (1, 2, 3…).'}
                     </p>
                   </div>
                 )
               ) : (
-                <div>
-                  <label className="block text-sm font-semibold text-[#121c19] mb-2">
-                    Cost price (₦) *
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    required
-                    value={formData.costPrice}
-                    onChange={(e) => updateFormData('costPrice', e.target.value)}
-                    className={fieldClass}
-                    placeholder="0.00"
-                  />
-                </div>
+                <>
+                  <div>
+                    <label className="block text-sm font-semibold text-[#121c19] mb-2">
+                      Staff price (₦) *
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      required
+                      value={formData.staffPrice}
+                      onChange={(e) => updateFormData('staffPrice', e.target.value)}
+                      className={fieldClass}
+                      placeholder="0.00"
+                    />
+                    <p className="mt-1 text-xs text-[#2a3d36]/50">
+                      Price when selling at staff rate on POS.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-[#121c19] mb-2">
+                      Cost price (₦) *
+                    </label>
+                    <p className="text-xs text-[#2a3d36]/45 mb-2 -mt-1">
+                      Purchase/cost only — not charged on POS.
+                    </p>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={formData.costPrice}
+                      onChange={(e) => updateFormData('costPrice', e.target.value)}
+                      className={fieldClass}
+                      placeholder="0.00"
+                    />
+                  </div>
+                </>
               )}
             </div>
           </section>

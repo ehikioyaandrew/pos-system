@@ -12,6 +12,10 @@ ALTER TABLE products_backup
 ALTER TABLE products_backup
   ADD COLUMN IF NOT EXISTS duration_unit TEXT DEFAULT NULL;
 
+-- Two sell prices: normal (price) and staff (staff_price)
+ALTER TABLE products_backup
+  ADD COLUMN IF NOT EXISTS staff_price NUMERIC DEFAULT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_products_backup_sports_stock
   ON products_backup (business_id, sports_stock);
 

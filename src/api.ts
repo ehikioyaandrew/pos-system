@@ -354,10 +354,23 @@ function resolveSaleCreatedAt(saleDate?: string | null, baseIso?: string | null)
   return clock.toISOString()
 }
 
-async function updateSaleDate(opts: {
+async function findSaleItemTable(saleId: number) {
+  const tables = ['sale_items_backup', 'sale_items_sync', 'sale_items']
+  for (const table of tables) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('id, product_id, quantity, unit_price, total_price, sale_id')
+      .eq('sale_id', saleId)
+    if (!error && data) return { table, rows: data as any[] }
+  }
+  return { table: 'sale_items_backup', rows: [] as any[] }
+}
+
+async function updateSaleDetails(opts: {
   saleId: number
   businessId: number
-  saleDate: string
+  saleDate?: string | null
+  items?: Array<{ product_id: number; unit_price: number; quantity?: number }> | null
 }) {
   const saleId = Number(opts.saleId)
   const businessId = Number(opts.businessId)
@@ -382,40 +395,105 @@ async function updateSaleDate(opts: {
     throw new Error('Sale does not belong to this business')
   }
 
-  const createdAt = resolveSaleCreatedAt(opts.saleDate, sale.created_at)
   const syncedAt = new Date().toISOString()
+  const salePatch: Record<string, unknown> = { synced_at: syncedAt }
+  let createdAt = sale.created_at
+
+  if (opts.saleDate) {
+    createdAt = resolveSaleCreatedAt(opts.saleDate, sale.created_at)
+    salePatch.created_at = createdAt
+  }
+
+  const priceUpdates = Array.isArray(opts.items) ? opts.items : null
+  if (priceUpdates && priceUpdates.length) {
+    const { table, rows } = await findSaleItemTable(saleId)
+    if (!rows.length) throw new Error('No sale items found to update')
+
+    let totalAmount = 0
+    for (const row of rows) {
+      const patch = priceUpdates.find(
+        (p) => Number(p.product_id) === Number(row.product_id)
+      )
+      const qty = Number(row.quantity || 0)
+      const unitPrice = patch
+        ? Number(patch.unit_price)
+        : Number(row.unit_price || 0)
+      if (!(unitPrice >= 0)) throw new Error('Selling price cannot be negative')
+      const lineTotal = qty * unitPrice
+      totalAmount += lineTotal
+
+      if (patch) {
+        const { error: itemError } = await supabase
+          .from(table)
+          .update({
+            unit_price: unitPrice,
+            total_price: lineTotal,
+            synced_at: syncedAt,
+          })
+          .eq('id', row.id)
+          .eq('sale_id', saleId)
+        if (itemError) {
+          // Fallback without id match
+          const retry = await supabase
+            .from(table)
+            .update({
+              unit_price: unitPrice,
+              total_price: lineTotal,
+              synced_at: syncedAt,
+            })
+            .eq('sale_id', saleId)
+            .eq('product_id', row.product_id)
+          if (retry.error) throw new Error(retry.error.message)
+        }
+      }
+    }
+    salePatch.total_amount = totalAmount
+  }
+
   const { error: updateError } = await supabase
     .from('sales_backup')
-    .update({ created_at: createdAt, synced_at: syncedAt })
+    .update(salePatch)
     .eq('id', saleId)
   if (updateError) throw new Error(updateError.message)
 
-  // Keep linked debt charge dates in sync when present
+  // Keep linked debt charge date/amount in sync when present
   try {
     const useRemote = await debtsTableAvailable()
-    if (useRemote) {
-      await supabase
-        .from('debt_entries_backup')
-        .update({ entry_date: createdAt, synced_at: syncedAt })
-        .eq('sale_id', saleId)
-        .eq('business_id', businessId)
-    } else {
-      const entries = readLocalDebtEntries(businessId)
-      let changed = false
-      for (const e of entries) {
-        if (Number(e.sale_id) === saleId) {
-          e.entry_date = createdAt
-          e.synced_at = syncedAt
-          changed = true
+    const debtPatch: Record<string, unknown> = { synced_at: syncedAt }
+    if (salePatch.created_at) debtPatch.entry_date = createdAt
+    if (salePatch.total_amount != null) debtPatch.amount = salePatch.total_amount
+
+    if (Object.keys(debtPatch).length > 1) {
+      if (useRemote) {
+        await supabase
+          .from('debt_entries_backup')
+          .update(debtPatch)
+          .eq('sale_id', saleId)
+          .eq('business_id', businessId)
+          .eq('entry_type', 'CHARGE')
+      } else {
+        const entries = readLocalDebtEntries(businessId)
+        let changed = false
+        for (const e of entries) {
+          if (Number(e.sale_id) === saleId && String(e.entry_type) === 'CHARGE') {
+            if (debtPatch.entry_date) e.entry_date = debtPatch.entry_date
+            if (debtPatch.amount != null) e.amount = debtPatch.amount
+            e.synced_at = syncedAt
+            changed = true
+          }
         }
+        if (changed) writeLocalDebtEntries(businessId, entries)
       }
-      if (changed) writeLocalDebtEntries(businessId, entries)
     }
   } catch {
-    // Sale date still updated even if debt sync is unavailable
+    // Sale still updated even if debt sync is unavailable
   }
 
-  return { ...sale, created_at: createdAt, synced_at: syncedAt }
+  return {
+    ...sale,
+    ...salePatch,
+    created_at: createdAt,
+  }
 }
 
 async function processSale(request: Record<string, unknown>) {
@@ -598,7 +676,7 @@ async function getSaleItemsForSale(saleId: number) {
   for (const table of tables) {
     const { data, error } = await supabase
       .from(table)
-      .select('product_id, quantity, total_price, unit_price, sale_id')
+      .select('id, product_id, quantity, total_price, unit_price, sale_id')
       .eq('sale_id', saleId)
     if (!error && data) return data as any[]
   }
@@ -647,11 +725,19 @@ async function getSaleReceipt(saleId: number, businessId?: number | null) {
   ]
   const productMap = new Map<number, any>()
   if (productIds.length) {
-    const { data: products } = await supabase
+    const { data: products, error: productsError } = await supabase
       .from('products_backup')
-      .select('id, name, packaging')
+      .select('id, name, packaging, price, staff_price')
       .in('id', productIds)
-    for (const p of products || []) productMap.set(Number(p.id), p)
+    if (productsError && /staff_price/i.test(productsError.message)) {
+      const retry = await supabase
+        .from('products_backup')
+        .select('id, name, packaging, price')
+        .in('id', productIds)
+      for (const p of retry.data || []) productMap.set(Number(p.id), p)
+    } else {
+      for (const p of products || []) productMap.set(Number(p.id), p)
+    }
   }
 
   const items = rawItems.map((item) => {
@@ -662,12 +748,16 @@ async function getSaleReceipt(saleId: number, businessId?: number | null) {
       Number(item.total_price || 0) || qty * unitPrice
     const name = product?.name || `Product #${item.product_id}`
     const packaging = product?.packaging ? ` (${product.packaging})` : ''
+    const normalPrice = Number(product?.price || 0)
+    const staffPrice = Number(product?.staff_price || 0) || normalPrice
     return {
       product_id: Number(item.product_id),
       name: `${name}${packaging}`,
       quantity: qty,
       unit_price: unitPrice,
       total_price: total,
+      normal_price: normalPrice,
+      staff_price: staffPrice,
     }
   })
 
@@ -1722,6 +1812,9 @@ async function createProduct(request: Record<string, unknown>) {
     category,
     packaging: request.packaging ? String(request.packaging) : null,
     price: Number(request.price || 0),
+    staff_price: Number(
+      request.staff_price ?? request.staffPrice ?? request.price ?? 0
+    ),
     cost_price: Number(request.cost_price ?? request.costPrice ?? 0),
     stock_quantity: Number(request.stock_quantity ?? request.stockQuantity ?? 0),
     min_stock_level: Number(request.min_stock_level ?? request.minStockLevel ?? 0),
@@ -1758,11 +1851,12 @@ async function createProduct(request: Record<string, unknown>) {
 
   if (error) {
     // Columns may not exist yet — retry without newer fields
-    if (/sports_stock|duration_/i.test(error.message)) {
+    if (/sports_stock|duration_|staff_price/i.test(error.message)) {
       const {
         sports_stock: _s,
         duration_value: _d,
         duration_unit: _u,
+        staff_price: _sp,
         ...fallback
       } = payload as any
       const retry = await supabase.from('products_backup').insert(fallback).select('id').single()
@@ -1789,6 +1883,9 @@ async function updateProduct(request: Record<string, unknown>) {
     category,
     packaging: request.packaging ? String(request.packaging) : null,
     price: Number(request.price || 0),
+    staff_price: Number(
+      request.staff_price ?? request.staffPrice ?? request.price ?? 0
+    ),
     cost_price: Number(request.cost_price ?? request.costPrice ?? 0),
     min_stock_level: Number(request.min_stock_level ?? request.minStockLevel ?? 0),
     fridge_stock: Number(request.fridge_stock ?? request.fridgeStock ?? 0),
@@ -1819,11 +1916,12 @@ async function updateProduct(request: Record<string, unknown>) {
     .eq('business_id', businessId)
 
   if (error) {
-    if (/sports_stock|duration_/i.test(error.message)) {
+    if (/sports_stock|duration_|staff_price/i.test(error.message)) {
       const {
         sports_stock: _s,
         duration_value: _d,
         duration_unit: _u,
+        staff_price: _sp,
         ...fallback
       } = payload
       const retry = await supabase
@@ -2234,16 +2332,27 @@ export async function invoke<T = unknown>(
         const businessId = argNumber(args, 'businessId', 'business_id')
         return (await getSaleReceipt(saleId, businessId)) as T
       }
-      case 'update_sale_date': {
+      case 'update_sale_date':
+      case 'update_sale_details': {
         const saleId = argNumber(args, 'saleId', 'sale_id')
         const businessId = argNumber(args, 'businessId', 'business_id')
         const saleDate = String(
           (args as any)?.saleDate ?? (args as any)?.sale_date ?? ''
         ).trim()
+        const items = Array.isArray((args as any)?.items)
+          ? ((args as any).items as any[])
+          : null
         if (!saleId) throw new Error('saleId is required')
         if (!businessId) throw new Error('businessId is required')
-        if (!saleDate) throw new Error('saleDate is required')
-        return (await updateSaleDate({ saleId, businessId, saleDate })) as T
+        if (!saleDate && !items?.length) {
+          throw new Error('saleDate or items is required')
+        }
+        return (await updateSaleDetails({
+          saleId,
+          businessId,
+          saleDate: saleDate || null,
+          items,
+        })) as T
       }
       case 'get_debt_sales': {
         const businessId = argNumber(args, 'businessId', 'business_id')

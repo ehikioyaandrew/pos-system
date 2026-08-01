@@ -12,6 +12,7 @@ import {
 } from './swimmingTimer'
 
 export type SaleLocation = 'fridge' | 'show' | 'sports'
+export type PriceMode = 'normal' | 'staff'
 
 const DRINK_PACKAGING_DEFAULTS = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
 const SPORTS_AMENITY_DEFAULTS = [
@@ -85,6 +86,7 @@ export function StaffPOSInterface({
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [saleLocation, setSaleLocation] = useState<SaleLocation>('fridge')
+  const [priceMode, setPriceMode] = useState<PriceMode>('normal')
   const [packagingFilter, setPackagingFilter] = useState('ALL')
   const [swimTimers, setSwimTimers] = useState<SwimmingTimer[]>([])
   const [nowTick, setNowTick] = useState(Date.now())
@@ -231,6 +233,20 @@ export function StaffPOSInterface({
     notifyLowStock(products, loc)
   }
 
+  const productNormalPrice = (product: any) => {
+    const n = Number(product?.price)
+    return Number.isFinite(n) && n > 0 ? n : 0
+  }
+
+  const productStaffPrice = (product: any) => {
+    const staff = Number(product?.staff_price)
+    if (Number.isFinite(staff) && staff > 0) return staff
+    return productNormalPrice(product)
+  }
+
+  const productPriceForMode = (product: any, mode: PriceMode = priceMode) =>
+    mode === 'staff' ? productStaffPrice(product) : productNormalPrice(product)
+
   const addToCart = (product: any) => {
     const location = saleLocation
     const stock = stockOf(product, location)
@@ -238,8 +254,18 @@ export function StaffPOSInterface({
       toast.error(`${product.name} is out of stock in ${locationLabel(location)}`)
       return
     }
+    const sellPrice = productPriceForMode(product, priceMode)
+    if (!(sellPrice > 0)) {
+      toast.error(
+        `${product.name} has no ${priceMode === 'staff' ? 'staff' : 'normal'} price. Edit the product.`
+      )
+      return
+    }
     const existing = cart.find(
-      (i) => i.product.id === product.id && (i.location || 'fridge') === location
+      (i) =>
+        i.product.id === product.id &&
+        (i.location || 'fridge') === location &&
+        (i.priceMode || 'normal') === priceMode
     )
     if (existing) {
       if (existing.quantity + 1 > stock) {
@@ -248,7 +274,9 @@ export function StaffPOSInterface({
       }
       setCart(
         cart.map((i) =>
-          i.product.id === product.id && (i.location || 'fridge') === location
+          i.product.id === product.id &&
+          (i.location || 'fridge') === location &&
+          (i.priceMode || 'normal') === priceMode
             ? { ...i, quantity: i.quantity + 1 }
             : i
         )
@@ -259,28 +287,62 @@ export function StaffPOSInterface({
         {
           product,
           quantity: 1,
-          unitPrice: Number(product.price || 0),
+          unitPrice: sellPrice,
           location,
+          priceMode,
         },
       ])
     }
   }
 
+  const setCartLinePriceMode = (
+    productId: number,
+    location: SaleLocation,
+    mode: PriceMode,
+    currentMode: PriceMode
+  ) => {
+    setCart(
+      cart.map((i) => {
+        if (
+          i.product.id !== productId ||
+          (i.location || 'fridge') !== location ||
+          (i.priceMode || 'normal') !== currentMode
+        ) {
+          return i
+        }
+        return {
+          ...i,
+          priceMode: mode,
+          unitPrice: productPriceForMode(i.product, mode),
+        }
+      })
+    )
+  }
+
   const updateQuantity = (
     productId: number,
     quantity: number,
-    location: SaleLocation
+    location: SaleLocation,
+    mode: PriceMode = 'normal'
   ) => {
     if (quantity <= 0) {
       setCart(
         cart.filter(
-          (i) => !(i.product.id === productId && (i.location || 'fridge') === location)
+          (i) =>
+            !(
+              i.product.id === productId &&
+              (i.location || 'fridge') === location &&
+              (i.priceMode || 'normal') === mode
+            )
         )
       )
       return
     }
     const line = cart.find(
-      (i) => i.product.id === productId && (i.location || 'fridge') === location
+      (i) =>
+        i.product.id === productId &&
+        (i.location || 'fridge') === location &&
+        (i.priceMode || 'normal') === mode
     )
     if (line) {
       const available = stockOf(line.product, location)
@@ -291,7 +353,9 @@ export function StaffPOSInterface({
     }
     setCart(
       cart.map((i) =>
-        i.product.id === productId && (i.location || 'fridge') === location
+        i.product.id === productId &&
+        (i.location || 'fridge') === location &&
+        (i.priceMode || 'normal') === mode
           ? { ...i, quantity }
           : i
       )
@@ -513,25 +577,46 @@ export function StaffPOSInterface({
                 : ' · only in-stock items shown'}
             </p>
           </div>
-          <div className="inline-flex rounded-lg border border-[#d4dcd8] bg-white p-1">
-            {([
-              { id: 'fridge', label: 'Fridge' },
-              { id: 'show', label: 'Show' },
-              { id: 'sports', label: 'Sports' },
-            ] as const).map((loc) => (
-              <button
-                key={loc.id}
-                type="button"
-                onClick={() => switchLocation(loc.id)}
-                className={`px-4 py-2 rounded-md text-sm font-semibold ${
-                  saleLocation === loc.id
-                    ? 'bg-[#121c19] text-white'
-                    : 'text-[#2a3d36]/70 hover:text-[#121c19]'
-                }`}
-              >
-                {loc.label}
-              </button>
-            ))}
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="inline-flex rounded-lg border border-[#d4dcd8] bg-white p-1">
+              {([
+                { id: 'normal' as const, label: 'Normal price' },
+                { id: 'staff' as const, label: 'Staff price' },
+              ]).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setPriceMode(opt.id)}
+                  className={`px-4 py-2 rounded-md text-sm font-semibold ${
+                    priceMode === opt.id
+                      ? 'bg-[#c4783a] text-white'
+                      : 'text-[#2a3d36]/70 hover:text-[#121c19]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div className="inline-flex rounded-lg border border-[#d4dcd8] bg-white p-1">
+              {([
+                { id: 'fridge', label: 'Fridge' },
+                { id: 'show', label: 'Show' },
+                { id: 'sports', label: 'Sports' },
+              ] as const).map((loc) => (
+                <button
+                  key={loc.id}
+                  type="button"
+                  onClick={() => switchLocation(loc.id)}
+                  className={`px-4 py-2 rounded-md text-sm font-semibold ${
+                    saleLocation === loc.id
+                      ? 'bg-[#121c19] text-white'
+                      : 'text-[#2a3d36]/70 hover:text-[#121c19]'
+                  }`}
+                >
+                  {loc.label}
+                </button>
+              ))}
+            </div>
           </div>
         </header>
 
@@ -595,9 +680,21 @@ export function StaffPOSInterface({
                         {durationLabel(product) ? ` · ${durationLabel(product)}` : ''}
                       </p>
                       <div className="mt-3 flex items-end justify-between gap-2">
-                        <p className="font-display text-lg font-bold text-[#121c19]">
-                          {money(product.price)}
-                        </p>
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/40">
+                            {priceMode === 'staff' ? 'Staff price' : 'Normal price'}
+                          </p>
+                          <p className="font-display text-lg font-bold text-[#121c19]">
+                            {money(productPriceForMode(product))}
+                          </p>
+                          {productNormalPrice(product) !== productStaffPrice(product) && (
+                            <p className="text-[10px] text-[#2a3d36]/45 mt-0.5">
+                              {priceMode === 'staff'
+                                ? `Normal ${money(productNormalPrice(product))}`
+                                : `Staff ${money(productStaffPrice(product))}`}
+                            </p>
+                          )}
+                        </div>
                         <span
                           className={`text-xs font-semibold px-2 py-1 rounded-md border ${
                             saleLocation === 'sports'
@@ -639,9 +736,10 @@ export function StaffPOSInterface({
                 <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
                   {cart.map((item) => {
                     const loc = (item.location || 'fridge') as SaleLocation
+                    const mode = (item.priceMode || 'normal') as PriceMode
                     return (
                       <div
-                        key={`${item.product.id}-${loc}`}
+                        key={`${item.product.id}-${loc}-${mode}`}
                         className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3"
                       >
                         <div className="flex justify-between gap-2">
@@ -650,7 +748,7 @@ export function StaffPOSInterface({
                           </p>
                           <button
                             type="button"
-                            onClick={() => updateQuantity(item.product.id, 0, loc)}
+                            onClick={() => updateQuantity(item.product.id, 0, loc, mode)}
                             className="text-[#2a3d36]/40 hover:text-rose-600 text-lg leading-none"
                           >
                             ×
@@ -658,20 +756,51 @@ export function StaffPOSInterface({
                         </div>
                         <p className="text-xs text-[#2a3d36]/50 mt-0.5">
                           {isShishaProduct(item.product)
-                            ? `${money(item.unitPrice)} / coal · ${locationLabel(loc)}`
-                            : `${money(item.unitPrice)} each · ${locationLabel(loc)}${
+                            ? `${locationLabel(loc)} · per coal`
+                            : `${locationLabel(loc)}${
                                 durationLabel(item.product)
                                   ? ` · ${durationLabel(item.product)}`
                                   : ''
                               }`}
                         </p>
+                        <div className="mt-2 inline-flex rounded-md border border-[#d4dcd8] bg-white p-0.5 w-full">
+                          {([
+                            { id: 'normal' as const, label: 'Normal' },
+                            { id: 'staff' as const, label: 'Staff' },
+                          ]).map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() =>
+                                setCartLinePriceMode(item.product.id, loc, opt.id, mode)
+                              }
+                              className={`flex-1 px-2 py-1.5 rounded text-xs font-semibold ${
+                                mode === opt.id
+                                  ? 'bg-[#121c19] text-white'
+                                  : 'text-[#2a3d36]/70'
+                              }`}
+                            >
+                              {opt.label}{' '}
+                              {money(
+                                opt.id === 'staff'
+                                  ? productStaffPrice(item.product)
+                                  : productNormalPrice(item.product)
+                              )}
+                            </button>
+                          ))}
+                        </div>
                         <div className="mt-2 flex items-center justify-between">
                           <div className="inline-flex items-center rounded-md border border-[#d4dcd8] bg-white">
                             <button
                               type="button"
                               className="px-3 py-1 font-bold"
                               onClick={() =>
-                                updateQuantity(item.product.id, item.quantity - 1, loc)
+                                updateQuantity(
+                                  item.product.id,
+                                  item.quantity - 1,
+                                  loc,
+                                  mode
+                                )
                               }
                             >
                               −
@@ -683,7 +812,12 @@ export function StaffPOSInterface({
                               type="button"
                               className="px-3 py-1 font-bold"
                               onClick={() =>
-                                updateQuantity(item.product.id, item.quantity + 1, loc)
+                                updateQuantity(
+                                  item.product.id,
+                                  item.quantity + 1,
+                                  loc,
+                                  mode
+                                )
                               }
                             >
                               +
@@ -1252,6 +1386,8 @@ export function SalesLogDashboard({
   const [viewReceipt, setViewReceipt] = useState<any | null>(null)
   const [editSale, setEditSale] = useState<any | null>(null)
   const [editDate, setEditDate] = useState('')
+  const [editItems, setEditItems] = useState<any[]>([])
+  const [loadingEdit, setLoadingEdit] = useState(false)
   const [savingDate, setSavingDate] = useState(false)
   const businessId = currentUser?.business_id || businessInfo?.id
   const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(
@@ -1279,10 +1415,47 @@ export function SalesLogDashboard({
     }
   }
 
-  const openEditDate = (sale: any) => {
+  const openEditDate = async (sale: any) => {
     setEditSale(sale)
     setEditDate(toDateInputValue(sale?.created_at))
+    setEditItems([])
+    try {
+      setLoadingEdit(true)
+      const receipt = (await invoke('get_sale_receipt', {
+        saleId: sale.id,
+        businessId,
+      })) as any
+      setEditItems(
+        (Array.isArray(receipt?.items) ? receipt.items : []).map((item: any) => {
+          const normal = Number(item.normal_price || 0)
+          const staff = Number(item.staff_price || 0) || normal
+          const unit = Number(item.unit_price || 0)
+          const priceMode: PriceMode =
+            staff > 0 && Math.abs(unit - staff) < 0.001 && Math.abs(unit - normal) > 0.001
+              ? 'staff'
+              : 'normal'
+          return {
+            product_id: Number(item.product_id),
+            name: item.name || `Product #${item.product_id}`,
+            quantity: Number(item.quantity || 0),
+            unit_price: unit,
+            normal_price: normal,
+            staff_price: staff,
+            priceMode,
+          }
+        })
+      )
+    } catch (error) {
+      toast.error(`Failed to load sale items: ${error}`)
+    } finally {
+      setLoadingEdit(false)
+    }
   }
+
+  const editItemsTotal = editItems.reduce(
+    (sum, item) => sum + Number(item.unit_price || 0) * Number(item.quantity || 0),
+    0
+  )
 
   const handleSaveSaleDate = async () => {
     if (!editSale?.id || !editDate) return
@@ -1291,18 +1464,30 @@ export function SalesLogDashboard({
       toast.error('Sale date cannot be in the future')
       return
     }
+    for (const item of editItems) {
+      if (!(Number(item.unit_price) >= 0)) {
+        toast.error(`Enter a valid staff price for ${item.name}`)
+        return
+      }
+    }
     try {
       setSavingDate(true)
-      await invoke('update_sale_date', {
+      await invoke('update_sale_details', {
         saleId: editSale.id,
         businessId,
         saleDate: editDate,
+        items: editItems.map((item) => ({
+          product_id: item.product_id,
+          unit_price: Number(item.unit_price),
+          quantity: Number(item.quantity),
+        })),
       })
-      toast.success('Sale date updated')
+      toast.success('Sale date and prices updated')
       setEditSale(null)
+      setEditItems([])
       await load()
     } catch (error) {
-      toast.error(`Failed to update date: ${error}`)
+      toast.error(`Failed to update sale: ${error}`)
     } finally {
       setSavingDate(false)
     }
@@ -1672,13 +1857,12 @@ export function SalesLogDashboard({
             className="absolute inset-0 bg-[#121c19]/55"
             onClick={() => !savingDate && setEditSale(null)}
           />
-          <div className="relative w-full sm:max-w-md bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
+          <div className="relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
             <h2 className="font-display text-xl font-bold text-[#121c19]">
-              Edit sale date
+              Edit sale
             </h2>
             <p className="text-sm text-[#2a3d36]/70">
-              Sale #{editSale.id} · {saleCustomerName(editSale)} ·{' '}
-              {money(editSale.total_amount)}
+              Sale #{editSale.id} · {saleCustomerName(editSale)}
             </p>
             <div>
               <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
@@ -1695,22 +1879,106 @@ export function SalesLogDashboard({
                 Current: {formatWhen(editSale.created_at)}. Future dates are not allowed.
               </p>
             </div>
+
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+                Price type per item
+              </p>
+              {loadingEdit ? (
+                <p className="text-sm text-[#2a3d36]/50 py-4 text-center">Loading items…</p>
+              ) : editItems.length === 0 ? (
+                <p className="text-sm text-[#2a3d36]/50 py-4 text-center">
+                  No line items found for this sale
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {editItems.map((item, idx) => (
+                    <div
+                      key={`${item.product_id}-${idx}`}
+                      className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3"
+                    >
+                      <div className="flex justify-between gap-2">
+                        <p className="font-semibold text-[#121c19] text-sm">{item.name}</p>
+                        <p className="text-xs text-[#2a3d36]/50">Qty {item.quantity}</p>
+                      </div>
+                      <div className="mt-2 inline-flex rounded-md border border-[#d4dcd8] bg-white p-0.5 w-full">
+                        {([
+                          {
+                            id: 'normal' as const,
+                            label: 'Normal',
+                            amount: Number(item.normal_price || 0),
+                          },
+                          {
+                            id: 'staff' as const,
+                            label: 'Staff',
+                            amount: Number(item.staff_price || item.normal_price || 0),
+                          },
+                        ]).map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            disabled={!(opt.amount > 0)}
+                            onClick={() =>
+                              setEditItems((prev) =>
+                                prev.map((row, i) =>
+                                  i === idx
+                                    ? {
+                                        ...row,
+                                        priceMode: opt.id,
+                                        unit_price: opt.amount,
+                                      }
+                                    : row
+                                )
+                              )
+                            }
+                            className={`flex-1 px-2 py-2 rounded text-xs font-semibold disabled:opacity-40 ${
+                              item.priceMode === opt.id
+                                ? 'bg-[#121c19] text-white'
+                                : 'text-[#2a3d36]/70'
+                            }`}
+                          >
+                            {opt.label}
+                            <span className="block mt-0.5 font-bold">
+                              {opt.amount > 0 ? money(opt.amount) : '—'}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs text-[#2a3d36]/50 text-right">
+                        Line total{' '}
+                        {money(Number(item.unit_price || 0) * Number(item.quantity || 0))}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-3 flex items-center justify-between border-t border-[#e8ecea] pt-3">
+                <p className="text-sm font-semibold text-[#2a3d36]/60">New sale total</p>
+                <p className="font-display text-xl font-bold text-[#121c19]">
+                  {money(editItemsTotal)}
+                </p>
+              </div>
+            </div>
+
             <div className="flex gap-3 pt-2">
               <button
                 type="button"
                 disabled={savingDate}
-                onClick={() => setEditSale(null)}
+                onClick={() => {
+                  setEditSale(null)
+                  setEditItems([])
+                }}
                 className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                disabled={savingDate || !editDate}
+                disabled={savingDate || loadingEdit || !editDate}
                 onClick={() => void handleSaveSaleDate()}
                 className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
               >
-                {savingDate ? 'Saving…' : 'Save date'}
+                {savingDate ? 'Saving…' : 'Save changes'}
               </button>
             </div>
           </div>
