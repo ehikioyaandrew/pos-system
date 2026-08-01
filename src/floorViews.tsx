@@ -58,6 +58,17 @@ function saleCustomerName(sale: any) {
   return name || 'Walk-in customer'
 }
 
+function toDateInputValue(value?: string | null) {
+  const d = value ? new Date(value) : new Date()
+  if (Number.isNaN(d.getTime())) {
+    return new Date().toISOString().slice(0, 10)
+  }
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 export function StaffPOSInterface({
   currentUser,
   businessInfo,
@@ -1237,7 +1248,15 @@ export function SalesLogDashboard({
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [printingId, setPrintingId] = useState<number | null>(null)
+  const [viewingId, setViewingId] = useState<number | null>(null)
+  const [viewReceipt, setViewReceipt] = useState<any | null>(null)
+  const [editSale, setEditSale] = useState<any | null>(null)
+  const [editDate, setEditDate] = useState('')
+  const [savingDate, setSavingDate] = useState(false)
   const businessId = currentUser?.business_id || businessInfo?.id
+  const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(
+    String(currentUser?.role || '')
+  )
 
   useEffect(() => {
     if (businessId) void load()
@@ -1257,6 +1276,57 @@ export function SalesLogDashboard({
       setRows([])
     } finally {
       setLoading(false)
+    }
+  }
+
+  const openEditDate = (sale: any) => {
+    setEditSale(sale)
+    setEditDate(toDateInputValue(sale?.created_at))
+  }
+
+  const handleSaveSaleDate = async () => {
+    if (!editSale?.id || !editDate) return
+    const today = toDateInputValue()
+    if (editDate > today) {
+      toast.error('Sale date cannot be in the future')
+      return
+    }
+    try {
+      setSavingDate(true)
+      await invoke('update_sale_date', {
+        saleId: editSale.id,
+        businessId,
+        saleDate: editDate,
+      })
+      toast.success('Sale date updated')
+      setEditSale(null)
+      await load()
+    } catch (error) {
+      toast.error(`Failed to update date: ${error}`)
+    } finally {
+      setSavingDate(false)
+    }
+  }
+
+  const handleView = async (sale: any) => {
+    if (!sale?.id) return
+    try {
+      setViewingId(Number(sale.id))
+      const receipt = (await invoke('get_sale_receipt', {
+        saleId: sale.id,
+        businessId,
+      })) as any
+      setViewReceipt({
+        ...receipt,
+        staff_name: receipt.staff_name || sale.staff_name,
+        customer_name:
+          receipt.customer_name || sale.customer_name || 'Walk-in customer',
+      })
+    } catch (error) {
+      toast.error(`Failed to load sale: ${error}`)
+      setViewReceipt(null)
+    } finally {
+      setViewingId(null)
     }
   }
 
@@ -1366,14 +1436,33 @@ export function SalesLogDashboard({
                 <span className="text-xs font-semibold px-2 py-1 rounded-md border border-[#d4dcd8] bg-[#f4f6f5]">
                   {sale.payment_status}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => void handlePrint(sale)}
-                  disabled={printingId === Number(sale.id)}
-                  className="ml-auto text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
-                >
-                  {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
-                </button>
+                <div className="ml-auto flex flex-wrap gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void handleView(sale)}
+                    disabled={viewingId === Number(sale.id)}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                  >
+                    {viewingId === Number(sale.id) ? 'Loading…' : 'View'}
+                  </button>
+                  {canEditSaleDate && (
+                    <button
+                      type="button"
+                      onClick={() => openEditDate(sale)}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5]"
+                    >
+                      Edit
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handlePrint(sale)}
+                    disabled={printingId === Number(sale.id)}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                  >
+                    {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -1390,7 +1479,7 @@ export function SalesLogDashboard({
                 <th className="px-5 py-3 font-semibold">Status</th>
                 <th className="px-5 py-3 font-semibold text-right">Amount</th>
                 <th className="px-5 py-3 font-semibold">When</th>
-                <th className="px-5 py-3 font-semibold text-right">Print</th>
+                <th className="px-5 py-3 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#e8ecea]">
@@ -1406,14 +1495,33 @@ export function SalesLogDashboard({
                     {formatWhen(sale.created_at)}
                   </td>
                   <td className="px-5 py-4 text-right">
-                    <button
-                      type="button"
-                      onClick={() => void handlePrint(sale)}
-                      disabled={printingId === Number(sale.id)}
-                      className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
-                    >
-                      {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
-                    </button>
+                    <div className="inline-flex flex-wrap gap-2 justify-end">
+                      <button
+                        type="button"
+                        onClick={() => void handleView(sale)}
+                        disabled={viewingId === Number(sale.id)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                      >
+                        {viewingId === Number(sale.id) ? 'Loading…' : 'View'}
+                      </button>
+                      {canEditSaleDate && (
+                        <button
+                          type="button"
+                          onClick={() => openEditDate(sale)}
+                          className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5]"
+                        >
+                          Edit
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void handlePrint(sale)}
+                        disabled={printingId === Number(sale.id)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
+                      >
+                        {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -1424,6 +1532,190 @@ export function SalesLogDashboard({
           )}
         </div>
       </div>
+
+      {viewReceipt && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-[#121c19]/55"
+            onClick={() => setViewReceipt(null)}
+          />
+          <div className="relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-display text-xl font-bold text-[#121c19]">
+                  Sale #{viewReceipt.id}
+                </h2>
+                <p className="mt-1 text-sm text-[#2a3d36]/70">
+                  {formatWhen(viewReceipt.created_at)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewReceipt(null)}
+                className="text-sm font-semibold px-3 py-1.5 rounded-md border border-[#d4dcd8] hover:bg-[#f4f6f5]"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                  Customer
+                </p>
+                <p className="mt-1 font-semibold text-[#121c19]">
+                  {saleCustomerName(viewReceipt)}
+                </p>
+              </div>
+              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                  Staff
+                </p>
+                <p className="mt-1 font-semibold text-[#121c19]">
+                  {viewReceipt.staff_name || '—'}
+                </p>
+              </div>
+              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                  Method
+                </p>
+                <p className="mt-1 font-semibold text-[#121c19]">
+                  {viewReceipt.payment_method || '—'}
+                </p>
+              </div>
+              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                  Status
+                </p>
+                <p className="mt-1 font-semibold text-[#121c19]">
+                  {viewReceipt.payment_status || '—'}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
+                Items sold
+              </p>
+              <div className="rounded-xl border border-[#d4dcd8] overflow-hidden">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-[#f4f6f5] text-[11px] uppercase tracking-wide text-[#2a3d36]/50">
+                    <tr>
+                      <th className="px-3 py-2.5 text-left font-semibold">Item</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Qty</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Price</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#e8ecea]">
+                    {(Array.isArray(viewReceipt.items) ? viewReceipt.items : []).map(
+                      (item: any, idx: number) => (
+                        <tr key={`${item.product_id || idx}-${idx}`}>
+                          <td className="px-3 py-3 font-medium text-[#121c19]">
+                            {item.name || `Product #${item.product_id || '—'}`}
+                          </td>
+                          <td className="px-3 py-3 text-right text-[#2a3d36]/80">
+                            {Number(item.quantity || 0)}
+                          </td>
+                          <td className="px-3 py-3 text-right text-[#2a3d36]/80">
+                            {money(item.unit_price)}
+                          </td>
+                          <td className="px-3 py-3 text-right font-semibold text-[#121c19]">
+                            {money(item.total_price)}
+                          </td>
+                        </tr>
+                      )
+                    )}
+                  </tbody>
+                </table>
+                {(!viewReceipt.items || viewReceipt.items.length === 0) && (
+                  <p className="px-3 py-8 text-center text-[#2a3d36]/50">
+                    No line items found for this sale
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between border-t border-[#e8ecea] pt-4">
+              <p className="text-sm font-semibold text-[#2a3d36]/60">Sale total</p>
+              <p className="font-display text-2xl font-bold text-[#121c19]">
+                {money(viewReceipt.total_amount)}
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setViewReceipt(null)}
+                className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => void handlePrint(viewReceipt)}
+                disabled={printingId === Number(viewReceipt.id)}
+                className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {printingId === Number(viewReceipt.id) ? 'Printing…' : 'Print'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editSale && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-[#121c19]/55"
+            onClick={() => !savingDate && setEditSale(null)}
+          />
+          <div className="relative w-full sm:max-w-md bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
+            <h2 className="font-display text-xl font-bold text-[#121c19]">
+              Edit sale date
+            </h2>
+            <p className="text-sm text-[#2a3d36]/70">
+              Sale #{editSale.id} · {saleCustomerName(editSale)} ·{' '}
+              {money(editSale.total_amount)}
+            </p>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                Sale date
+              </label>
+              <input
+                type="date"
+                value={editDate}
+                max={toDateInputValue()}
+                onChange={(e) => setEditDate(e.target.value)}
+                className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+              />
+              <p className="mt-2 text-xs text-[#2a3d36]/50">
+                Current: {formatWhen(editSale.created_at)}. Future dates are not allowed.
+              </p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <button
+                type="button"
+                disabled={savingDate}
+                onClick={() => setEditSale(null)}
+                className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={savingDate || !editDate}
+                onClick={() => void handleSaveSaleDate()}
+                className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {savingDate ? 'Saving…' : 'Save date'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

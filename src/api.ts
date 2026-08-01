@@ -326,9 +326,11 @@ async function markSaleAsCompleted(saleId: number) {
   return true
 }
 
-/** Build created_at from YYYY-MM-DD (local calendar day) or now. */
-function resolveSaleCreatedAt(saleDate?: string | null) {
-  const now = new Date()
+/** Build created_at from YYYY-MM-DD (local calendar day) or now.
+ * When baseIso is provided (e.g. editing a sale), keep that time-of-day. */
+function resolveSaleCreatedAt(saleDate?: string | null, baseIso?: string | null) {
+  const base = baseIso ? new Date(baseIso) : new Date()
+  const clock = Number.isNaN(base.getTime()) ? new Date() : base
   const raw = String(saleDate || '').trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     const [y, m, d] = raw.split('-').map(Number)
@@ -336,19 +338,84 @@ function resolveSaleCreatedAt(saleDate?: string | null) {
       y,
       m - 1,
       d,
-      now.getHours(),
-      now.getMinutes(),
-      now.getSeconds(),
-      now.getMilliseconds()
+      clock.getHours(),
+      clock.getMinutes(),
+      clock.getSeconds(),
+      clock.getMilliseconds()
     )
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const today = new Date()
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
     const pickedStart = new Date(y, m - 1, d)
     if (pickedStart.getTime() > todayStart.getTime()) {
       throw new Error('Sale date cannot be in the future')
     }
     return picked.toISOString()
   }
-  return now.toISOString()
+  return clock.toISOString()
+}
+
+async function updateSaleDate(opts: {
+  saleId: number
+  businessId: number
+  saleDate: string
+}) {
+  const saleId = Number(opts.saleId)
+  const businessId = Number(opts.businessId)
+  if (!saleId) throw new Error('saleId is required')
+  if (!businessId) throw new Error('businessId is required')
+
+  const { data: sale, error: saleError } = await supabase
+    .from('sales_backup')
+    .select('*')
+    .eq('id', saleId)
+    .maybeSingle()
+  if (saleError) throw new Error(saleError.message)
+  if (!sale) throw new Error('Sale not found')
+
+  const { data: staff, error: staffError } = await supabase
+    .from('users_backup')
+    .select('id, business_id')
+    .eq('id', sale.user_id)
+    .maybeSingle()
+  if (staffError) throw new Error(staffError.message)
+  if (!staff || Number(staff.business_id) !== businessId) {
+    throw new Error('Sale does not belong to this business')
+  }
+
+  const createdAt = resolveSaleCreatedAt(opts.saleDate, sale.created_at)
+  const syncedAt = new Date().toISOString()
+  const { error: updateError } = await supabase
+    .from('sales_backup')
+    .update({ created_at: createdAt, synced_at: syncedAt })
+    .eq('id', saleId)
+  if (updateError) throw new Error(updateError.message)
+
+  // Keep linked debt charge dates in sync when present
+  try {
+    const useRemote = await debtsTableAvailable()
+    if (useRemote) {
+      await supabase
+        .from('debt_entries_backup')
+        .update({ entry_date: createdAt, synced_at: syncedAt })
+        .eq('sale_id', saleId)
+        .eq('business_id', businessId)
+    } else {
+      const entries = readLocalDebtEntries(businessId)
+      let changed = false
+      for (const e of entries) {
+        if (Number(e.sale_id) === saleId) {
+          e.entry_date = createdAt
+          e.synced_at = syncedAt
+          changed = true
+        }
+      }
+      if (changed) writeLocalDebtEntries(businessId, entries)
+    }
+  } catch {
+    // Sale date still updated even if debt sync is unavailable
+  }
+
+  return { ...sale, created_at: createdAt, synced_at: syncedAt }
 }
 
 async function processSale(request: Record<string, unknown>) {
@@ -2166,6 +2233,17 @@ export async function invoke<T = unknown>(
         if (!saleId) throw new Error('saleId is required')
         const businessId = argNumber(args, 'businessId', 'business_id')
         return (await getSaleReceipt(saleId, businessId)) as T
+      }
+      case 'update_sale_date': {
+        const saleId = argNumber(args, 'saleId', 'sale_id')
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        const saleDate = String(
+          (args as any)?.saleDate ?? (args as any)?.sale_date ?? ''
+        ).trim()
+        if (!saleId) throw new Error('saleId is required')
+        if (!businessId) throw new Error('businessId is required')
+        if (!saleDate) throw new Error('saleDate is required')
+        return (await updateSaleDate({ saleId, businessId, saleDate })) as T
       }
       case 'get_debt_sales': {
         const businessId = argNumber(args, 'businessId', 'business_id')
