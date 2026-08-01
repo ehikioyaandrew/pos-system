@@ -3,6 +3,41 @@ import toast from 'react-hot-toast'
 import { invoke } from './api'
 import { Table } from './components/Table'
 import { printReceipt } from './receiptPrint'
+import {
+  dismissSwimmingTimer,
+  formatRemaining,
+  startSwimmingTimer,
+  subscribeSwimmingTimers,
+  type SwimmingTimer,
+} from './swimmingTimer'
+
+export type SaleLocation = 'fridge' | 'show' | 'sports'
+
+const DRINK_PACKAGING_DEFAULTS = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
+const SPORTS_AMENITY_DEFAULTS = [
+  'Table Tennis',
+  'Pool',
+  'Snooker',
+  'Swimming',
+  'Shisha',
+]
+
+function locationLabel(loc: SaleLocation) {
+  if (loc === 'sports') return 'Sports'
+  return loc
+}
+
+function isSwimmingProduct(product: any) {
+  const pack = String(product?.packaging || '').toLowerCase()
+  const name = String(product?.name || '').toLowerCase()
+  return pack.includes('swimming') || name.includes('swimming')
+}
+
+function isShishaProduct(product: any) {
+  const pack = String(product?.packaging || '').toLowerCase()
+  const name = String(product?.name || '').toLowerCase()
+  return pack.includes('shisha') || name.includes('shisha')
+}
 
 function money(n: number) {
   return `₦${Number(n || 0).toLocaleString(undefined, {
@@ -32,19 +67,42 @@ export function StaffPOSInterface({
 }) {
   const [products, setProducts] = useState<any[]>([])
   const [packagingTypes, setPackagingTypes] = useState<string[]>([])
+  const [amenityTypes, setAmenityTypes] = useState<string[]>([])
   const [cart, setCart] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [processingPayment, setProcessingPayment] = useState(false)
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [saleLocation, setSaleLocation] = useState<'fridge' | 'show'>('fridge')
+  const [saleLocation, setSaleLocation] = useState<SaleLocation>('fridge')
   const [packagingFilter, setPackagingFilter] = useState('ALL')
+  const [swimTimers, setSwimTimers] = useState<SwimmingTimer[]>([])
+  const [nowTick, setNowTick] = useState(Date.now())
   const businessId = currentUser?.business_id || businessInfo?.id
 
   useEffect(() => {
     if (businessId) void loadProducts()
     else setLoading(false)
   }, [businessId])
+
+  useEffect(() => subscribeSwimmingTimers(setSwimTimers), [])
+
+  useEffect(() => {
+    const onTimeUp = (event: Event) => {
+      const detail = (event as CustomEvent).detail || {}
+      toast.error(
+        `Swimming time up${detail.customerName ? ` · ${detail.customerName}` : ''}`,
+        { duration: 12000, id: `swim-up-${detail.id}` }
+      )
+    }
+    window.addEventListener('pos-swimming-time-up', onTimeUp)
+    return () => window.removeEventListener('pos-swimming-time-up', onTimeUp)
+  }, [])
+
+  useEffect(() => {
+    if (!swimTimers.length) return
+    const id = setInterval(() => setNowTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [swimTimers.length])
 
   const loadProducts = async () => {
     try {
@@ -54,15 +112,55 @@ export function StaffPOSInterface({
         invoke('get_product_categories', { businessId }) as Promise<any[]>,
       ])
       setProducts(Array.isArray(rows) ? rows : [])
-      const fromTable = (Array.isArray(categories) ? categories : [])
-        .map((c) => String(c.name || '').trim())
-        .filter(Boolean)
-      const fromProducts = (Array.isArray(rows) ? rows : [])
+      const cats = Array.isArray(categories) ? categories : []
+
+      // Seed amenity types in the background (idempotent)
+      const existing = new Set(cats.map((c) => String(c.name || '').toLowerCase()))
+      for (const name of SPORTS_AMENITY_DEFAULTS) {
+        if (!existing.has(name.toLowerCase())) {
+          try {
+            await invoke('create_product_category', {
+              request: { business_id: businessId, name, kind: 'amenity' },
+            })
+            existing.add(name.toLowerCase())
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      const refreshed =
+        existing.size > cats.length
+          ? ((await invoke('get_product_categories', { businessId })) as any[])
+          : cats
+
+      const amenitySet = new Set(SPORTS_AMENITY_DEFAULTS.map((n) => n.toLowerCase()))
+      const names = (Array.isArray(refreshed) ? refreshed : [])
+        .map((c) => ({
+          name: String(c.name || '').trim(),
+          kind: String(c.kind || '').toLowerCase(),
+        }))
+        .filter((c) => c.name)
+
+      const amenities = names
+        .filter((c) => c.kind === 'amenity' || amenitySet.has(c.name.toLowerCase()))
+        .map((c) => c.name)
+      const packaging = names
+        .filter((c) => c.kind !== 'amenity' && !amenitySet.has(c.name.toLowerCase()))
+        .map((c) => c.name)
+
+      const fromSportsProducts = (Array.isArray(rows) ? rows : [])
+        .filter((p) => String(p.category || '').toUpperCase() === 'SPORTS')
         .map((p) => String(p.packaging || '').trim())
         .filter(Boolean)
-      const defaults = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
+
+      setAmenityTypes(
+        Array.from(new Set([...amenities, ...fromSportsProducts, ...SPORTS_AMENITY_DEFAULTS])).sort(
+          (a, b) => a.localeCompare(b)
+        )
+      )
       setPackagingTypes(
-        Array.from(new Set([...fromTable, ...fromProducts, ...defaults])).sort((a, b) =>
+        Array.from(new Set([...packaging, ...DRINK_PACKAGING_DEFAULTS])).sort((a, b) =>
           a.localeCompare(b)
         )
       )
@@ -74,14 +172,30 @@ export function StaffPOSInterface({
     }
   }
 
-  const stockOf = (product: any, location: 'fridge' | 'show' = saleLocation) =>
-    location === 'fridge'
-      ? Number(product.fridge_stock || 0)
-      : Number(product.show_stock || 0)
+  const stockOf = (product: any, location: SaleLocation = saleLocation) => {
+    // Sports amenities are services (price + duration), always sellable when active
+    if (location === 'sports' || String(product.category || '').toUpperCase() === 'SPORTS') {
+      return 999
+    }
+    if (location === 'show') return Number(product.show_stock || 0)
+    return Number(product.fridge_stock || 0)
+  }
+
+  const durationLabel = (product: any) => {
+    if (isShishaProduct(product)) return 'per coal'
+    const value = Number(product.duration_value || 0)
+    const unit = String(product.duration_unit || '').toLowerCase()
+    if (!(value > 0)) return null
+    if (unit === 'hours' || unit === 'hour') {
+      return `${value} hour${value === 1 ? '' : 's'}`
+    }
+    if (unit === 'coals' || unit === 'coal') return 'per coal'
+    return `${value} day${value === 1 ? '' : 's'}`
+  }
 
   const lowThreshold = (product: any) => Math.max(1, Number(product.min_stock_level || 5))
 
-  const notifyLowStock = (list: any[], location: 'fridge' | 'show') => {
+  const notifyLowStock = (list: any[], location: SaleLocation) => {
     const low = list.filter((p) => {
       const stock = stockOf(p, location)
       return stock > 0 && stock <= lowThreshold(p)
@@ -92,82 +206,100 @@ export function StaffPOSInterface({
       .map((p) => p.name)
       .join(', ')
     const extra = low.length > 4 ? ` +${low.length - 4} more` : ''
-    toast.error(
-      `Low ${location} stock: ${names}${extra}`,
-      { duration: 6000, id: `low-stock-${location}` }
-    )
+    toast.error(`Low ${locationLabel(location)} stock: ${names}${extra}`, {
+      duration: 6000,
+      id: `low-stock-${location}`,
+    })
   }
 
-  const switchLocation = (loc: 'fridge' | 'show') => {
+  const switchLocation = (loc: SaleLocation) => {
     if (loc === saleLocation) return
     setSaleLocation(loc)
-    // Drop cart lines that can't be fulfilled from the new location
-    setCart((prev) => {
-      const next = prev
-        .map((item) => {
-          const available = stockOf(item.product, loc)
-          if (available <= 0) return null
-          return {
-            ...item,
-            quantity: Math.min(item.quantity, available),
-          }
-        })
-        .filter(Boolean) as any[]
-      if (next.length < prev.length) {
-        toast(`Cart updated for ${loc} stock`, { id: 'cart-location-switch' })
-      }
-      return next
-    })
+    setPackagingFilter('ALL')
+    // Keep cart — staff can mix Fridge, Show, and Sports in one charge
     notifyLowStock(products, loc)
   }
 
   const addToCart = (product: any) => {
-    const stock = stockOf(product)
+    const location = saleLocation
+    const stock = stockOf(product, location)
     if (stock <= 0) {
-      toast.error(`${product.name} is out of stock in ${saleLocation}`)
+      toast.error(`${product.name} is out of stock in ${locationLabel(location)}`)
       return
     }
-    const existing = cart.find((i) => i.product.id === product.id)
+    const existing = cart.find(
+      (i) => i.product.id === product.id && (i.location || 'fridge') === location
+    )
     if (existing) {
       if (existing.quantity + 1 > stock) {
-        toast.error(`Only ${stock} left in ${saleLocation}`)
+        toast.error(`Only ${stock} left in ${locationLabel(location)}`)
         return
       }
       setCart(
         cart.map((i) =>
-          i.product.id === product.id ? { ...i, quantity: i.quantity + 1 } : i
+          i.product.id === product.id && (i.location || 'fridge') === location
+            ? { ...i, quantity: i.quantity + 1 }
+            : i
         )
       )
     } else {
-      setCart([...cart, { product, quantity: 1, unitPrice: Number(product.price || 0) }])
+      setCart([
+        ...cart,
+        {
+          product,
+          quantity: 1,
+          unitPrice: Number(product.price || 0),
+          location,
+        },
+      ])
     }
   }
 
-  const updateQuantity = (productId: number, quantity: number) => {
+  const updateQuantity = (
+    productId: number,
+    quantity: number,
+    location: SaleLocation
+  ) => {
     if (quantity <= 0) {
-      setCart(cart.filter((i) => i.product.id !== productId))
+      setCart(
+        cart.filter(
+          (i) => !(i.product.id === productId && (i.location || 'fridge') === location)
+        )
+      )
       return
     }
-    const line = cart.find((i) => i.product.id === productId)
+    const line = cart.find(
+      (i) => i.product.id === productId && (i.location || 'fridge') === location
+    )
     if (line) {
-      const available = stockOf(line.product)
+      const available = stockOf(line.product, location)
       if (quantity > available) {
-        toast.error(`Only ${available} left in ${saleLocation}`)
+        toast.error(`Only ${available} left in ${locationLabel(location)}`)
         return
       }
     }
-    setCart(cart.map((i) => (i.product.id === productId ? { ...i, quantity } : i)))
+    setCart(
+      cart.map((i) =>
+        i.product.id === productId && (i.location || 'fridge') === location
+          ? { ...i, quantity }
+          : i
+      )
+    )
   }
 
   const getTotal = () => cart.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0)
 
-  const processPayment = async (paymentMethod: string, customerName?: string) => {
-    // Final stock check against selected fridge/show location
+  const processPayment = async (
+    paymentMethod: string,
+    customerName?: string,
+    saleDate?: string
+  ) => {
     for (const item of cart) {
-      const available = stockOf(item.product)
+      const loc = (item.location || saleLocation) as SaleLocation
+      const available = stockOf(item.product, loc)
       if (item.quantity > available) {
         toast.error(
-          `${item.product.name}: only ${available} in ${saleLocation}. Adjust cart or switch location.`
+          `${item.product.name}: only ${available} in ${locationLabel(loc)}. Adjust cart.`
         )
         return
       }
@@ -175,27 +307,81 @@ export function StaffPOSInterface({
 
     setProcessingPayment(true)
     try {
-      const result = (await invoke('process_sale', {
-        request: {
-          items: cart.map((item) => ({
-            product_id: item.product.id,
-            quantity: item.quantity,
-            unit_price: item.unitPrice,
-          })),
-          payment_method: paymentMethod,
-          staff_id: currentUser?.id,
-          business_id: businessId,
-          location: saleLocation,
-          customer_name: customerName?.trim() || null,
-        },
-      })) as any
+      // Charge per location so stock deducts from the correct source
+      const byLocation = new Map<SaleLocation, typeof cart>()
+      for (const item of cart) {
+        const loc = (item.location || 'fridge') as SaleLocation
+        const list = byLocation.get(loc) || []
+        list.push(item)
+        byLocation.set(loc, list)
+      }
 
+      const results: any[] = []
+      for (const [location, items] of byLocation) {
+        const result = (await invoke('process_sale', {
+          request: {
+            items: items.map((item) => ({
+              product_id: item.product.id,
+              quantity: item.quantity,
+              unit_price: item.unitPrice,
+            })),
+            payment_method: paymentMethod,
+            staff_id: currentUser?.id,
+            business_id: businessId,
+            location,
+            customer_name: customerName?.trim() || null,
+            sale_date: saleDate || null,
+          },
+        })) as any
+        results.push({ ...result, location })
+      }
+
+      const soldItems = [...cart]
+      const primary = results[0]
       setCart([])
       setShowPaymentModal(false)
+
+      const soldSwimItems = soldItems.filter((item) => isSwimmingProduct(item.product))
+      for (const item of soldSwimItems) {
+        const hours =
+          Number(item.product.duration_value) ||
+          (String(item.product.duration_unit || '').toLowerCase() === 'hours'
+            ? Number(item.product.duration_value)
+            : 0) ||
+          2
+        startSwimmingTimer({
+          saleId: primary?.sale_id,
+          customerName: primary?.customer_name || customerName,
+          hours: Number(item.product.duration_value) > 0 ? Number(item.product.duration_value) : hours,
+        })
+      }
+      if (soldSwimItems.length) {
+        const h = Number(soldSwimItems[0].product.duration_value) || 2
+        toast.success(`Swimming timer started · ${h} hour${h === 1 ? '' : 's'}`, {
+          duration: 5000,
+        })
+      }
+
+      const dayServices = soldItems.filter(
+        (item) =>
+          String(item.product.category || '').toUpperCase() === 'SPORTS' &&
+          !isSwimmingProduct(item.product) &&
+          !isShishaProduct(item.product)
+      )
+      if (dayServices.length) {
+        const bits = dayServices.map((i) => {
+          const d = Number(i.product.duration_value) || 1
+          return `${i.product.name} (${d} day${d === 1 ? '' : 's'})`
+        })
+        toast.success(`Sports session: ${bits.join(', ')}`, { duration: 6000 })
+      }
+
+      const totalAmount = results.reduce((s, r) => s + Number(r.total_amount || 0), 0)
+      const locs = results.map((r) => locationLabel(r.location)).join(' + ')
       toast.success(
-        `Sale #${result.sale_id} · ${money(result.total_amount)} · ${result.payment_method}${
-          result.customer_name ? ` · ${result.customer_name}` : ''
-        } · from ${saleLocation}`,
+        `${results.length > 1 ? `${results.length} sales` : `Sale #${primary?.sale_id}`} · ${money(totalAmount)} · ${paymentMethod}${
+          primary?.customer_name ? ` · ${primary.customer_name}` : ''
+        } · ${locs}`,
         { duration: 5000 }
       )
       await loadProducts()
@@ -212,14 +398,16 @@ export function StaffPOSInterface({
     }
   }, [loading, products, saleLocation])
 
-  const packagingOptions =
-    packagingTypes.length > 0
-      ? packagingTypes
-      : Array.from(
-          new Set(products.map((p) => String(p.packaging || '').trim()).filter(Boolean))
-        ).sort()
+  const typeOptions =
+    saleLocation === 'sports'
+      ? amenityTypes.length > 0
+        ? amenityTypes
+        : SPORTS_AMENITY_DEFAULTS
+      : packagingTypes.length > 0
+        ? packagingTypes
+        : DRINK_PACKAGING_DEFAULTS
 
-  // Only sellable items for the active fridge/show location
+  // Fridge/Show = BAR drinks; Sports = SPORTS amenities (services, always listed when active)
   const filtered = products.filter((p) => {
     const q = searchQuery.trim().toLowerCase()
     const matchesQ =
@@ -229,15 +417,21 @@ export function StaffPOSInterface({
     const matchesPack =
       packagingFilter === 'ALL' ||
       String(p.packaging || '').toLowerCase() === packagingFilter.toLowerCase()
-    const isBar = String(p.category || 'BAR').toUpperCase() === 'BAR'
-    const inStock = stockOf(p) > 0
-    return matchesQ && matchesPack && isBar && inStock
+    const cat = String(p.category || 'BAR').toUpperCase()
+    const matchesModule =
+      saleLocation === 'sports' ? cat === 'SPORTS' : cat === 'BAR' || cat === ''
+    const inStock = saleLocation === 'sports' ? p.is_active !== false : stockOf(p) > 0
+    return matchesQ && matchesPack && matchesModule && inStock
   })
 
-  const outHiddenCount = products.filter((p) => {
-    const isBar = String(p.category || 'BAR').toUpperCase() === 'BAR'
-    return isBar && stockOf(p) <= 0
-  }).length
+  const outHiddenCount =
+    saleLocation === 'sports'
+      ? 0
+      : products.filter((p) => {
+          const cat = String(p.category || 'BAR').toUpperCase()
+          const matchesModule = cat === 'BAR' || cat === ''
+          return matchesModule && stockOf(p) <= 0
+        }).length
 
   if (loading) {
     return (
@@ -250,6 +444,46 @@ export function StaffPOSInterface({
   return (
     <div className="min-h-full bg-[#f4f6f5]">
       <div className="px-4 sm:px-6 xl:px-8 py-5 sm:py-6 max-w-[1800px]">
+        {swimTimers.length > 0 && (
+          <div className="mb-4 space-y-2">
+            {swimTimers.map((t) => {
+              const ended = nowTick >= t.endsAt
+              return (
+                <div
+                  key={t.id}
+                  className={`rounded-xl border px-4 py-3 flex flex-wrap items-center justify-between gap-3 ${
+                    ended
+                      ? 'border-rose-300 bg-rose-50 text-rose-900'
+                      : 'border-[#d4dcd8] bg-white text-[#121c19]'
+                  }`}
+                >
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide opacity-60">
+                      Swimming session
+                    </p>
+                    <p className="font-semibold">
+                      {t.customerName}
+                      {t.saleId ? ` · Sale #${t.saleId}` : ''}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <p className="font-display text-xl font-bold tabular-nums">
+                      {ended ? 'Time up' : formatRemaining(t.endsAt, nowTick)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => dismissSwimmingTimer(t.id)}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-md border border-current/20"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
         <header className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-1">
@@ -259,25 +493,32 @@ export function StaffPOSInterface({
               Point of sale
             </h1>
             <p className="mt-1 text-sm text-[#2a3d36]/60">
-              Selling from <span className="font-semibold text-[#121c19]">{saleLocation}</span>
+              Selling from{' '}
+              <span className="font-semibold text-[#121c19]">
+                {locationLabel(saleLocation)}
+              </span>
               {outHiddenCount > 0
                 ? ` · ${outHiddenCount} out-of-stock hidden`
                 : ' · only in-stock items shown'}
             </p>
           </div>
           <div className="inline-flex rounded-lg border border-[#d4dcd8] bg-white p-1">
-            {(['fridge', 'show'] as const).map((loc) => (
+            {([
+              { id: 'fridge', label: 'Fridge' },
+              { id: 'show', label: 'Show' },
+              { id: 'sports', label: 'Sports' },
+            ] as const).map((loc) => (
               <button
-                key={loc}
+                key={loc.id}
                 type="button"
-                onClick={() => switchLocation(loc)}
-                className={`px-4 py-2 rounded-md text-sm font-semibold capitalize ${
-                  saleLocation === loc
+                onClick={() => switchLocation(loc.id)}
+                className={`px-4 py-2 rounded-md text-sm font-semibold ${
+                  saleLocation === loc.id
                     ? 'bg-[#121c19] text-white'
                     : 'text-[#2a3d36]/70 hover:text-[#121c19]'
                 }`}
               >
-                {loc}
+                {loc.label}
               </button>
             ))}
           </div>
@@ -299,8 +540,10 @@ export function StaffPOSInterface({
                 aria-label="Filter by packaging type"
                 className="px-3 py-2.5 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] text-sm font-medium min-w-[11rem]"
               >
-                <option value="ALL">All types</option>
-                {packagingOptions.map((name) => (
+                <option value="ALL">
+                  {saleLocation === 'sports' ? 'All amenities' : 'All types'}
+                </option>
+                {typeOptions.map((name) => (
                   <option key={name} value={name}>
                     {name}
                   </option>
@@ -311,10 +554,14 @@ export function StaffPOSInterface({
             {filtered.length === 0 ? (
               <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
                 <p className="font-display text-xl font-bold text-[#121c19]">
-                  No stock in {saleLocation}
+                  {saleLocation === 'sports'
+                    ? 'No Sports amenities yet'
+                    : `No stock in ${locationLabel(saleLocation)}`}
                 </p>
                 <p className="mt-1 text-sm text-[#2a3d36]/55">
-                  Switch to {saleLocation === 'fridge' ? 'show' : 'fridge'} or restock this location.
+                  {saleLocation === 'sports'
+                    ? 'Add a Sports product (price + duration) in Product Catalog.'
+                    : 'Switch to Fridge, Show, or Sports — or restock this location.'}
                 </p>
               </div>
             ) : (
@@ -334,6 +581,7 @@ export function StaffPOSInterface({
                       </p>
                       <p className="text-xs text-[#2a3d36]/45 mt-1">
                         {product.packaging || '—'}
+                        {durationLabel(product) ? ` · ${durationLabel(product)}` : ''}
                       </p>
                       <div className="mt-3 flex items-end justify-between gap-2">
                         <p className="font-display text-lg font-bold text-[#121c19]">
@@ -341,12 +589,16 @@ export function StaffPOSInterface({
                         </p>
                         <span
                           className={`text-xs font-semibold px-2 py-1 rounded-md border ${
-                            low
-                              ? 'bg-amber-50 text-amber-800 border-amber-200'
-                              : 'bg-teal-50 text-teal-800 border-teal-200'
+                            saleLocation === 'sports'
+                              ? 'bg-teal-50 text-teal-800 border-teal-200'
+                              : low
+                                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                : 'bg-teal-50 text-teal-800 border-teal-200'
                           }`}
                         >
-                          {stock} in {saleLocation}
+                          {saleLocation === 'sports'
+                            ? durationLabel(product) || 'Service'
+                            : `${stock} in ${locationLabel(saleLocation)}`}
                         </span>
                       </div>
                     </button>
@@ -368,56 +620,71 @@ export function StaffPOSInterface({
               {cart.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-[#d4dcd8] bg-[#f4f6f5] px-4 py-10 text-center">
                   <p className="font-medium text-[#121c19]">Cart is empty</p>
-                  <p className="text-sm text-[#2a3d36]/50 mt-1">Tap a product to add it</p>
+                  <p className="text-sm text-[#2a3d36]/50 mt-1">
+                    Tap products from Fridge, Show, or Sports — cart keeps all
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
-                  {cart.map((item) => (
-                    <div
-                      key={item.product.id}
-                      className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3"
-                    >
-                      <div className="flex justify-between gap-2">
-                        <p className="font-semibold text-[#121c19] text-sm">
-                          {item.product.name}
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => updateQuantity(item.product.id, 0)}
-                          className="text-[#2a3d36]/40 hover:text-rose-600 text-lg leading-none"
-                        >
-                          ×
-                        </button>
-                      </div>
-                      <p className="text-xs text-[#2a3d36]/50 mt-0.5">
-                        {money(item.unitPrice)} each
-                      </p>
-                      <div className="mt-2 flex items-center justify-between">
-                        <div className="inline-flex items-center rounded-md border border-[#d4dcd8] bg-white">
+                  {cart.map((item) => {
+                    const loc = (item.location || 'fridge') as SaleLocation
+                    return (
+                      <div
+                        key={`${item.product.id}-${loc}`}
+                        className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3"
+                      >
+                        <div className="flex justify-between gap-2">
+                          <p className="font-semibold text-[#121c19] text-sm">
+                            {item.product.name}
+                          </p>
                           <button
                             type="button"
-                            className="px-3 py-1 font-bold"
-                            onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
+                            onClick={() => updateQuantity(item.product.id, 0, loc)}
+                            className="text-[#2a3d36]/40 hover:text-rose-600 text-lg leading-none"
                           >
-                            −
-                          </button>
-                          <span className="px-2 text-sm font-semibold min-w-[1.5rem] text-center">
-                            {item.quantity}
-                          </span>
-                          <button
-                            type="button"
-                            className="px-3 py-1 font-bold"
-                            onClick={() => updateQuantity(item.product.id, item.quantity + 1)}
-                          >
-                            +
+                            ×
                           </button>
                         </div>
-                        <p className="font-semibold text-[#121c19]">
-                          {money(item.unitPrice * item.quantity)}
+                        <p className="text-xs text-[#2a3d36]/50 mt-0.5">
+                          {isShishaProduct(item.product)
+                            ? `${money(item.unitPrice)} / coal · ${locationLabel(loc)}`
+                            : `${money(item.unitPrice)} each · ${locationLabel(loc)}${
+                                durationLabel(item.product)
+                                  ? ` · ${durationLabel(item.product)}`
+                                  : ''
+                              }`}
                         </p>
+                        <div className="mt-2 flex items-center justify-between">
+                          <div className="inline-flex items-center rounded-md border border-[#d4dcd8] bg-white">
+                            <button
+                              type="button"
+                              className="px-3 py-1 font-bold"
+                              onClick={() =>
+                                updateQuantity(item.product.id, item.quantity - 1, loc)
+                              }
+                            >
+                              −
+                            </button>
+                            <span className="px-2 text-sm font-semibold min-w-[1.5rem] text-center">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              className="px-3 py-1 font-bold"
+                              onClick={() =>
+                                updateQuantity(item.product.id, item.quantity + 1, loc)
+                              }
+                            >
+                              +
+                            </button>
+                          </div>
+                          <p className="font-semibold text-[#121c19]">
+                            {money(item.unitPrice * item.quantity)}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
 
@@ -464,13 +731,15 @@ function PaymentModal({
 }: {
   total: number
   businessId?: number | string | null
-  onPayment: (method: string, customerName?: string) => void
+  onPayment: (method: string, customerName?: string, saleDate?: string) => void
   onClose: () => void
   processing: boolean
 }) {
+  const today = new Date().toISOString().slice(0, 10)
   const [paymentMethod, setPaymentMethod] = useState('CASH')
   const [customerPaid, setCustomerPaid] = useState('')
   const [customerName, setCustomerName] = useState('')
+  const [saleDate, setSaleDate] = useState(today)
   const [debtorMode, setDebtorMode] = useState<'existing' | 'new'>('existing')
   const [debtors, setDebtors] = useState<any[]>([])
   const [loadingDebtors, setLoadingDebtors] = useState(false)
@@ -519,7 +788,15 @@ function PaymentModal({
       toast.error('Select or enter a debtor name')
       return
     }
-    onPayment(paymentMethod, customerName.trim() || undefined)
+    if (!saleDate) {
+      toast.error('Select a sale date')
+      return
+    }
+    if (saleDate > today) {
+      toast.error('Sale date cannot be in the future')
+      return
+    }
+    onPayment(paymentMethod, customerName.trim() || undefined, saleDate)
   }
 
   return (
@@ -541,6 +818,22 @@ function PaymentModal({
           <div className="rounded-xl bg-[#121c19] text-white px-5 py-6 text-center">
             <p className="text-sm text-white/60">Total</p>
             <p className="font-display text-3xl font-bold mt-1">{money(total)}</p>
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+              Sale date
+            </label>
+            <input
+              type="date"
+              value={saleDate}
+              max={today}
+              onChange={(e) => setSaleDate(e.target.value)}
+              className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white"
+            />
+            <p className="mt-1.5 text-xs text-[#2a3d36]/50">
+              Use yesterday or an earlier date for backdated sales. Defaults to today.
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-2">

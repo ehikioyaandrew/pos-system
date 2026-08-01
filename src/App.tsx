@@ -3358,12 +3358,31 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
   const ensureDefaultPackaging = async () => {
     if (!businessId) return
     const existingNames = new Set(packagingTypes.map((c) => c.name.toLowerCase()))
-    const defaults = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
-    for (const name of defaults) {
+    const drinkDefaults = ['Can', 'Plastic Bottle', 'Bottle', 'Glass']
+    const amenityDefaults = [
+      'Table Tennis',
+      'Pool',
+      'Snooker',
+      'Swimming',
+      'Shisha',
+    ]
+    for (const name of drinkDefaults) {
       if (!existingNames.has(name.toLowerCase())) {
         try {
           await invoke('create_product_category', {
-            request: { business_id: businessId, name },
+            request: { business_id: businessId, name, kind: 'packaging' },
+          })
+          existingNames.add(name.toLowerCase())
+        } catch {
+          // ignore duplicates
+        }
+      }
+    }
+    for (const name of amenityDefaults) {
+      if (!existingNames.has(name.toLowerCase())) {
+        try {
+          await invoke('create_product_category', {
+            request: { business_id: businessId, name, kind: 'amenity' },
           })
           existingNames.add(name.toLowerCase())
         } catch {
@@ -3393,7 +3412,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           business_id: id,
           name: productData.name,
           description: productData.description || '',
-          category: 'BAR',
+          category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
           packaging: productData.packaging || null,
           price: productData.price || 0,
           cost_price: productData.costPrice || productData.cost_price || 0,
@@ -3402,6 +3421,9 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
           show_stock: productData.showStock || productData.show_stock || 0,
           store_stock: productData.storeStock || productData.store_stock || 0,
+          sports_stock: productData.sportsStock || productData.sports_stock || 0,
+          duration_value: productData.durationValue ?? productData.duration_value ?? null,
+          duration_unit: productData.durationUnit || productData.duration_unit || null,
           image_path: productData.image_path || productData.imagePath || null,
         },
       })
@@ -3427,7 +3449,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           business_id: id,
           name: productData.name,
           description: productData.description || '',
-          category: 'BAR',
+          category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
           packaging: productData.packaging || null,
           price: productData.price || 0,
           cost_price: productData.costPrice || productData.cost_price || 0,
@@ -3435,6 +3457,9 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
           show_stock: productData.showStock || productData.show_stock || 0,
           store_stock: productData.storeStock || productData.store_stock || 0,
+          sports_stock: productData.sportsStock || productData.sports_stock || 0,
+          duration_value: productData.durationValue ?? productData.duration_value ?? null,
+          duration_unit: productData.durationUnit || productData.duration_unit || null,
           image_path: productData.image_path || productData.imagePath || null,
         },
       })
@@ -3449,15 +3474,16 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
   const filteredProducts = React.useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     return products.filter((product) => {
-      const isBar = String(product.category || '').toUpperCase() === 'BAR'
+      const cat = String(product.category || '').toUpperCase()
+      const isSellable = cat === 'BAR' || cat === 'SPORTS'
       const matchesPackaging =
         packagingFilter === 'ALL' ||
         String(product.packaging || '').toLowerCase() === packagingFilter.toLowerCase()
-      const haystack = [product.name, product.description, product.packaging]
+      const haystack = [product.name, product.description, product.packaging, product.category]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
-      return isBar && matchesPackaging && (!q || haystack.includes(q))
+      return isSellable && matchesPackaging && (!q || haystack.includes(q))
     })
   }, [products, searchQuery, packagingFilter])
 
@@ -3504,7 +3530,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
               Product management
             </h1>
             <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
-              BAR drinks only. Set packaging as Can, Plastic Bottle, Bottle, and more.
+              BAR drinks and Sports amenities. Sell from Fridge, Show, or Sports on POS.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -3955,7 +3981,7 @@ function ProductFormModal({
   const [formData, setFormData] = useState({
     name: product?.name || '',
     description: product?.description || '',
-    category: 'BAR',
+    category: String(product?.category || 'BAR').toUpperCase() === 'SPORTS' ? 'SPORTS' : 'BAR',
     packaging: product?.packaging || packagingTypes[0] || '',
     price: product?.price != null ? String(product.price) : '',
     costPrice: product?.cost_price != null ? String(product.cost_price) : '',
@@ -3963,16 +3989,69 @@ function ProductFormModal({
     fridgeStock: product?.fridge_stock != null ? String(product.fridge_stock) : '',
     showStock: product?.show_stock != null ? String(product.show_stock) : '',
     storeStock: product?.store_stock != null ? String(product.store_stock) : '',
+    sportsStock: product?.sports_stock != null ? String(product.sports_stock) : '',
+    durationValue:
+      product?.duration_value != null
+        ? String(product.duration_value)
+        : String(product?.packaging || '').toLowerCase().includes('swimming')
+          ? '2'
+          : '1',
     imagePath: product?.image_path || '',
   })
   const [imagePreview, setImagePreview] = useState<string | null>(product?.image_path || null)
   const [saving, setSaving] = useState(false)
 
+  const amenityDefaults = [
+    'Table Tennis',
+    'Pool',
+    'Snooker',
+    'Swimming',
+    'Shisha',
+  ]
+  const amenitySet = new Set(amenityDefaults.map((n) => n.toLowerCase()))
+  const typeOptions =
+    formData.category === 'SPORTS'
+      ? Array.from(
+          new Set([
+            ...packagingTypes.filter((n) => amenitySet.has(n.toLowerCase())),
+            ...amenityDefaults,
+            ...packagingTypes.filter((n) => !amenitySet.has(n.toLowerCase())),
+          ])
+        )
+      : packagingTypes.filter((n) => !amenitySet.has(n.toLowerCase()))
+
+  const isSwimmingAmenity = String(formData.packaging || '')
+    .toLowerCase()
+    .includes('swimming')
+  const isShishaAmenity = String(formData.packaging || '')
+    .toLowerCase()
+    .includes('shisha')
+  const sportsDurationUnit = isSwimmingAmenity
+    ? 'hours'
+    : isShishaAmenity
+      ? 'coals'
+      : 'days'
+
   useEffect(() => {
-    if (!formData.packaging && packagingTypes.length > 0) {
-      setFormData((prev) => ({ ...prev, packaging: packagingTypes[0] }))
+    if (!formData.packaging && typeOptions.length > 0) {
+      setFormData((prev) => ({ ...prev, packaging: typeOptions[0] }))
     }
-  }, [packagingTypes])
+  }, [formData.category, typeOptions.join('|')])
+
+  useEffect(() => {
+    if (formData.category !== 'SPORTS') return
+    if (isShishaAmenity) {
+      setFormData((prev) => ({
+        ...prev,
+        price: prev.price && prev.price !== '0' ? prev.price : '1500',
+        durationValue: '1',
+      }))
+      return
+    }
+    if (isSwimmingAmenity && (!formData.durationValue || formData.durationValue === '1')) {
+      setFormData((prev) => ({ ...prev, durationValue: prev.durationValue || '2' }))
+    }
+  }, [formData.packaging, formData.category])
 
   const fieldClass =
     'w-full px-4 py-3 text-base bg-white border border-[#d4dcd8] rounded-md text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20 transition-colors'
@@ -3981,17 +4060,36 @@ function ProductFormModal({
     e.preventDefault()
     setSaving(true)
     try {
+      const isSports = formData.category === 'SPORTS'
+      const durationValue = isShishaAmenity ? 1 : Number(formData.durationValue)
+      if (isSports && !isShishaAmenity && !(durationValue > 0)) {
+        toast.error(
+          isSwimmingAmenity
+            ? 'Enter swimming duration in hours'
+            : 'Enter sports duration in days'
+        )
+        setSaving(false)
+        return
+      }
+      if (isSports && isShishaAmenity && !(parseFloat(formData.price) > 0)) {
+        toast.error('Enter shisha price per coal')
+        setSaving(false)
+        return
+      }
       await onSave({
         ...formData,
         id: product?.id,
-        category: 'BAR',
+        category: isSports ? 'SPORTS' : 'BAR',
         packaging: formData.packaging || null,
-        price: parseFloat(formData.price),
-        costPrice: parseFloat(formData.costPrice),
-        minStockLevel: parseInt(formData.minStockLevel) || 0,
-        fridgeStock: parseInt(formData.fridgeStock) || 0,
-        showStock: parseInt(formData.showStock) || 0,
-        storeStock: parseInt(formData.storeStock) || 0,
+        price: parseFloat(formData.price) || (isShishaAmenity ? 1500 : 0),
+        costPrice: isSports ? parseFloat(formData.costPrice) || 0 : parseFloat(formData.costPrice),
+        minStockLevel: isSports ? 0 : parseInt(formData.minStockLevel) || 0,
+        fridgeStock: isSports ? 0 : parseInt(formData.fridgeStock) || 0,
+        showStock: isSports ? 0 : parseInt(formData.showStock) || 0,
+        storeStock: isSports ? 0 : parseInt(formData.storeStock) || 0,
+        sportsStock: 0,
+        durationValue: isSports ? durationValue : null,
+        durationUnit: isSports ? sportsDurationUnit : null,
         business_id: businessId,
         image_path: formData.imagePath,
       })
@@ -4054,7 +4152,7 @@ function ProductFormModal({
               {mode === 'edit' ? 'Edit product' : 'Add product'}
             </h2>
             <p className="text-sm text-[#2a3d36]/60 mt-1">
-              Category is fixed to BAR. Choose packaging like Can, Plastic Bottle, or Bottle.
+              Choose BAR drinks (stock) or Sports amenities (price + duration).
             </p>
           </div>
           <button
@@ -4094,14 +4192,24 @@ function ProductFormModal({
                 />
               </div>
               <div>
-                <label className="block text-sm font-semibold text-[#121c19] mb-2">Category</label>
-                <div className="px-4 py-3 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] font-semibold text-[#121c19]">
-                  BAR
-                </div>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Module</label>
+                <select
+                  value={formData.category}
+                  onChange={(e) => {
+                    updateFormData('category', e.target.value)
+                    updateFormData('packaging', '')
+                  }}
+                  className={fieldClass}
+                >
+                  <option value="BAR">BAR (drinks)</option>
+                  <option value="SPORTS">Sports (amenities)</option>
+                </select>
               </div>
               <div>
                 <div className="flex items-center justify-between gap-3 mb-2">
-                  <label className="block text-sm font-semibold text-[#121c19]">Packaging</label>
+                  <label className="block text-sm font-semibold text-[#121c19]">
+                    {formData.category === 'SPORTS' ? 'Amenity type' : 'Packaging'}
+                  </label>
                   <button
                     type="button"
                     onClick={onManagePackaging}
@@ -4110,17 +4218,19 @@ function ProductFormModal({
                     Manage
                   </button>
                 </div>
-                {packagingTypes.length === 0 ? (
+                {typeOptions.length === 0 ? (
                   <div className="rounded-md border border-dashed border-[#d4dcd8] bg-[#f4f6f5] px-4 py-4">
                     <p className="text-sm text-[#2a3d36]/70 mb-3">
-                      Add Can, Plastic Bottle, or Bottle for BAR drinks.
+                      {formData.category === 'SPORTS'
+                        ? 'Add Table Tennis, Pool, Snooker, Swimming, or Shisha.'
+                        : 'Add Can, Plastic Bottle, or Bottle for BAR drinks.'}
                     </p>
                     <button
                       type="button"
                       onClick={onManagePackaging}
                       className="bg-[#121c19] text-white px-4 py-2 rounded-md text-sm font-semibold"
                     >
-                      Add packaging
+                      Add type
                     </button>
                   </div>
                 ) : (
@@ -4130,7 +4240,7 @@ function ProductFormModal({
                     className={fieldClass}
                   >
                     <option value="">None</option>
-                    {packagingTypes.map((packaging) => (
+                    {typeOptions.map((packaging) => (
                       <option key={packaging} value={packaging}>
                         {packaging}
                       </option>
@@ -4146,33 +4256,84 @@ function ProductFormModal({
               Pricing
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-semibold text-[#121c19] mb-2">Selling price (₦) *</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  required
-                  value={formData.price}
-                  onChange={(e) => updateFormData('price', e.target.value)}
-                  className={fieldClass}
-                  placeholder="0.00"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-[#121c19] mb-2">Cost price (₦) *</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  required
-                  value={formData.costPrice}
-                  onChange={(e) => updateFormData('costPrice', e.target.value)}
-                  className={fieldClass}
-                  placeholder="0.00"
-                />
-              </div>
+              {!(formData.category === 'SPORTS' && isShishaAmenity) && (
+                <div>
+                  <label className="block text-sm font-semibold text-[#121c19] mb-2">
+                    Selling price (₦) *
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    value={formData.price}
+                    onChange={(e) => updateFormData('price', e.target.value)}
+                    className={fieldClass}
+                    placeholder="0.00"
+                  />
+                </div>
+              )}
+              {formData.category === 'SPORTS' ? (
+                isShishaAmenity ? (
+                  <div className="md:col-span-2">
+                    <label className="block text-sm font-semibold text-[#121c19] mb-2">
+                      Price per coal (₦) *
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      required
+                      value={formData.price}
+                      onChange={(e) => updateFormData('price', e.target.value)}
+                      className={fieldClass}
+                      placeholder="1500"
+                    />
+                    <p className="mt-1 text-xs text-[#2a3d36]/50">
+                      Default ₦1,500 per coal. On POS, quantity = number of coals.
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-sm font-semibold text-[#121c19] mb-2">
+                      Duration ({sportsDurationUnit}) *
+                    </label>
+                    <input
+                      type="number"
+                      step={isSwimmingAmenity ? '0.5' : '1'}
+                      min="0.25"
+                      required
+                      value={formData.durationValue}
+                      onChange={(e) => updateFormData('durationValue', e.target.value)}
+                      className={fieldClass}
+                      placeholder={isSwimmingAmenity ? '2' : '1'}
+                    />
+                    <p className="mt-1 text-xs text-[#2a3d36]/50">
+                      {isSwimmingAmenity
+                        ? 'Used for the swimming countdown timer when this is sold.'
+                        : 'Session length in days — shown when selling this amenity.'}
+                    </p>
+                  </div>
+                )
+              ) : (
+                <div>
+                  <label className="block text-sm font-semibold text-[#121c19] mb-2">
+                    Cost price (₦) *
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    value={formData.costPrice}
+                    onChange={(e) => updateFormData('costPrice', e.target.value)}
+                    className={fieldClass}
+                    placeholder="0.00"
+                  />
+                </div>
+              )}
             </div>
           </section>
 
+          {formData.category !== 'SPORTS' && (
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
               Stock
@@ -4221,6 +4382,7 @@ function ProductFormModal({
               </div>
             </div>
           </section>
+          )}
 
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">

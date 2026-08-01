@@ -326,6 +326,31 @@ async function markSaleAsCompleted(saleId: number) {
   return true
 }
 
+/** Build created_at from YYYY-MM-DD (local calendar day) or now. */
+function resolveSaleCreatedAt(saleDate?: string | null) {
+  const now = new Date()
+  const raw = String(saleDate || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const [y, m, d] = raw.split('-').map(Number)
+    const picked = new Date(
+      y,
+      m - 1,
+      d,
+      now.getHours(),
+      now.getMinutes(),
+      now.getSeconds(),
+      now.getMilliseconds()
+    )
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const pickedStart = new Date(y, m - 1, d)
+    if (pickedStart.getTime() > todayStart.getTime()) {
+      throw new Error('Sale date cannot be in the future')
+    }
+    return picked.toISOString()
+  }
+  return now.toISOString()
+}
+
 async function processSale(request: Record<string, unknown>) {
   const items = Array.isArray(request.items) ? (request.items as any[]) : []
   if (!items.length) throw new Error('Cart is empty')
@@ -337,7 +362,8 @@ async function processSale(request: Record<string, unknown>) {
 
   const paymentMethod = String(request.payment_method || 'CASH').toUpperCase()
   const rawLocation = String(request.location || 'fridge').toLowerCase()
-  const location = rawLocation === 'show' ? 'show' : 'fridge'
+  const location =
+    rawLocation === 'show' ? 'show' : rawLocation === 'sports' ? 'sports' : 'fridge'
   let customerName = request.customer_name ? String(request.customer_name).trim() : ''
   if (paymentMethod === 'DEBT') {
     if (!customerName) throw new Error('Customer name is required for debt sales')
@@ -353,25 +379,31 @@ async function processSale(request: Record<string, unknown>) {
     (paymentMethod === 'DEBT' ? `DEBT:${customerName}` : customerName) ||
     null
 
+  const saleDateRaw = String(request.sale_date || request.saleDate || '').trim()
+  const createdAt = resolveSaleCreatedAt(saleDateRaw)
+
   // Validate stock in the selected location before writing the sale
-  for (const item of items) {
-    const productId = Number(item.product_id)
-    const qty = Number(item.quantity || 0)
-    if (!productId || qty <= 0) continue
-    const { data: product, error } = await supabase
-      .from('products_backup')
-      .select('id, name, fridge_stock, show_stock')
-      .eq('id', productId)
-      .single()
-    if (error) throw new Error(error.message)
-    const available =
-      location === 'show'
-        ? Number((product as any).show_stock || 0)
-        : Number((product as any).fridge_stock || 0)
-    if (available < qty) {
-      throw new Error(
-        `Not enough ${(product as any).name || 'stock'} in ${location} (have ${available}, need ${qty})`
-      )
+  // Sports amenities are services (price + duration) — no stock check/deduction
+  if (location !== 'sports') {
+    for (const item of items) {
+      const productId = Number(item.product_id)
+      const qty = Number(item.quantity || 0)
+      if (!productId || qty <= 0) continue
+      const { data: product, error } = await supabase
+        .from('products_backup')
+        .select('id, name, fridge_stock, show_stock, sports_stock')
+        .eq('id', productId)
+        .single()
+      if (error) throw new Error(error.message)
+      const available =
+        location === 'show'
+          ? Number((product as any).show_stock || 0)
+          : Number((product as any).fridge_stock || 0)
+      if (available < qty) {
+        throw new Error(
+          `Not enough ${(product as any).name || 'stock'} in ${location} (have ${available}, need ${qty})`
+        )
+      }
     }
   }
 
@@ -388,7 +420,7 @@ async function processSale(request: Record<string, unknown>) {
     payment_method: paymentMethod,
     payment_status: 'PENDING',
     notes,
-    created_at: new Date().toISOString(),
+    created_at: createdAt,
     synced_at: new Date().toISOString(),
   }
 
@@ -425,11 +457,13 @@ async function processSale(request: Record<string, unknown>) {
       console.warn('Could not insert sale item; continuing stock update')
     }
 
-    await updateStockType({
-      productId,
-      stockType: location,
-      quantityChange: -qty,
-    })
+    if (location !== 'sports') {
+      await updateStockType({
+        productId,
+        stockType: location,
+        quantityChange: -qty,
+      })
+    }
   }
 
   if (paymentMethod === 'DEBT') {
@@ -440,6 +474,7 @@ async function processSale(request: Record<string, unknown>) {
         amount: totalAmount,
         saleId,
         staffId,
+        entryDate: createdAt,
       })
     } catch (e) {
       console.error('Failed to add sale to debt ledger:', e)
@@ -454,8 +489,9 @@ async function processSale(request: Record<string, unknown>) {
     total_amount: totalAmount,
     payment_method: paymentMethod,
     customer_name: customerName,
+    created_at: createdAt,
     items: items.length,
-    timestamp: new Date().toISOString(),
+    timestamp: createdAt,
   }
 }
 
@@ -1039,11 +1075,13 @@ async function chargeSaleToDebt(opts: {
   amount: number
   saleId: number
   staffId?: number | null
+  entryDate?: string | null
 }) {
   const useRemote = await debtsTableAvailable()
   const account = await findOrCreateDebtAccount({
     businessId: opts.businessId,
     customerName: opts.customerName,
+    debtDate: opts.entryDate || undefined,
     useRemote,
   })
   const result = await appendDebtEntry({
@@ -1053,6 +1091,7 @@ async function chargeSaleToDebt(opts: {
     amount: opts.amount,
     saleId: opts.saleId,
     note: `Sale #${opts.saleId}`,
+    entryDate: opts.entryDate || undefined,
     staffId: opts.staffId,
     useRemote,
   })
@@ -1605,12 +1644,15 @@ async function createProduct(request: Record<string, unknown>) {
   const businessId = argNumber(request, 'business_id', 'businessId')
   if (!businessId) throw new Error('Invalid business_id')
 
+  const rawCategory = String(request.category || 'BAR').toUpperCase()
+  const category = rawCategory === 'SPORTS' ? 'SPORTS' : 'BAR'
+
   const payload = {
     id: Date.now(),
     business_id: businessId,
     name: String(request.name || ''),
     description: request.description ? String(request.description) : null,
-    category: 'BAR',
+    category,
     packaging: request.packaging ? String(request.packaging) : null,
     price: Number(request.price || 0),
     cost_price: Number(request.cost_price ?? request.costPrice ?? 0),
@@ -1619,6 +1661,16 @@ async function createProduct(request: Record<string, unknown>) {
     fridge_stock: Number(request.fridge_stock ?? request.fridgeStock ?? 0),
     show_stock: Number(request.show_stock ?? request.showStock ?? 0),
     store_stock: Number(request.store_stock ?? request.storeStock ?? 0),
+    sports_stock: Number(request.sports_stock ?? request.sportsStock ?? 0),
+    duration_value:
+      request.duration_value != null || request.durationValue != null
+        ? Number(request.duration_value ?? request.durationValue)
+        : null,
+    duration_unit: request.duration_unit
+      ? String(request.duration_unit)
+      : request.durationUnit
+        ? String(request.durationUnit)
+        : null,
     barcode: request.barcode ? String(request.barcode) : null,
     serial_number: request.serial_number
       ? String(request.serial_number)
@@ -1637,7 +1689,21 @@ async function createProduct(request: Record<string, unknown>) {
     .select('id')
     .single()
 
-  if (error) throw new Error(error.message)
+  if (error) {
+    // Columns may not exist yet — retry without newer fields
+    if (/sports_stock|duration_/i.test(error.message)) {
+      const {
+        sports_stock: _s,
+        duration_value: _d,
+        duration_unit: _u,
+        ...fallback
+      } = payload as any
+      const retry = await supabase.from('products_backup').insert(fallback).select('id').single()
+      if (retry.error) throw new Error(retry.error.message)
+      return retry.data?.id ?? payload.id
+    }
+    throw new Error(error.message)
+  }
   return data?.id ?? payload.id
 }
 
@@ -1647,10 +1713,13 @@ async function updateProduct(request: Record<string, unknown>) {
   if (!id) throw new Error('Invalid product id')
   if (!businessId) throw new Error('Invalid business_id')
 
+  const rawCategory = String(request.category || 'BAR').toUpperCase()
+  const category = rawCategory === 'SPORTS' ? 'SPORTS' : 'BAR'
+
   const payload: Record<string, unknown> = {
     name: String(request.name || ''),
     description: request.description ? String(request.description) : null,
-    category: 'BAR',
+    category,
     packaging: request.packaging ? String(request.packaging) : null,
     price: Number(request.price || 0),
     cost_price: Number(request.cost_price ?? request.costPrice ?? 0),
@@ -1658,6 +1727,16 @@ async function updateProduct(request: Record<string, unknown>) {
     fridge_stock: Number(request.fridge_stock ?? request.fridgeStock ?? 0),
     show_stock: Number(request.show_stock ?? request.showStock ?? 0),
     store_stock: Number(request.store_stock ?? request.storeStock ?? 0),
+    sports_stock: Number(request.sports_stock ?? request.sportsStock ?? 0),
+    duration_value:
+      request.duration_value != null || request.durationValue != null
+        ? Number(request.duration_value ?? request.durationValue)
+        : null,
+    duration_unit: request.duration_unit
+      ? String(request.duration_unit)
+      : request.durationUnit
+        ? String(request.durationUnit)
+        : null,
     image_path: request.image_path
       ? String(request.image_path)
       : request.imagePath
@@ -1672,7 +1751,24 @@ async function updateProduct(request: Record<string, unknown>) {
     .eq('id', id)
     .eq('business_id', businessId)
 
-  if (error) throw new Error(error.message)
+  if (error) {
+    if (/sports_stock|duration_/i.test(error.message)) {
+      const {
+        sports_stock: _s,
+        duration_value: _d,
+        duration_unit: _u,
+        ...fallback
+      } = payload
+      const retry = await supabase
+        .from('products_backup')
+        .update(fallback)
+        .eq('id', id)
+        .eq('business_id', businessId)
+      if (retry.error) throw new Error(retry.error.message)
+      return id
+    }
+    throw new Error(error.message)
+  }
   return id
 }
 
@@ -1687,7 +1783,9 @@ async function updateStockType(args: Record<string, unknown>) {
       ? 'fridge_stock'
       : stockType === 'show'
         ? 'show_stock'
-        : 'store_stock'
+        : stockType === 'sports'
+          ? 'sports_stock'
+          : 'store_stock'
 
   const { data: product, error: readError } = await supabase
     .from('products_backup')
@@ -1717,18 +1815,47 @@ async function transferStock(args: Record<string, unknown>) {
   if (quantity <= 0) throw new Error('quantity must be positive')
 
   const col = (type: string) =>
-    type === 'fridge' ? 'fridge_stock' : type === 'show' ? 'show_stock' : 'store_stock'
+    type === 'fridge'
+      ? 'fridge_stock'
+      : type === 'show'
+        ? 'show_stock'
+        : type === 'sports'
+          ? 'sports_stock'
+          : 'store_stock'
 
   const fromCol = col(from)
   const toCol = col(to)
 
   const { data: product, error: readError } = await supabase
     .from('products_backup')
-    .select('id, fridge_stock, show_stock, store_stock')
+    .select('id, fridge_stock, show_stock, store_stock, sports_stock')
     .eq('id', productId)
     .single()
 
-  if (readError) throw new Error(readError.message)
+  if (readError) {
+    // Fallback without sports_stock column
+    const fallback = await supabase
+      .from('products_backup')
+      .select('id, fridge_stock, show_stock, store_stock')
+      .eq('id', productId)
+      .single()
+    if (fallback.error) throw new Error(fallback.error.message)
+    if (fromCol === 'sports_stock' || toCol === 'sports_stock') {
+      throw new Error('Run supabase/sports_location.sql to enable Sports stock')
+    }
+    const fromVal = Number((fallback.data as any)?.[fromCol] || 0)
+    if (fromVal < quantity) throw new Error(`Not enough stock in ${from}`)
+    const { error } = await supabase
+      .from('products_backup')
+      .update({
+        [fromCol]: fromVal - quantity,
+        [toCol]: Number((fallback.data as any)?.[toCol] || 0) + quantity,
+        synced_at: new Date().toISOString(),
+      })
+      .eq('id', productId)
+    if (error) throw new Error(error.message)
+    return true
+  }
   const fromVal = Number((product as any)?.[fromCol] || 0)
   if (fromVal < quantity) throw new Error(`Not enough stock in ${from}`)
 
@@ -1750,6 +1877,7 @@ type ProductCategory = {
   business_id: number
   name: string
   description?: string | null
+  kind?: string | null
   is_active?: boolean
   created_at?: string
 }
@@ -1821,6 +1949,7 @@ async function createProductCategory(request: Record<string, unknown>): Promise<
     business_id: businessId,
     name,
     description: request.description ? String(request.description) : null,
+    kind: request.kind ? String(request.kind) : 'packaging',
     is_active: true,
     created_at: new Date().toISOString(),
   }
@@ -1832,6 +1961,15 @@ async function createProductCategory(request: Record<string, unknown>): Promise<
     .single()
 
   if (error) {
+    if (/kind/i.test(error.message)) {
+      const { kind: _omit, ...withoutKind } = payload as any
+      const retry = await supabase
+        .from('product_categories_backup')
+        .insert({ ...withoutKind, synced_at: new Date().toISOString() })
+        .select('*')
+        .single()
+      if (!retry.error && retry.data) return retry.data as ProductCategory
+    }
     // Fallback: store locally until SQL table is created
     const existing = readLocalCategories(businessId)
     if (existing.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
