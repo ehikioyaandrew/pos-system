@@ -1250,11 +1250,6 @@ async function appendDebtEntry(opts: {
   return { debt: mapDebtRow(debt), entry }
 }
 
-async function settleCustomerDebtSales(businessId: number, customerName: string) {
-  // Fully settled account → mark DEBT sales completed (and reopen if balance returns)
-  await syncCustomerDebtSaleStatuses(businessId, customerName, 0)
-}
-
 async function migrateLegacyDebtSales(businessId: number, useRemote: boolean) {
   const sales = await getDebtSales(businessId)
   for (const sale of sales) {
