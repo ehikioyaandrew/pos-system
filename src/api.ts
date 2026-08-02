@@ -982,8 +982,9 @@ async function getSaleReceipt(saleId: number, businessId?: number | null) {
     const product = productMap.get(Number(item.product_id))
     const qty = Number(item.quantity || 0)
     const unitPrice = Number(item.unit_price || 0)
-    const total =
-      Number(item.total_price || 0) || qty * unitPrice
+    // Always derive line total from qty × unit price so stale total_price
+    // after a manual DB edit cannot drift from the shown unit price.
+    const total = qty * unitPrice
     const name = product?.name || `Product #${item.product_id}`
     const packaging = product?.packaging ? ` (${product.packaging})` : ''
     const normalPrice = Number(product?.price || 0)
@@ -999,10 +1000,45 @@ async function getSaleReceipt(saleId: number, businessId?: number | null) {
     }
   })
 
+  const computedTotal = items.reduce((sum, item) => sum + Number(item.total_price || 0), 0)
+  const storedTotal = Number(sale.total_amount || 0)
+  let totalAmount = items.length ? computedTotal : storedTotal
+
+  // Heal mismatched sale / line totals left behind by manual DB edits
+  if (items.length && Math.abs(computedTotal - storedTotal) > 0.001) {
+    const syncedAt = new Date().toISOString()
+    const { error: healSaleError } = await supabase
+      .from('sales_backup')
+      .update({ total_amount: computedTotal, synced_at: syncedAt })
+      .eq('id', saleId)
+    if (healSaleError) {
+      console.warn('Failed to heal sale total_amount:', healSaleError.message)
+    } else {
+      totalAmount = computedTotal
+    }
+
+    for (const item of rawItems) {
+      const qty = Number(item.quantity || 0)
+      const unitPrice = Number(item.unit_price || 0)
+      const expected = qty * unitPrice
+      if (Math.abs(Number(item.total_price || 0) - expected) <= 0.001) continue
+      const tables = ['sale_items_backup', 'sale_items_sync', 'sale_items']
+      for (const table of tables) {
+        let query = supabase
+          .from(table)
+          .update({ total_price: expected, synced_at: syncedAt })
+          .eq('sale_id', saleId)
+        query = item.id ? query.eq('id', item.id) : query.eq('product_id', item.product_id)
+        const { error } = await query
+        if (!error) break
+      }
+    }
+  }
+
   return {
     id: sale.id,
     created_at: sale.created_at,
-    total_amount: Number(sale.total_amount || 0),
+    total_amount: totalAmount,
     payment_method: sale.payment_method || 'CASH',
     payment_status: sale.payment_status || 'COMPLETED',
     staff_name: staffName,
