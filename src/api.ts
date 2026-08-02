@@ -317,13 +317,123 @@ async function getPendingItemsSummary(businessId: number) {
   }
 }
 
-async function markSaleAsCompleted(saleId: number) {
+async function setSalePaymentStatus(saleId: number, status: 'COMPLETED' | 'PENDING') {
   const { error } = await supabase
     .from('sales_backup')
-    .update({ payment_status: 'COMPLETED', synced_at: new Date().toISOString() })
+    .update({ payment_status: status, synced_at: new Date().toISOString() })
     .eq('id', saleId)
   if (error) throw new Error(error.message)
   return true
+}
+
+async function setSalePaymentStatusCompleted(saleId: number) {
+  return setSalePaymentStatus(saleId, 'COMPLETED')
+}
+
+/**
+ * DEBT sale status follows the customer debt balance:
+ * - balance > 0  → all that customer's DEBT sales stay PENDING
+ * - balance <= 0 → all that customer's DEBT sales become COMPLETED
+ */
+async function syncCustomerDebtSaleStatuses(
+  businessId: number,
+  customerName: string,
+  balance: number
+) {
+  const key = normalizeCustomerKey(customerName)
+  if (!key) return
+
+  const sales = await getSalesLog(businessId)
+  const target: 'COMPLETED' | 'PENDING' = balance <= 0.0001 ? 'COMPLETED' : 'PENDING'
+
+  for (const sale of sales) {
+    if (String(sale.payment_method || '').toUpperCase() !== 'DEBT') continue
+    if (String(sale.payment_status || '').toUpperCase() === 'CANCELLED') continue
+    const name = parseDebtCustomer(sale.notes) || sale.customer_name || ''
+    if (normalizeCustomerKey(String(name)) !== key) continue
+    if (String(sale.payment_status || '').toUpperCase() === target) continue
+    await setSalePaymentStatus(Number(sale.id), target)
+  }
+}
+
+async function markSaleAsCompleted(saleId: number) {
+  const { data: sale, error: saleError } = await supabase
+    .from('sales_backup')
+    .select('*')
+    .eq('id', saleId)
+    .maybeSingle()
+  if (saleError) throw new Error(saleError.message)
+  if (!sale) throw new Error('Sale not found')
+
+  const method = String(sale.payment_method || '').toUpperCase()
+
+  // Non-debt: normal complete
+  if (method !== 'DEBT') {
+    if (String(sale.payment_status || '').toUpperCase() === 'COMPLETED') return true
+    return setSalePaymentStatusCompleted(saleId)
+  }
+
+  // DEBT: record payment, then sync status from remaining balance
+  const settled = await settleDebtForCompletedSale(sale)
+  await syncCustomerDebtSaleStatuses(
+    settled.businessId,
+    settled.customerName,
+    settled.balance
+  )
+
+  if (settled.balance > 0.0001) {
+    throw new Error(
+      `Partial payment recorded. Remaining debt ₦${settled.balance.toFixed(2)} — sale stays pending until fully paid.`
+    )
+  }
+  return true
+}
+
+/** Pay toward a DEBT sale and return the updated customer balance. */
+async function settleDebtForCompletedSale(sale: any) {
+  const customerName =
+    parseDebtCustomer(sale.notes) || sale.customer_name || ''
+  if (!customerName || normalizeCustomerKey(customerName) === normalizeCustomerKey(WALK_IN_CUSTOMER)) {
+    throw new Error('Cannot settle debt sale: missing customer name')
+  }
+
+  let businessId: number | null = null
+  if (sale.user_id) {
+    const { data: user } = await supabase
+      .from('users_backup')
+      .select('business_id')
+      .eq('id', sale.user_id)
+      .maybeSingle()
+    businessId = user?.business_id ? Number(user.business_id) : null
+  }
+  if (!businessId) throw new Error('Cannot settle debt sale: business not found')
+
+  const useRemote = await debtsTableAvailable()
+  const account = await findOrCreateDebtAccount({
+    businessId,
+    customerName,
+    useRemote,
+  })
+  const debt = mapDebtRow(account)
+  let balance = Number(debt?.balance || 0)
+  const saleAmount = Number(sale.total_amount || 0)
+
+  if (balance > 0.0001 && saleAmount > 0) {
+    const payAmount = Math.min(saleAmount, balance)
+    const result = await appendDebtEntry({
+      businessId,
+      debtId: Number(debt.id),
+      entryType: 'PAYMENT',
+      amount: payAmount,
+      saleId: Number(sale.id),
+      note: `Payment for sale #${sale.id}`,
+      staffId: sale.user_id || null,
+      useRemote,
+    })
+    balance = Number(result.debt.balance || 0)
+  }
+
+  return { businessId, customerName, balance }
 }
 
 /** Build created_at from YYYY-MM-DD (local calendar day) or now.
@@ -640,7 +750,23 @@ async function processSale(request: Record<string, unknown>) {
   }
 }
 
-async function getSalesLog(businessId: number, staffId?: number | null) {
+function localDayStartIso(dateStr: string) {
+  const [y, m, d] = String(dateStr).split('-').map(Number)
+  if (!y || !m || !d) return null
+  return new Date(y, m - 1, d, 0, 0, 0, 0).toISOString()
+}
+
+function localDayEndIso(dateStr: string) {
+  const [y, m, d] = String(dateStr).split('-').map(Number)
+  if (!y || !m || !d) return null
+  return new Date(y, m - 1, d, 23, 59, 59, 999).toISOString()
+}
+
+async function getSalesLog(
+  businessId: number,
+  staffId?: number | null,
+  opts?: { dateFrom?: string | null; dateTo?: string | null }
+) {
   const { data: users, error: usersError } = await supabase
     .from('users_backup')
     .select('id, name, username')
@@ -651,17 +777,25 @@ async function getSalesLog(businessId: number, staffId?: number | null) {
   if (!userIds.length) return []
 
   const userMap = new Map((users || []).map((u) => [u.id, u]))
+  const dateFrom = String(opts?.dateFrom || '').trim()
+  const dateTo = String(opts?.dateTo || '').trim()
+  const fromIso = dateFrom ? localDayStartIso(dateFrom) : null
+  const toIso = dateTo ? localDayEndIso(dateTo) : null
+
   let query = supabase
     .from('sales_backup')
     .select('*')
     .in('user_id', staffId ? [staffId] : userIds)
     .order('created_at', { ascending: false })
-    .limit(200)
+    .limit(fromIso || toIso ? 1000 : 200)
+
+  if (fromIso) query = query.gte('created_at', fromIso)
+  if (toIso) query = query.lte('created_at', toIso)
 
   const { data, error } = await query
   if (error) throw new Error(error.message)
 
-  return (data || []).map((s: any) => {
+  const rows = (data || []).map((s: any) => {
     const u = userMap.get(s.user_id)
     return {
       ...s,
@@ -669,6 +803,110 @@ async function getSalesLog(businessId: number, staffId?: number | null) {
       customer_name: parseDebtCustomer(s.notes) || WALK_IN_CUSTOMER,
     }
   })
+
+  return attachDebtProgressToSales(businessId, userIds, rows)
+}
+
+/** Allocate customer payments FIFO across DEBT sales → per-sale paid / left. */
+async function attachDebtProgressToSales(
+  businessId: number,
+  userIds: number[],
+  sales: any[]
+) {
+  if (!sales.length || !userIds.length) return sales
+
+  try {
+    const useRemote = await debtsTableAvailable()
+    let debtAccounts: any[] = []
+    if (useRemote) {
+      const { data, error } = await supabase
+        .from('customer_debts_backup')
+        .select('*')
+        .eq('business_id', businessId)
+      if (error) throw new Error(error.message)
+      debtAccounts = (data || []).map(mapDebtRow)
+    } else {
+      debtAccounts = readLocalDebts(businessId).map(mapDebtRow)
+    }
+
+    const paidByCustomer = new Map<string, number>()
+    for (const d of debtAccounts) {
+      paidByCustomer.set(
+        normalizeCustomerKey(String(d.customer_name || '')),
+        Number(d.total_paid || 0)
+      )
+    }
+
+    // All DEBT sales for this business (oldest first) for fair FIFO allocation
+    const { data: debtSales, error: debtSalesError } = await supabase
+      .from('sales_backup')
+      .select('id, total_amount, notes, payment_method, payment_status, created_at, user_id')
+      .in('user_id', userIds)
+      .eq('payment_method', 'DEBT')
+      .order('created_at', { ascending: true })
+      .limit(2000)
+    if (debtSalesError) throw new Error(debtSalesError.message)
+
+    const byCustomer = new Map<string, any[]>()
+    for (const s of debtSales || []) {
+      const name = parseDebtCustomer(s.notes) || WALK_IN_CUSTOMER
+      const key = normalizeCustomerKey(name)
+      const list = byCustomer.get(key) || []
+      list.push(s)
+      byCustomer.set(key, list)
+    }
+
+    const progress = new Map<number, { debt_paid: number; debt_remaining: number }>()
+    for (const [key, list] of byCustomer) {
+      let pool = paidByCustomer.get(key) || 0
+      for (const s of list) {
+        const amount = Number(s.total_amount || 0)
+        const status = String(s.payment_status || '').toUpperCase()
+        let paid = 0
+        let remaining = amount
+        if (status === 'COMPLETED' || status === 'PAID') {
+          paid = amount
+          remaining = 0
+        } else if (status !== 'CANCELLED') {
+          paid = Math.min(amount, Math.max(0, pool))
+          pool -= paid
+          remaining = Math.max(0, amount - paid)
+        }
+        progress.set(Number(s.id), {
+          debt_paid: paid,
+          debt_remaining: remaining,
+        })
+      }
+    }
+
+    return sales.map((s) => {
+      if (String(s.payment_method || '').toUpperCase() !== 'DEBT') {
+        return { ...s, debt_paid: null, debt_remaining: null }
+      }
+      const p = progress.get(Number(s.id))
+      if (p) return { ...s, ...p }
+      const amount = Number(s.total_amount || 0)
+      const completed = ['COMPLETED', 'PAID'].includes(
+        String(s.payment_status || '').toUpperCase()
+      )
+      return {
+        ...s,
+        debt_paid: completed ? amount : 0,
+        debt_remaining: completed ? 0 : amount,
+      }
+    })
+  } catch (e) {
+    console.warn('Debt progress attach skipped:', e)
+    return sales.map((s) => ({
+      ...s,
+      debt_paid:
+        String(s.payment_method || '').toUpperCase() === 'DEBT' ? 0 : null,
+      debt_remaining:
+        String(s.payment_method || '').toUpperCase() === 'DEBT'
+          ? Number(s.total_amount || 0)
+          : null,
+    }))
+  }
 }
 
 async function getSaleItemsForSale(saleId: number) {
@@ -1013,14 +1251,8 @@ async function appendDebtEntry(opts: {
 }
 
 async function settleCustomerDebtSales(businessId: number, customerName: string) {
-  const sales = await getDebtSales(businessId)
-  const key = normalizeCustomerKey(customerName)
-  for (const sale of sales) {
-    const name = parseDebtCustomer(sale.notes) || sale.customer_name
-    if (normalizeCustomerKey(String(name || '')) === key) {
-      await markSaleAsCompleted(Number(sale.id))
-    }
-  }
+  // Fully settled account → mark DEBT sales completed (and reopen if balance returns)
+  await syncCustomerDebtSaleStatuses(businessId, customerName, 0)
 }
 
 async function migrateLegacyDebtSales(businessId: number, useRemote: boolean) {
@@ -1087,6 +1319,19 @@ async function getDebtors(
     rows = (data || []).map(mapDebtRow).filter(Boolean)
   } else {
     rows = readLocalDebts(businessId).map(mapDebtRow).filter(Boolean)
+  }
+
+  // Repair sales log: DEBT sales must stay PENDING while balance remains
+  for (const row of rows) {
+    try {
+      await syncCustomerDebtSaleStatuses(
+        businessId,
+        String(row.customer_name || ''),
+        Number(row.balance || 0)
+      )
+    } catch (e) {
+      console.warn('Debt sale status sync skipped:', e)
+    }
   }
 
   const staffId = opts?.staffId ? Number(opts.staffId) : null
@@ -1215,12 +1460,15 @@ async function recordDebtPayment(request: Record<string, unknown>) {
     useRemote,
   })
 
-  if (Number(result.debt.balance) <= 0.0001) {
-    try {
-      await settleCustomerDebtSales(businessId, result.debt.customer_name)
-    } catch (e) {
-      console.warn('Could not auto-complete related debt sales:', e)
-    }
+  // Keep sales log in sync: COMPLETED only when balance is fully cleared
+  try {
+    await syncCustomerDebtSaleStatuses(
+      businessId,
+      result.debt.customer_name,
+      Number(result.debt.balance || 0)
+    )
+  } catch (e) {
+    console.warn('Could not sync debt sale statuses:', e)
   }
 
   return result.debt
@@ -1692,10 +1940,138 @@ async function getBusinesses() {
   const { data, error } = await supabase
     .from('businesses_backup')
     .select('*')
+    .order('created_at', { ascending: false })
     .order('name')
 
-  if (error) throw new Error(error.message)
+  if (error) {
+    // Fallback when created_at is missing on older schemas
+    const fallback = await supabase.from('businesses_backup').select('*').order('name')
+    if (fallback.error) throw new Error(error.message)
+    return fallback.data || []
+  }
   return data || []
+}
+
+async function getSystemRevenueSummary(startDate: string, endDate: string) {
+  const start = String(startDate || '').trim()
+  const end = String(endDate || '').trim()
+  if (!start || !end) throw new Error('start_date and end_date are required')
+
+  const rangeStart = new Date(`${start}T00:00:00`)
+  const rangeEnd = new Date(`${end}T23:59:59.999`)
+  if (Number.isNaN(rangeStart.getTime()) || Number.isNaN(rangeEnd.getTime())) {
+    throw new Error('Invalid date range')
+  }
+
+  const today = new Date()
+  const todayStart = new Date(today)
+  todayStart.setHours(0, 0, 0, 0)
+  const todayEnd = new Date(today)
+  todayEnd.setHours(23, 59, 59, 999)
+
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+  monthStart.setHours(0, 0, 0, 0)
+
+  const fetchFrom = new Date(
+    Math.min(rangeStart.getTime(), todayStart.getTime(), monthStart.getTime())
+  )
+
+  const [businesses, usersRes, salesRes] = await Promise.all([
+    getBusinesses(),
+    supabase.from('users_backup').select('id, business_id'),
+    supabase
+      .from('sales_backup')
+      .select('id, user_id, total_amount, created_at, payment_status')
+      .gte('created_at', fetchFrom.toISOString())
+      .lte('created_at', rangeEnd.toISOString()),
+  ])
+
+  if (usersRes.error) throw new Error(usersRes.error.message)
+  if (salesRes.error) throw new Error(salesRes.error.message)
+
+  const userToBusiness = new Map<number, number>()
+  for (const u of usersRes.data || []) {
+    if (u?.id != null && u?.business_id != null) {
+      userToBusiness.set(Number(u.id), Number(u.business_id))
+    }
+  }
+
+  const businessName = new Map<number, string>()
+  for (const b of businesses) {
+    businessName.set(Number(b.id), String(b.name || `Business ${b.id}`))
+  }
+
+  const activeBusinesses = businesses.filter((b) => b.is_active !== false).length
+
+  type Agg = { business_id: number; business_name: string; revenue: number; transactions: number }
+  const byBusiness = new Map<number, Agg>()
+
+  let totalRevenue = 0
+  let totalTransactions = 0
+  let todayRevenue = 0
+  let monthRevenue = 0
+
+  for (const sale of salesRes.data || []) {
+    const amount = Number((sale as any).total_amount || 0)
+    const created = new Date(String((sale as any).created_at || ''))
+    if (Number.isNaN(created.getTime())) continue
+
+    const businessId = userToBusiness.get(Number((sale as any).user_id))
+    if (!businessId) continue
+
+    if (created >= todayStart && created <= todayEnd) {
+      todayRevenue += amount
+    }
+    if (created >= monthStart && created <= todayEnd) {
+      monthRevenue += amount
+    }
+
+    if (created < rangeStart || created > rangeEnd) continue
+
+    totalRevenue += amount
+    totalTransactions += 1
+
+    const existing = byBusiness.get(businessId)
+    if (existing) {
+      existing.revenue += amount
+      existing.transactions += 1
+    } else {
+      byBusiness.set(businessId, {
+        business_id: businessId,
+        business_name: businessName.get(businessId) || `Business ${businessId}`,
+        revenue: amount,
+        transactions: 1,
+      })
+    }
+  }
+
+  // Include active businesses with zero revenue in the period so the table is complete
+  for (const b of businesses) {
+    const id = Number(b.id)
+    if (!byBusiness.has(id)) {
+      byBusiness.set(id, {
+        business_id: id,
+        business_name: String(b.name || `Business ${id}`),
+        revenue: 0,
+        transactions: 0,
+      })
+    }
+  }
+
+  const business_revenue = [...byBusiness.values()].sort((a, b) => b.revenue - a.revenue)
+  const divisor = activeBusinesses || businesses.length || 1
+
+  return {
+    total_revenue: totalRevenue,
+    total_transactions: totalTransactions,
+    total_businesses: activeBusinesses,
+    average_revenue_per_business: totalRevenue / divisor,
+    today_revenue: todayRevenue,
+    month_revenue: monthRevenue,
+    business_revenue,
+    start_date: start,
+    end_date: end,
+  }
 }
 
 async function getBusinessStaffCount(businessId: number) {
@@ -2242,6 +2618,12 @@ export async function invoke<T = unknown>(
       }
       case 'get_businesses':
         return (await getBusinesses()) as T
+      case 'get_system_revenue_summary': {
+        const start =
+          String((args as any)?.start_date || (args as any)?.startDate || '').trim()
+        const end = String((args as any)?.end_date || (args as any)?.endDate || '').trim()
+        return (await getSystemRevenueSummary(start, end)) as T
+      }
       case 'get_business_staff_count': {
         const businessId = argNumber(args, 'businessId', 'business_id')
         if (!businessId) throw new Error('businessId is required')
@@ -2324,7 +2706,16 @@ export async function invoke<T = unknown>(
         const businessId = argNumber(args, 'businessId', 'business_id')
         if (!businessId) throw new Error('businessId is required')
         const staffId = argNumber(args, 'staffId', 'staff_id')
-        return (await getSalesLog(businessId, staffId)) as T
+        const dateFrom = String(
+          (args as any)?.dateFrom ?? (args as any)?.date_from ?? ''
+        ).trim()
+        const dateTo = String(
+          (args as any)?.dateTo ?? (args as any)?.date_to ?? ''
+        ).trim()
+        return (await getSalesLog(businessId, staffId, {
+          dateFrom: dateFrom || null,
+          dateTo: dateTo || null,
+        })) as T
       }
       case 'get_sale_receipt': {
         const saleId = argNumber(args, 'saleId', 'sale_id')

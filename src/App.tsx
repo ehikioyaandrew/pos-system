@@ -809,29 +809,176 @@ function PasswordChangeModal({ currentUser, onPasswordChanged, onCancel }: {
   )
 }
 
+function NavIcon({ name }: { name: string }) {
+  const common = {
+    width: 18,
+    height: 18,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true,
+  }
+  switch (name) {
+    case 'dashboard':
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="7" height="9" rx="1.5" />
+          <rect x="14" y="3" width="7" height="5" rx="1.5" />
+          <rect x="14" y="12" width="7" height="9" rx="1.5" />
+          <rect x="3" y="16" width="7" height="5" rx="1.5" />
+        </svg>
+      )
+    case 'clients':
+      return (
+        <svg {...common}>
+          <path d="M3 21h18" />
+          <path d="M5 21V7l7-4 7 4v14" />
+          <path d="M9 21v-6h6v6" />
+        </svg>
+      )
+    case 'onboard':
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="8" r="3.5" />
+          <path d="M3.5 19c.8-3 2.8-4.5 5.5-4.5s4.7 1.5 5.5 4.5" />
+          <path d="M19 8v6" />
+          <path d="M16 11h6" />
+        </svg>
+      )
+    case 'reports':
+      return (
+        <svg {...common}>
+          <path d="M4 19V5" />
+          <path d="M4 19h16" />
+          <path d="M8 15v-4" />
+          <path d="M12 15V8" />
+          <path d="M16 15v-6" />
+        </svg>
+      )
+    case 'products':
+      return (
+        <svg {...common}>
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+          <path d="M3.3 7 12 12l8.7-5" />
+          <path d="M12 22V12" />
+        </svg>
+      )
+    case 'inventory':
+      return (
+        <svg {...common}>
+          <path d="M21 8H3" />
+          <path d="M21 12H3" />
+          <path d="M21 16H3" />
+          <path d="M8 6v12" />
+        </svg>
+      )
+    case 'staff':
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="8" r="3.5" />
+          <circle cx="17" cy="9" r="2.5" />
+          <path d="M3.5 19c.8-3 2.8-4.5 5.5-4.5s4.7 1.5 5.5 4.5" />
+          <path d="M14.5 19c.4-1.8 1.6-3 3.5-3 1.2 0 2.2.5 2.9 1.4" />
+        </svg>
+      )
+    case 'sales':
+      return (
+        <svg {...common}>
+          <path d="M4 19V5" />
+          <path d="M4 19h16" />
+          <path d="M8 16l3-4 3 2 4-6" />
+        </svg>
+      )
+    case 'debt':
+      return (
+        <svg {...common}>
+          <rect x="3" y="6" width="18" height="13" rx="2" />
+          <path d="M3 10h18" />
+          <path d="M8 14h4" />
+        </svg>
+      )
+    case 'settings':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+        </svg>
+      )
+    case 'pending':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      )
+    case 'pos':
+      return (
+        <svg {...common}>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="M7 9h6" />
+          <path d="M7 13h10" />
+          <path d="M16 9h1" />
+        </svg>
+      )
+    default:
+      return <span className="h-1.5 w-1.5 rounded-full bg-current" />
+  }
+}
+
 // NavButton Component for consistent navigation styling
-function NavButton({ active, onClick, label }: {
+function NavButton({
+  active,
+  onClick,
+  label,
+  icon,
+  hint,
+}: {
   active: boolean
   onClick: () => void
   icon?: string
   label: string
+  hint?: string
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`w-full flex items-center gap-3 py-2.5 px-3 rounded-md text-left text-sm font-medium transition-colors ${
+      className={`group w-full flex items-center gap-3 py-2.5 px-3 rounded-lg text-left transition-colors ${
         active
-          ? 'bg-white/10 text-white'
+          ? 'bg-white/10 text-white shadow-[inset_3px_0_0_0_#e0a06a]'
           : 'text-white/55 hover:bg-white/5 hover:text-white'
       }`}
     >
       <span
-        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-          active ? 'bg-[#e0a06a]' : 'bg-white/25'
+        className={`h-9 w-9 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+          active
+            ? 'bg-[#e0a06a]/15 border-[#e0a06a]/35 text-[#e0a06a]'
+            : 'bg-white/5 border-white/10 text-white/45 group-hover:text-white/70'
         }`}
-      />
-      <span>{label}</span>
+      >
+        {icon ? <NavIcon name={icon} /> : (
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              active ? 'bg-[#e0a06a]' : 'bg-white/25'
+            }`}
+          />
+        )}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium leading-tight">{label}</span>
+        {hint && (
+          <span
+            className={`block text-[11px] mt-0.5 truncate ${
+              active ? 'text-white/45' : 'text-white/25 group-hover:text-white/35'
+            }`}
+          >
+            {hint}
+          </span>
+        )}
+      </span>
     </button>
   )
 }
@@ -1053,55 +1200,79 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
 
         <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto pb-4">
           <p className="px-3 pt-2 pb-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-white/30">
-            Menu
+            {isSuperSuperAdmin ? 'Platform' : 'Menu'}
           </p>
           {isSuperSuperAdmin ? (
             <>
-              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
-              <NavButton active={currentSection === 'clients'} onClick={() => goToSection('clients')} label="Client Businesses" />
-              <NavButton active={currentSection === 'onboarding'} onClick={() => goToSection('onboarding')} label="Onboard Client" />
-              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} label="System Reports" />
+              <NavButton
+                active={currentSection === 'dashboard'}
+                onClick={() => goToSection('dashboard')}
+                icon="dashboard"
+                label="Dashboard"
+                hint="Overview & updates"
+              />
+              <NavButton
+                active={currentSection === 'clients'}
+                onClick={() => goToSection('clients')}
+                icon="clients"
+                label="Client Businesses"
+                hint="Manage all clients"
+              />
+              <NavButton
+                active={currentSection === 'onboarding'}
+                onClick={() => goToSection('onboarding')}
+                icon="onboard"
+                label="Onboard Client"
+                hint="Add a new business"
+              />
+              <NavButton
+                active={currentSection === 'reports'}
+                onClick={() => goToSection('reports')}
+                icon="reports"
+                label="System Reports"
+                hint="Platform analytics"
+              />
             </>
           ) : isSuperAdmin ? (
             <>
-              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
-              <NavButton active={currentSection === 'products'} onClick={() => goToSection('products')} label="Products" />
-              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Inventory" />
-              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} label="Staff Management" />
-              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
-              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
-              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} label="Reports" />
-              <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} label="Settings" />
-              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} icon="dashboard" label="Dashboard" />
+              <NavButton active={currentSection === 'products'} onClick={() => goToSection('products')} icon="products" label="Products" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Inventory" />
+              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Management" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
+              <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} icon="settings" label="Settings" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
           ) : isManager ? (
             <>
-              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
-              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Inventory" />
-              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} label="Staff Overview" />
-              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
-              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
-              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} label="Reports" />
-              <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} label="Settings" />
-              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} icon="dashboard" label="Dashboard" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Inventory" />
+              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Overview" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
+              <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} icon="settings" label="Settings" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
           ) : isSecretary ? (
             <>
-              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} label="Dashboard" />
-              <NavButton active={currentSection === 'products'} onClick={() => goToSection('products')} label="Product Catalog" />
-              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Inventory Tracking" />
-              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} label="Staff Records" />
-              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
-              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
-              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
+              <NavButton active={currentSection === 'dashboard'} onClick={() => goToSection('dashboard')} icon="dashboard" label="Dashboard" />
+              <NavButton active={currentSection === 'products'} onClick={() => goToSection('products')} icon="products" label="Product Catalog" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Inventory Tracking" />
+              <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Records" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
           ) : (
             <>
-              <NavButton active={currentSection === 'pos'} onClick={() => goToSection('pos')} label="Point of Sale" />
-              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} label="Stock Check" />
-              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} label="Sales Log" />
-              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} label="Debt" />
-              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} label="Pending Items" />
+              <NavButton active={currentSection === 'pos'} onClick={() => goToSection('pos')} icon="pos" label="Point of Sale" />
+              <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Stock Check" />
+              <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
           )}
         </nav>
@@ -1264,145 +1435,52 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
 }
 
 function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (section: string) => void }) {
-  const [syncStatus, setSyncStatus] = useState<any>(null)
-  const [syncing, setSyncing] = useState(false)
+  const [clients, setClients] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
   const [updateInfo, setUpdateInfo] = useState<any>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [installingUpdate, setInstallingUpdate] = useState(false)
-  const [currentVersion, setCurrentVersion] = useState<string>('')
+  const currentVersion = import.meta.env.VITE_APP_VERSION || '1.0.0-web'
 
   useEffect(() => {
-    checkSyncStatus()
-    loadCurrentVersion()
+    void loadClients()
   }, [])
 
-  const loadCurrentVersion = async () => {
-    setCurrentVersion(import.meta.env.VITE_APP_VERSION || '1.0.0-web')
-  }
-
-  const checkSyncStatus = async () => {
+  const loadClients = async () => {
     try {
-      const status = await invoke('get_sync_status')
-      setSyncStatus(status)
+      setLoading(true)
+      const businesses = (await invoke('get_businesses')) as any[]
+      setClients(Array.isArray(businesses) ? businesses : [])
     } catch (error) {
-      console.error('Failed to get sync status:', error)
-    }
-  }
-
-  const handleSyncToCloud = async () => {
-    setSyncing(true)
-    try {
-      const result = await invoke('sync_to_cloud') as any
-      setSyncStatus(result)
-      toast.success(`Cloud sync completed!\n${result.message}`, {
-        duration: 5000,
-      })
-    } catch (error) {
-      console.error('Sync failed:', error)
-      toast.error('Cloud sync failed. Check console for details.')
+      console.error('Failed to load clients:', error)
+      toast.error(`Failed to load onboarded clients: ${error}`)
+      setClients([])
     } finally {
-      setSyncing(false)
+      setLoading(false)
     }
   }
 
-  const handleSyncFromCloud = async () => {
-    setSyncing(true)
-    try {
-      const result = await invoke('sync_from_cloud') as any
-      toast.success(`Cloud restore completed!\n${result.message}`, {
-        duration: 5000,
-      })
-      // Refresh data after a short delay
-      setTimeout(() => {
-        window.location.reload()
-      }, 2000)
-    } catch (error) {
-      console.error('Download failed:', error)
-      toast.error('Cloud restore failed. Check console for details.')
-    } finally {
-      setSyncing(false)
-    }
+  const formatWhen = (value?: string | null) => {
+    if (!value) return '—'
+    const d = new Date(value)
+    if (Number.isNaN(d.getTime())) return '—'
+    return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
   }
 
-  const handleFixOrphanedUsers = async () => {
-    try {
-      await invoke('fix_orphaned_users')
-      toast.success('Data consistency issues fixed successfully!', {
-        duration: 4000,
-      })
-      // Refresh data after a short delay
-      setTimeout(() => {
-        window.location.reload()
-      }, 2000)
-    } catch (error) {
-      console.error('Failed to fix orphaned users:', error)
-      toast.error('Failed to fix data issues. Check console for details.')
-    }
-  }
+  const totalClients = clients.length
+  const activeClients = clients.filter((c) => c.is_active !== false).length
+  const suspendedClients = totalClients - activeClients
+  const trialClients = clients.filter(
+    (c) => String(c.subscription_status || 'TRIAL').toUpperCase() === 'TRIAL'
+  ).length
 
-  const handleRemoveDuplicates = async () => {
-    try {
-      const deleted = await invoke('remove_duplicate_businesses') as number
-      if (deleted > 0) {
-        toast.success(`Removed ${deleted} duplicate business(es)!`, {
-          duration: 4000,
-        })
-        // Refresh data after a short delay
-        setTimeout(() => {
-          window.location.reload()
-        }, 2000)
-      } else {
-        toast.success('No duplicate businesses found!', {
-          duration: 3000,
-        })
-      }
-    } catch (error) {
-      console.error('Failed to remove duplicates:', error)
-      toast.error('Failed to remove duplicates. Check console for details.')
-    }
-  }
-
-  const handleFixUsersWithoutBusinessId = async () => {
-    try {
-      const fixed = await invoke('fix_users_without_business_id') as number
-      if (fixed > 0) {
-        toast.success(`Fixed ${fixed} user(s) with missing business ID! Please log out and log back in.`, {
-          duration: 5000,
-        })
-        setTimeout(() => {
-          window.location.reload()
-        }, 2000)
-      } else {
-        toast.success('No users needed fixing!', {
-          duration: 3000,
-        })
-      }
-    } catch (error) {
-      console.error('Failed to fix users:', error)
-      toast.error('Failed to fix users. Check console for details.')
-    }
-  }
-
-  const handleFixProductIsActive = async () => {
-    try {
-      const fixed = await invoke('fix_product_is_active_values') as number
-      if (fixed > 0) {
-        toast.success(`Fixed ${fixed} product(s)! Products should now be visible.`, {
-          duration: 5000,
-        })
-        setTimeout(() => {
-          window.location.reload()
-        }, 2000)
-      } else {
-        toast.success('No products needed fixing!', {
-          duration: 3000,
-        })
-      }
-    } catch (error) {
-      console.error('Failed to fix products:', error)
-      toast.error('Failed to fix products. Check console for details.')
-    }
-  }
+  const recentClients = [...clients]
+    .sort((a, b) => {
+      const ta = new Date(a.created_at || a.synced_at || 0).getTime()
+      const tb = new Date(b.created_at || b.synced_at || 0).getTime()
+      return tb - ta
+    })
+    .slice(0, 8)
 
   const handleCheckForUpdates = async () => {
     setCheckingUpdate(true)
@@ -1410,287 +1488,220 @@ function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (se
       const info = await checkForUpdates()
       setUpdateInfo(info)
       if (info.available) {
-        toast.success(`Update available! Version ${info.version} is ready to install.`, {
-          duration: 5000,
-        })
+        toast.success(`Update available! Version ${info.version}`)
       } else {
-        toast.success('You are running the latest version!', {
-          duration: 3000,
-        })
+        toast.success('You are running the latest version')
       }
     } catch (error) {
-      console.error('Failed to check for updates:', error)
-      toast.error('Failed to check for updates. Make sure updater is enabled in configuration.')
+      toast.error('Failed to check for updates')
     } finally {
       setCheckingUpdate(false)
     }
   }
 
   const handleInstallUpdate = async () => {
-    if (!updateInfo?.available) {
-      toast.error('No update available to install')
-      return
-    }
-
-    const confirmed = window.confirm(
-      `Install update version ${updateInfo.version}?\n\n${updateInfo.body || ''}\n\nThe application will restart after installation.`
-    )
-
-    if (!confirmed) return
-
+    if (!updateInfo?.available) return
+    if (!window.confirm(`Install update v${updateInfo.version}? The app may restart.`)) return
     setInstallingUpdate(true)
     try {
       const result = await installUpdate()
-      if (result.success) {
-        toast.success('Update installed successfully! The application will restart...', {
-          duration: 5000,
-        })
-      } else {
-        toast.error(`Update installation failed: ${result.message}`)
-      }
+      if (result.success) toast.success('Update installed')
+      else toast.error(result.message || 'Install failed')
     } catch (error) {
-      console.error('Failed to install update:', error)
-      toast.error('Failed to install update. Check console for details.')
+      toast.error('Failed to install update')
     } finally {
       setInstallingUpdate(false)
     }
   }
 
+  if (loading) {
+    return <PageLoader label="Loading platform…" />
+  }
+
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-slate-800 mb-2">Super Admin Dashboard</h1>
-          <p className="text-slate-600 text-lg">Manage your POS system clients and businesses</p>
-        </div>
-
-        {/* Metrics Cards */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8 w-full">
-          <MetricCard
-            title="Total Clients"
-            value="0"
-            icon="🏢"
-            color="blue"
-          />
-          <MetricCard
-            title="Active Businesses"
-            value="0"
-            icon="✅"
-            color="green"
-          />
-          <MetricCard
-            title="Total Revenue"
-            value="₦0"
-            icon="💰"
-            color="purple"
-          />
-          <MetricCard
-            title="Pending Setup"
-            value="0"
-            icon="⏳"
-            color="orange"
-          />
-        </div>
-
-        {/* Quick Actions */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 w-full">
-          <h2 className="text-2xl font-bold text-slate-800 mb-6">Quick Actions</h2>
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 w-full">
-            <button
-              onClick={() => onNavigateToSection('onboarding')}
-              className="bg-blue-600 hover:bg-blue-700 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg flex items-center justify-center space-x-3"
-            >
-              <span className="text-xl">➕</span>
-              <span>Onboard New Client</span>
-          </button>
-            <button
-              onClick={() => onNavigateToSection('clients')}
-              className="bg-slate-600 hover:bg-slate-700 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg flex items-center justify-center space-x-3"
-            >
-              <span className="text-xl">📊</span>
-              <span>View All Clients</span>
-          </button>
-            <button
-              onClick={() => onNavigateToSection('reports')}
-              className="bg-slate-600 hover:bg-slate-700 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg flex items-center justify-center space-x-3"
-            >
-              <span className="text-xl">📈</span>
-              <span>System Reports</span>
-          </button>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Platform
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Super Admin Dashboard
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base max-w-xl">
+              Overview of onboarded client businesses on this POS platform.
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={() => void loadClients()}
+            className="border border-[#121c19]/15 hover:bg-white text-[#121c19] px-5 py-2.5 rounded-md text-sm font-semibold self-start"
+          >
+            Refresh
+          </button>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+          <MetricCard title="Total clients" value={String(totalClients)} accent="ink" />
+          <MetricCard title="Active businesses" value={String(activeClients)} accent="teal" />
+          <MetricCard title="On trial" value={String(trialClients)} accent="copper" />
+          <MetricCard title="Suspended" value={String(suspendedClients)} accent="rose" />
         </div>
 
-        {/* Application Updates */}
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-8 w-full">
-          <h2 className="text-2xl font-bold text-slate-800 mb-6">🔄 Application Updates</h2>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
+          <button
+            type="button"
+            onClick={() => onNavigateToSection('onboarding')}
+            className="rounded-xl border border-[#d4dcd8] bg-[#121c19] text-white p-5 text-left hover:bg-[#1a2924] transition-colors"
+          >
+            <p className="font-display text-[11px] font-semibold tracking-[0.18em] uppercase text-[#e0a06a]">
+              Action
+            </p>
+            <p className="font-display text-xl font-bold mt-2">Onboard client</p>
+            <p className="text-sm text-white/55 mt-1">Create a new business and admin login</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateToSection('clients')}
+            className="rounded-xl border border-[#d4dcd8] bg-white p-5 text-left hover:border-[#c4783a]/40 transition-colors"
+          >
+            <p className="font-display text-[11px] font-semibold tracking-[0.18em] uppercase text-[#c4783a]">
+              Clients
+            </p>
+            <p className="font-display text-xl font-bold text-[#121c19] mt-2">View all clients</p>
+            <p className="text-sm text-[#2a3d36]/55 mt-1">
+              {totalClients} onboarded · {activeClients} active
+            </p>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateToSection('reports')}
+            className="rounded-xl border border-[#d4dcd8] bg-white p-5 text-left hover:border-[#c4783a]/40 transition-colors"
+          >
+            <p className="font-display text-[11px] font-semibold tracking-[0.18em] uppercase text-[#c4783a]">
+              Reports
+            </p>
+            <p className="font-display text-xl font-bold text-[#121c19] mt-2">System reports</p>
+            <p className="text-sm text-[#2a3d36]/55 mt-1">Platform analytics and summaries</p>
+          </button>
+        </div>
 
-          {/* Current Version */}
-          <div className="mb-6 p-4 bg-slate-50 rounded-lg">
-            <div className="flex items-center justify-between mb-2">
-              <span className="font-medium text-slate-700">Current Version</span>
-              <span className="px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
-                v{currentVersion || 'Loading...'}
+        <div className="grid grid-cols-1 xl:grid-cols-5 gap-5">
+          <section className="xl:col-span-3 rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+            <div className="px-5 py-4 border-b border-[#e8ecea] flex items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-lg font-bold text-[#121c19]">Onboarded clients</h2>
+                <p className="text-sm text-[#2a3d36]/55 mt-0.5">Most recently created businesses</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigateToSection('clients')}
+                className="text-sm font-semibold text-[#c4783a] hover:text-[#a35f2a]"
+              >
+                See all
+              </button>
+            </div>
+
+            {recentClients.length === 0 ? (
+              <div className="px-5 py-14 text-center">
+                <p className="font-display text-lg font-bold text-[#121c19]">No clients yet</p>
+                <p className="text-sm text-[#2a3d36]/55 mt-1 mb-5">
+                  Onboard your first business to see it here.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onNavigateToSection('onboarding')}
+                  className="bg-[#121c19] text-white px-5 py-2.5 rounded-md text-sm font-semibold"
+                >
+                  Onboard client
+                </button>
+              </div>
+            ) : (
+              <div className="divide-y divide-[#e8ecea]">
+                {recentClients.map((client) => {
+                  const active = client.is_active !== false
+                  const modules = parseBusinessModules(client.modules_enabled, [])
+                  return (
+                    <article key={client.id} className="px-5 py-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold text-[#121c19] truncate">{client.name}</p>
+                          <span
+                            className={`text-[11px] font-semibold px-2 py-0.5 rounded-md border ${
+                              active
+                                ? 'bg-teal-50 text-teal-800 border-teal-200'
+                                : 'bg-amber-50 text-amber-800 border-amber-200'
+                            }`}
+                          >
+                            {active ? 'Active' : 'Suspended'}
+                          </span>
+                          <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] text-[#2a3d36]/70">
+                            {String(client.subscription_status || 'TRIAL').toUpperCase()}
+                          </span>
+                        </div>
+                        <p className="text-sm text-[#2a3d36]/55 mt-1 truncate">
+                          {client.address || 'No address'} · Modules:{' '}
+                          {modules.length ? modules.join(', ') : 'None'}
+                        </p>
+                        <p className="text-xs text-[#2a3d36]/40 mt-1">
+                          Onboarded {formatWhen(client.created_at || client.synced_at)}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onNavigateToSection('clients')}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/15 hover:bg-[#f4f6f5] self-start"
+                      >
+                        Manage
+                      </button>
+                    </article>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="xl:col-span-2 rounded-xl border border-[#d4dcd8] bg-white p-5 space-y-4">
+            <div>
+              <h2 className="font-display text-lg font-bold text-[#121c19]">App version</h2>
+              <p className="text-sm text-[#2a3d36]/55 mt-0.5">Desktop / web release status</p>
+            </div>
+            <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-4 flex items-center justify-between gap-3">
+              <span className="text-sm font-medium text-[#2a3d36]/70">Current</span>
+              <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-white border border-[#d4dcd8] text-[#121c19]">
+                v{currentVersion}
               </span>
             </div>
             {updateInfo?.available && (
-              <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium text-green-800">Update Available!</span>
-                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
-                    v{updateInfo.version}
-                  </span>
-                </div>
+              <div className="rounded-lg border border-teal-200 bg-teal-50 p-4">
+                <p className="font-semibold text-teal-900">Update available · v{updateInfo.version}</p>
                 {updateInfo.body && (
-                  <p className="text-sm text-green-700 mt-2 whitespace-pre-wrap">{updateInfo.body}</p>
-                )}
-                {updateInfo.date && (
-                  <p className="text-xs text-green-600 mt-1">
-                    Released: {new Date(updateInfo.date).toLocaleDateString()}
-                  </p>
+                  <p className="text-sm text-teal-800/80 mt-1 line-clamp-3">{updateInfo.body}</p>
                 )}
               </div>
             )}
-            {updateInfo && !updateInfo.available && (
-              <p className="text-sm text-slate-600 mt-2">✅ You are running the latest version!</p>
-            )}
-          </div>
-
-          {/* Update Actions */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <button
-              onClick={handleCheckForUpdates}
-              disabled={checkingUpdate || installingUpdate}
-              className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>{checkingUpdate ? '⏳' : '🔍'}</span>
-              <span>{checkingUpdate ? 'Checking...' : 'Check for Updates'}</span>
-            </button>
-
-            {updateInfo?.available && (
+            <div className="flex flex-col gap-2">
               <button
-                onClick={handleInstallUpdate}
-                disabled={installingUpdate}
-                className="bg-green-600 hover:bg-green-700 disabled:bg-slate-400 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
+                type="button"
+                onClick={() => void handleCheckForUpdates()}
+                disabled={checkingUpdate || installingUpdate}
+                className="bg-[#121c19] hover:bg-[#1a2924] disabled:opacity-50 text-white py-2.5 rounded-md text-sm font-semibold"
               >
-                <span>{installingUpdate ? '⏳' : '⬇️'}</span>
-                <span>{installingUpdate ? 'Installing...' : `Install v${updateInfo.version}`}</span>
+                {checkingUpdate ? 'Checking…' : 'Check for updates'}
               </button>
-            )}
-          </div>
-
-          {/* Note */}
-          <div className="mt-6 border-t border-slate-200 pt-4">
-            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-              <p className="text-sm text-yellow-800">
-                <strong>⚠️ Note:</strong> Make sure the updater plugin is enabled in <code className="bg-yellow-100 px-1 rounded">tauri.conf.json</code> and your GitHub repository is configured correctly.
-              </p>
+              {updateInfo?.available && (
+                <button
+                  type="button"
+                  onClick={() => void handleInstallUpdate()}
+                  disabled={installingUpdate}
+                  className="border border-teal-300 bg-teal-50 text-teal-900 hover:bg-teal-100 disabled:opacity-50 py-2.5 rounded-md text-sm font-semibold"
+                >
+                  {installingUpdate ? 'Installing…' : `Install v${updateInfo.version}`}
+                </button>
+              )}
             </div>
-          </div>
-        </div>
-
-        {/* Cloud Management */}
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-8 w-full">
-          <h2 className="text-2xl font-bold text-slate-800 mb-6">☁️ Cloud Backup & Sync</h2>
-
-          {/* Sync Status */}
-          <div className="mb-6 p-4 bg-slate-50 rounded-lg">
-            <div className="flex items-center justify-between mb-2">
-              <span className="font-medium text-slate-700">Sync Status</span>
-              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                syncStatus?.cloud_enabled ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-              }`}>
-                {syncStatus?.cloud_enabled ? '🟢 Connected' : '🟡 Offline'}
-              </span>
-            </div>
-            <p className="text-sm text-slate-600">
-              {syncStatus?.message || 'Cloud sync not configured yet'}
-            </p>
-            {syncStatus?.last_sync && (
-              <p className="text-xs text-slate-500 mt-1">
-                Last sync: {new Date(syncStatus.last_sync).toLocaleString()}
-              </p>
-            )}
-          </div>
-
-          {/* Sync Actions */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <button
-              onClick={handleSyncToCloud}
-              disabled={syncing}
-              className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>⬆️</span>
-              <span>{syncing ? 'Syncing...' : 'Backup to Cloud'}</span>
-            </button>
-
-            <button
-              onClick={handleSyncFromCloud}
-              disabled={syncing || !syncStatus?.cloud_enabled}
-              className="bg-green-600 hover:bg-green-700 disabled:bg-slate-400 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>⬇️</span>
-              <span>{syncing ? 'Downloading...' : 'Restore from Cloud'}</span>
-            </button>
-
-            <button
-              onClick={handleFixOrphanedUsers}
-              className="bg-orange-600 hover:bg-orange-700 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>🔧</span>
-              <span>Fix Data Issues</span>
-            </button>
-
-            <button
-              onClick={handleRemoveDuplicates}
-              className="bg-purple-600 hover:bg-purple-700 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>🧹</span>
-              <span>Remove Duplicates</span>
-            </button>
-
-            <button
-              onClick={handleFixUsersWithoutBusinessId}
-              className="bg-teal-600 hover:bg-teal-700 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>🔗</span>
-              <span>Fix Missing Business IDs</span>
-            </button>
-
-            <button
-              onClick={handleFixProductIsActive}
-              className="bg-cyan-600 hover:bg-cyan-700 text-white py-3 px-4 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
-            >
-              <span>🔧</span>
-              <span>Fix Product Visibility</span>
-        </button>
-      </div>
-
-          {/* Setup Instructions */}
-          <div className="border-t border-slate-200 pt-6">
-            <h3 className="font-semibold text-slate-800 mb-3">🚀 Cloud Setup (Coming Soon)</h3>
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-sm text-blue-800 mb-2">
-                <strong>Free Supabase Setup:</strong> We'll add Supabase integration for automatic cloud backup and multi-device sync.
-              </p>
-              <ul className="text-xs text-blue-700 space-y-1 ml-4">
-                <li>• 500MB free database storage</li>
-                <li>• Real-time data synchronization</li>
-                <li>• Automatic backups</li>
-                <li>• Multi-device access</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        {/* Recent Activity */}
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-8 w-full">
-          <h2 className="text-2xl font-bold text-slate-800 mb-6">Recent Activity</h2>
-          <div className="text-center py-12">
-            <div className="text-6xl mb-4">📋</div>
-            <h3 className="text-xl font-semibold text-slate-700 mb-2">No Recent Activity</h3>
-            <p className="text-slate-500">Client onboarding and business activities will appear here</p>
-          </div>
+          </section>
         </div>
       </div>
     </div>
@@ -1706,17 +1717,22 @@ function ClientsManagement({
 }) {
   const [clients, setClients] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all')
 
   useEffect(() => {
-    loadClients()
+    void loadClients()
   }, [refreshTrigger])
 
   const loadClients = async () => {
     try {
-      const businesses = await invoke('get_businesses')
-      setClients(businesses as any[])
+      setLoading(true)
+      const businesses = (await invoke('get_businesses')) as any[]
+      setClients(Array.isArray(businesses) ? businesses : [])
     } catch (error) {
       console.error('Failed to load clients:', error)
+      toast.error(`Failed to load clients: ${error}`)
+      setClients([])
     } finally {
       setLoading(false)
     }
@@ -1724,15 +1740,11 @@ function ClientsManagement({
 
   const updateClientStatus = async (businessId: number, newStatus: string) => {
     try {
-      // Convert string status to boolean for backend
       const isActive = newStatus === 'ACTIVE'
       await invoke('update_business_status', {
-        request: {
-          business_id: businessId,
-          is_active: isActive
-        }
+        request: { business_id: businessId, is_active: isActive },
       })
-      await loadClients() // Refresh the list
+      await loadClients()
       toast.success(`Client ${isActive ? 'activated' : 'suspended'} successfully`)
     } catch (error) {
       console.error('Failed to update client status:', error)
@@ -1741,18 +1753,19 @@ function ClientsManagement({
   }
 
   const deleteClient = async (businessId: number) => {
-    if (!confirm('Are you sure you want to terminate this client? They will lose cloud access but can continue using the local software.')) {
+    if (
+      !confirm(
+        'Terminate this client? They will lose cloud access but can continue using the local software.'
+      )
+    ) {
       return
     }
 
     try {
       await invoke('update_business_status', {
-        request: {
-          business_id: businessId,
-          is_active: false
-        }
+        request: { business_id: businessId, is_active: false },
       })
-      await loadClients() // Refresh the list
+      await loadClients()
       toast.success('Client terminated successfully')
     } catch (error) {
       console.error('Failed to terminate client:', error)
@@ -1760,31 +1773,20 @@ function ClientsManagement({
     }
   }
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'ACTIVE': return 'bg-green-100 text-green-800'
-      case 'SUSPENDED': return 'bg-yellow-100 text-yellow-800'
-      case 'TERMINATED': return 'bg-red-100 text-red-800'
-      default: return 'bg-gray-100 text-gray-800'
-    }
-  }
-
   const viewAdminPassword = async (businessId: number) => {
     try {
-      const result = await invoke('get_business_admin_password', {
-        request: {
-          business_id: businessId
-        }
-      }) as { username: string | null, password: string | null }
+      const result = (await invoke('get_business_admin_password', {
+        request: { business_id: businessId },
+      })) as { username: string | null; password: string | null }
       if (result.password) {
-        toast.success(`Admin Credentials:\n\nUsername: ${result.username}\nPassword: ${result.password}\n\n⚠️ Please share this securely with the client.`, {
-          duration: 12000,
-        })
-      } else {
-        // Password not found - offer to reset it
-        if (confirm('Password not found in database. Would you like to reset it to a new temporary password?')) {
-          resetAdminPassword(businessId)
-        }
+        toast.success(
+          `Admin Credentials:\n\nUsername: ${result.username}\nPassword: ${result.password}\n\nShare this securely with the client.`,
+          { duration: 12000 }
+        )
+      } else if (
+        confirm('Password not found. Reset to a new temporary password?')
+      ) {
+        await resetAdminPassword(businessId)
       }
     } catch (error) {
       console.error('Failed to get admin password:', error)
@@ -1794,22 +1796,21 @@ function ClientsManagement({
 
   const resetAdminPassword = async (businessId: number) => {
     try {
-      // Generate a new temporary password
       const newPassword = `Temp${Math.random().toString(36).slice(-8)}!`
       const passwordHash = btoa(newPassword)
-
-      const result = await invoke('reset_business_admin_password', {
+      const result = (await invoke('reset_business_admin_password', {
         request: {
           business_id: businessId,
           password_hash: passwordHash,
-          temporary_password: newPassword
-        }
-      }) as { username: string | null }
+          temporary_password: newPassword,
+        },
+      })) as { username: string | null }
 
       if (result.username) {
-        toast.success(`Password Reset Successful!\n\nUsername: ${result.username}\nNew Password: ${newPassword}\n\n⚠️ Please share this securely with the client.`, {
-          duration: 12000,
-        })
+        toast.success(
+          `Password reset:\n\nUsername: ${result.username}\nNew Password: ${newPassword}\n\nShare this securely with the client.`,
+          { duration: 12000 }
+        )
       } else {
         toast.error('Failed to reset password. Admin user not found.')
       }
@@ -1820,13 +1821,14 @@ function ClientsManagement({
   }
 
   const deleteAllBusinesses = async () => {
-    if (!confirm('⚠️ WARNING: This will delete ALL businesses and all related data (products, sales, inventory). This action cannot be undone!\n\nAre you absolutely sure you want to proceed?')) {
+    if (
+      !confirm(
+        'WARNING: This deletes ALL businesses and related data. This cannot be undone. Continue?'
+      )
+    ) {
       return
     }
-
-    if (!confirm('This is your last chance. All businesses will be permanently deleted. Continue?')) {
-      return
-    }
+    if (!confirm('Last chance — permanently delete every business?')) return
 
     try {
       await invoke('delete_all_businesses')
@@ -1838,143 +1840,285 @@ function ClientsManagement({
     }
   }
 
+  const formatWhen = (value?: string | null) => {
+    if (!value) return 'Never'
+    const d = new Date(value)
+    if (Number.isNaN(d.getTime())) return String(value)
+    return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  }
+
+  const activeCount = clients.filter((c) => c.is_active !== false).length
+  const suspendedCount = clients.length - activeCount
+
+  const filteredClients = clients.filter((client) => {
+    const active = client.is_active !== false
+    if (statusFilter === 'active' && !active) return false
+    if (statusFilter === 'suspended' && active) return false
+    const q = query.trim().toLowerCase()
+    if (!q) return true
+    const haystack = [
+      client.name,
+      client.client_id,
+      client.email,
+      client.address,
+      client.phone,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    return haystack.includes(q)
+  })
+
   if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-slate-600">Loading clients...</p>
-          </div>
-        </div>
-      </div>
-    )
+    return <PageLoader label="Loading clients…" />
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <div className="mb-8 flex justify-between items-center">
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-slate-800 mb-2">Client Businesses</h1>
-            <p className="text-slate-600 text-lg">Manage all your client businesses ({clients.length} total)</p>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Platform
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              Client Businesses
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base">
+              Manage onboarded businesses · {clients.length} total · {activeCount} active
+            </p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-2">
             {clients.length > 0 && (
               <button
-                onClick={deleteAllBusinesses}
-                className="bg-red-600 hover:bg-red-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
+                type="button"
+                onClick={() => void deleteAllBusinesses()}
+                className="border border-rose-300 text-rose-700 hover:bg-rose-50 px-4 py-2.5 rounded-md text-sm font-semibold"
               >
-                🗑️ Delete All Businesses
+                Delete all
               </button>
             )}
             <button
-              onClick={onNavigateToOnboarding}
-              className="bg-blue-600 hover:bg-blue-700 text-white py-3 px-6 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg"
+              type="button"
+              onClick={() => void loadClients()}
+              className="border border-[#121c19]/15 hover:bg-white text-[#121c19] px-4 py-2.5 rounded-md text-sm font-semibold"
             >
-              ➕ Onboard New Client
+              Refresh
             </button>
+            <button
+              type="button"
+              onClick={onNavigateToOnboarding}
+              className="bg-[#121c19] hover:bg-[#1a2924] text-white px-5 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Onboard client
+            </button>
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <MetricCard title="Total clients" value={String(clients.length)} accent="ink" />
+          <MetricCard title="Active" value={String(activeCount)} accent="teal" />
+          <MetricCard title="Suspended" value={String(suspendedCount)} accent="rose" />
+        </div>
+
+        <div className="mb-5 flex flex-col sm:flex-row gap-3 sm:items-center">
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name, email, ID, or address…"
+            className="flex-1 rounded-md border border-[#d4dcd8] bg-white px-4 py-2.5 text-sm text-[#121c19] placeholder:text-[#2a3d36]/40 focus:outline-none focus:ring-2 focus:ring-[#c4783a]/30"
+          />
+          <div className="flex rounded-md border border-[#d4dcd8] bg-white p-1 gap-1">
+            {(
+              [
+                ['all', 'All'],
+                ['active', 'Active'],
+                ['suspended', 'Suspended'],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setStatusFilter(key)}
+                className={`px-3 py-1.5 rounded text-xs font-semibold transition-colors ${
+                  statusFilter === key
+                    ? 'bg-[#121c19] text-white'
+                    : 'text-[#2a3d36]/70 hover:bg-[#f4f6f5]'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
 
         {clients.length === 0 ? (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-12 w-full">
-            <div className="text-center">
-              <div className="text-7xl mb-6">🏢</div>
-              <h2 className="text-3xl font-bold text-slate-800 mb-3">No Clients Yet</h2>
-              <p className="text-slate-600 mb-8 text-lg">Start building your business by onboarding your first client</p>
+          <div className="rounded-xl border border-[#d4dcd8] bg-white px-6 py-16 text-center">
+            <p className="font-display text-xl font-bold text-[#121c19]">No clients yet</p>
+            <p className="text-sm text-[#2a3d36]/55 mt-2 mb-6 max-w-md mx-auto">
+              Onboard your first business to start managing clients on this platform.
+            </p>
             <button
+              type="button"
               onClick={onNavigateToOnboarding}
-              className="bg-blue-600 hover:bg-blue-700 text-white py-4 px-8 rounded-xl font-semibold transition-all duration-200 hover:shadow-lg text-lg"
+              className="bg-[#121c19] text-white px-5 py-2.5 rounded-md text-sm font-semibold"
             >
-              ➕ Onboard First Client
+              Onboard first client
             </button>
-            </div>
+          </div>
+        ) : filteredClients.length === 0 ? (
+          <div className="rounded-xl border border-[#d4dcd8] bg-white px-6 py-14 text-center">
+            <p className="font-display text-lg font-bold text-[#121c19]">No matches</p>
+            <p className="text-sm text-[#2a3d36]/55 mt-1">Try a different search or filter.</p>
           </div>
         ) : (
-          <div className="space-y-4 w-full">
-            {clients.map((client) => (
-              <div key={client.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 w-full">
-                <div className="flex justify-between items-start mb-4">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-2">
-                      <h3 className="text-xl font-bold text-slate-800">{client.name}</h3>
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(client.is_active ? 'ACTIVE' : 'SUSPENDED')}`}>
-                        {client.is_active ? 'ACTIVE' : 'SUSPENDED'}
-                      </span>
+          <div className="space-y-3">
+            {filteredClients.map((client) => {
+              const active = client.is_active !== false
+              const modules = parseBusinessModules(client.modules_enabled, [])
+              return (
+                <article
+                  key={client.id}
+                  className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden"
+                >
+                  <div className="p-5 sm:p-6 flex flex-col xl:flex-row xl:items-start gap-5 xl:justify-between">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
+                        <h3 className="font-display text-xl font-bold text-[#121c19] truncate">
+                          {client.name}
+                        </h3>
+                        <span
+                          className={`text-[11px] font-semibold px-2 py-0.5 rounded-md border ${
+                            active
+                              ? 'bg-teal-50 text-teal-800 border-teal-200'
+                              : 'bg-amber-50 text-amber-800 border-amber-200'
+                          }`}
+                        >
+                          {active ? 'Active' : 'Suspended'}
+                        </span>
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] text-[#2a3d36]/70">
+                          {String(client.subscription_status || 'TRIAL').toUpperCase()}
+                        </span>
+                      </div>
+
+                      <p className="text-xs font-mono text-[#2a3d36]/45 mb-3 break-all">
+                        {client.client_id || `ID ${client.id}`}
+                      </p>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-sm text-[#2a3d36]/70">
+                        <p>
+                          <span className="text-[#2a3d36]/40">Address · </span>
+                          {client.address || '—'}
+                        </p>
+                        <p>
+                          <span className="text-[#2a3d36]/40">Email · </span>
+                          {client.email || '—'}
+                        </p>
+                        <p>
+                          <span className="text-[#2a3d36]/40">Phone · </span>
+                          {client.phone || '—'}
+                        </p>
+                        <p>
+                          <span className="text-[#2a3d36]/40">Last sync · </span>
+                          {formatWhen(client.last_sync)}
+                        </p>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {modules.length === 0 ? (
+                          <span className="text-xs text-[#2a3d36]/40">No modules</span>
+                        ) : (
+                          modules.map((mod) => (
+                            <span
+                              key={mod}
+                              className="text-[11px] font-semibold px-2 py-0.5 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] text-[#121c19]"
+                            >
+                              {mod}
+                            </span>
+                          ))
+                        )}
+                      </div>
                     </div>
-                    <p className="text-slate-600 mb-1">Client ID: {client.client_id}</p>
-                    <p className="text-slate-600 mb-1">📍 {client.address}</p>
-                    <p className="text-slate-600">📧 {client.email || 'No email'}</p>
-                  </div>
 
-                  <div className="flex space-x-2 flex-wrap">
-                    <button
-                      onClick={() => viewAdminPassword(client.id)}
-                      className="px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg font-medium transition-colors text-sm"
-                      title="View Admin Password"
-                    >
-                      🔑 View Password
-                    </button>
-                    <button
-                      onClick={() => resetAdminPassword(client.id)}
-                      className="px-3 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg font-medium transition-colors text-sm"
-                      title="Reset Admin Password"
-                    >
-                      🔄 Reset Password
-                    </button>
-                    {client.is_active ? (
-                      <>
-                        <button
-                          onClick={() => updateClientStatus(client.id, 'SUSPENDED')}
-                          className="px-3 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg font-medium transition-colors text-sm"
-                        >
-                          Suspend
-                        </button>
-                        <button
-                          onClick={() => deleteClient(client.id)}
-                          className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors text-sm"
-                        >
-                          Terminate
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => updateClientStatus(client.id, 'ACTIVE')}
-                          className="px-3 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium transition-colors text-sm"
-                        >
-                          Activate
-                        </button>
-                        <button
-                          onClick={() => deleteClient(client.id)}
-                          className="px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors text-sm"
-                        >
-                          Restore
-                        </button>
-                      </>
-                    )}
+                    <div className="flex flex-wrap gap-2 xl:justify-end xl:max-w-sm xl:shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void viewAdminPassword(client.id)}
+                        className="px-3 py-2 rounded-md text-xs font-semibold border border-[#121c19]/15 hover:bg-[#f4f6f5] text-[#121c19]"
+                      >
+                        View password
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void resetAdminPassword(client.id)}
+                        className="px-3 py-2 rounded-md text-xs font-semibold border border-[#121c19]/15 hover:bg-[#f4f6f5] text-[#121c19]"
+                      >
+                        Reset password
+                      </button>
+                      {active ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void updateClientStatus(client.id, 'SUSPENDED')}
+                            className="px-3 py-2 rounded-md text-xs font-semibold border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                          >
+                            Suspend
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void deleteClient(client.id)}
+                            className="px-3 py-2 rounded-md text-xs font-semibold border border-rose-300 bg-rose-50 text-rose-800 hover:bg-rose-100"
+                          >
+                            Terminate
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void updateClientStatus(client.id, 'ACTIVE')}
+                            className="px-3 py-2 rounded-md text-xs font-semibold border border-teal-300 bg-teal-50 text-teal-900 hover:bg-teal-100"
+                          >
+                            Activate
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void deleteClient(client.id)}
+                            className="px-3 py-2 rounded-md text-xs font-semibold border border-rose-300 bg-rose-50 text-rose-800 hover:bg-rose-100"
+                          >
+                            Terminate
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                </div>
-
-                <div className="flex justify-between items-center text-sm text-slate-500">
-                  <span>Modules: {client.modules_enabled ? parseBusinessModules(client.modules_enabled).join(', ') : 'None'}</span>
-                  <span>Status: {client.subscription_status || 'TRIAL'}</span>
-                  <span>Last Sync: {client.last_sync || 'Never'}</span>
-                </div>
-              </div>
-            ))}
+                </article>
+              )
+            })}
           </div>
         )}
 
         {clients.length > 0 && (
-          <div className="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-4 w-full">
-            <h4 className="font-semibold text-blue-800 mb-2">💡 Client Management Notes</h4>
-            <ul className="text-blue-700 text-sm space-y-1">
-              <li>• <strong>Suspend:</strong> Temporarily blocks cloud sync, client gets notification on next sync</li>
-              <li>• <strong>Terminate:</strong> Permanently blocks cloud access, client keeps local software</li>
-              <li>• <strong>Reactivate:</strong> Restores full cloud access for suspended clients</li>
-              <li>• <strong>Local Data:</strong> Client's local database remains intact and functional</li>
+          <div className="mt-6 rounded-xl border border-[#d4dcd8] bg-white p-5">
+            <h4 className="font-display text-sm font-bold text-[#121c19] mb-2">Management notes</h4>
+            <ul className="text-sm text-[#2a3d36]/65 space-y-1.5">
+              <li>
+                <span className="font-semibold text-[#121c19]">Suspend</span> — temporarily blocks
+                cloud sync; client is notified on next sync.
+              </li>
+              <li>
+                <span className="font-semibold text-[#121c19]">Terminate</span> — permanently blocks
+                cloud access; local software still works.
+              </li>
+              <li>
+                <span className="font-semibold text-[#121c19]">Activate</span> — restores full cloud
+                access for suspended clients.
+              </li>
+              <li>
+                <span className="font-semibold text-[#121c19]">Local data</span> — the client’s local
+                database stays intact.
+              </li>
             </ul>
           </div>
         )}
@@ -1999,8 +2143,8 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
     selectedModules: [] as string[],
 
     // Step 3: Branding
-    primaryColor: '#3B82F6',
-    secondaryColor: '#1F2937',
+    primaryColor: '#c4783a',
+    secondaryColor: '#121c19',
 
     // Step 4: Admin Account
     adminName: '',
@@ -2012,14 +2156,6 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
   })
 
   const totalSteps = 5
-
-  const steps = [
-    { number: 1, title: 'Business Info', icon: '🏢' },
-    { number: 2, title: 'Modules', icon: '📦' },
-    { number: 3, title: 'Branding', icon: '🎨' },
-    { number: 4, title: 'Pricing', icon: '💰' },
-    { number: 5, title: 'Admin Setup', icon: '👤' }
-  ]
 
   const updateFormData = (field: string, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }))
@@ -2206,8 +2342,8 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
         phone: '',
         email: '',
         selectedModules: [],
-        primaryColor: '#3B82F6',
-        secondaryColor: '#1F2937',
+        primaryColor: '#c4783a',
+        secondaryColor: '#121c19',
         adminName: '',
         adminUsername: '',
         adminEmail: '',
@@ -2224,98 +2360,117 @@ function ClientOnboarding({ onComplete, currentUser }: { onComplete?: () => void
     }
   }
 
+  const stepsMeta = [
+    { number: 1, title: 'Business' },
+    { number: 2, title: 'Modules' },
+    { number: 3, title: 'Branding' },
+    { number: 4, title: 'Pricing' },
+    { number: 5, title: 'Admin' },
+  ]
+
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">Client Onboarding Wizard</h1>
-          <p className="text-slate-600 text-lg">Set up a new business account for your client</p>
-        </div>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-4xl mx-auto">
+        <header className="mb-6">
+          <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+            Platform
+          </p>
+          <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-[#121c19]">
+            Onboard client
+          </h1>
+          <p className="mt-2 text-[#2a3d36]/70 text-base">
+            Set up a new business account in {totalSteps} steps.
+          </p>
+        </header>
 
-        {/* Progress Indicator */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            {steps.map((step, index) => (
-              <div key={step.number} className="flex items-center">
-                <div className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold ${
-                  currentStep > step.number
-                    ? 'bg-green-500 text-white'
-                    : currentStep === step.number
-                    ? 'bg-blue-500 text-white'
-                    : 'bg-slate-300 text-slate-600'
-                }`}>
-                  {currentStep > step.number ? '✓' : step.icon}
-                </div>
-                <div className="ml-3">
-                  <div className={`text-sm font-medium ${
-                    currentStep >= step.number ? 'text-slate-800' : 'text-slate-500'
-                  }`}>
-                    Step {step.number}
+        <div className="mb-6 rounded-xl border border-[#d4dcd8] bg-white p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+              Step {currentStep} of {totalSteps}
+            </p>
+            <p className="text-xs font-semibold text-[#c4783a]">
+              {stepsMeta[currentStep - 1]?.title}
+            </p>
+          </div>
+          <div className="h-1.5 rounded-full bg-[#e8ecea] overflow-hidden mb-4">
+            <div
+              className="h-full bg-[#c4783a] transition-all duration-300"
+              style={{ width: `${(currentStep / totalSteps) * 100}%` }}
+            />
+          </div>
+          <ol className="grid grid-cols-5 gap-1 sm:gap-2">
+            {stepsMeta.map((step) => {
+              const done = currentStep > step.number
+              const active = currentStep === step.number
+              return (
+                <li key={step.number} className="text-center min-w-0">
+                  <div
+                    className={`mx-auto mb-1.5 h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold border ${
+                      done
+                        ? 'bg-teal-600 border-teal-600 text-white'
+                        : active
+                          ? 'bg-[#121c19] border-[#121c19] text-white'
+                          : 'bg-[#f4f6f5] border-[#d4dcd8] text-[#2a3d36]/40'
+                    }`}
+                  >
+                    {done ? '✓' : step.number}
                   </div>
-                  <div className={`text-xs ${
-                    currentStep >= step.number ? 'text-slate-600' : 'text-slate-400'
-                  }`}>
+                  <p
+                    className={`text-[10px] sm:text-xs font-semibold truncate ${
+                      active || done ? 'text-[#121c19]' : 'text-[#2a3d36]/35'
+                    }`}
+                  >
                     {step.title}
-                  </div>
-                </div>
-                {index < steps.length - 1 && (
-                  <div className={`flex-1 h-0.5 mx-4 ${
-                    currentStep > step.number ? 'bg-green-500' : 'bg-slate-300'
-                  }`} />
-                )}
-              </div>
-            ))}
-          </div>
+                  </p>
+                </li>
+              )
+            })}
+          </ol>
         </div>
 
-        {/* Step Content */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 w-full">
-          <div className="p-8 max-h-[70vh] overflow-y-auto">
-            {renderStepContent()}
-          </div>
+        <div className="rounded-xl border border-[#d4dcd8] bg-white">
+          <div className="p-5 sm:p-8">{renderStepContent()}</div>
         </div>
 
-        {/* Navigation */}
-        <div className="flex justify-between mt-8">
+        <div className="flex flex-col-reverse sm:flex-row justify-between gap-3 mt-5">
           <button
+            type="button"
             onClick={prevStep}
             disabled={currentStep === 1}
-            className="px-6 py-3 bg-slate-200 hover:bg-slate-300 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 rounded-lg font-medium transition-colors"
+            className="px-5 py-2.5 rounded-md text-sm font-semibold border border-[#121c19]/15 text-[#121c19] hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            ← Previous
+            Previous
           </button>
 
           {currentStep < totalSteps ? (
             <button
+              type="button"
               onClick={nextStep}
               disabled={!canProceed()}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
+              className="px-6 py-2.5 rounded-md text-sm font-semibold bg-[#121c19] hover:bg-[#1a2924] disabled:opacity-40 disabled:cursor-not-allowed text-white"
             >
-              Next →
-          </button>
+              Continue
+            </button>
           ) : (
-        <button
-              onClick={handleCompleteSetup}
+            <button
+              type="button"
+              onClick={() => void handleCompleteSetup()}
               disabled={!canProceed() || isSubmitting}
-              className="px-8 py-3 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
+              className="px-6 py-2.5 rounded-md text-sm font-semibold bg-[#c4783a] hover:bg-[#a35f2a] disabled:opacity-40 disabled:cursor-not-allowed text-white"
             >
-              {isSubmitting ? '🚀 Creating Business...' : '🚀 Complete Setup'}
+              {isSubmitting ? 'Creating business…' : 'Complete setup'}
             </button>
           )}
         </div>
       </div>
 
-      {/* Success Modal */}
       {showSuccessModal && createdBusiness && (
         <BusinessCreationSuccessModal
           business={createdBusiness}
           onClose={() => {
             setShowSuccessModal(false)
             setCreatedBusiness(null)
-            if (onComplete) {
-              onComplete()
-            }
+            if (onComplete) onComplete()
           }}
         />
       )}
@@ -2328,90 +2483,71 @@ function BusinessCreationSuccessModal({ business, onClose }: {
   onClose: () => void
 }) {
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
-        {/* Header */}
-        <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-6 rounded-t-2xl">
-          <div className="flex items-center justify-center mb-4">
-            <div className="w-16 h-16 bg-white bg-opacity-20 rounded-full flex items-center justify-center">
-              <span className="text-3xl">🎉</span>
-            </div>
-          </div>
-          <h2 className="text-2xl font-bold text-center mb-2">Business Created Successfully!</h2>
-          <p className="text-green-100 text-center text-sm">Your client is now ready to start using their POS system</p>
+    <div className="fixed inset-0 bg-[#121c19]/55 backdrop-blur-[2px] flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl border border-[#d4dcd8] shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+        <div className="bg-[#121c19] text-white p-6 rounded-t-xl">
+          <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#e0a06a] mb-2 text-center">
+            Success
+          </p>
+          <h2 className="font-display text-2xl font-bold text-center mb-1">Business created</h2>
+          <p className="text-white/60 text-center text-sm">
+            Share the admin login with your client to get started.
+          </p>
         </div>
 
-        {/* Content */}
-        <div className="p-6">
-          <div className="space-y-4 mb-6">
-            <div className="bg-slate-50 rounded-lg p-4">
-              <h3 className="font-semibold text-slate-800 mb-3 flex items-center">
-                <span className="text-lg mr-2">🏢</span>
-                Business Details
-              </h3>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Business Name:</span>
-                  <span className="font-medium text-slate-800">{business.name}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Client ID:</span>
-                  <span className="font-mono text-slate-800">{business.clientId}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Total Price:</span>
-                  <span className="font-bold text-green-600">₦{business.price.toLocaleString()}</span>
-                </div>
-              </div>
+        <div className="p-6 space-y-4">
+          <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-4 space-y-2 text-sm">
+            <div className="flex justify-between gap-3">
+              <span className="text-[#2a3d36]/55">Business</span>
+              <span className="font-semibold text-[#121c19] text-right">{business.name}</span>
             </div>
-
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <h3 className="font-semibold text-blue-800 mb-3 flex items-center">
-                <span className="text-lg mr-2">👤</span>
-                Admin Account Created
-              </h3>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-blue-700">Username:</span>
-                  <span className="font-mono font-medium text-blue-800">{business.adminUsername}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-blue-700">Password:</span>
-                  <span className="font-mono font-medium text-blue-800">{business.adminPassword}</span>
-                </div>
-              </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-[#2a3d36]/55">Client ID</span>
+              <span className="font-mono text-xs text-[#121c19] text-right break-all">{business.clientId}</span>
             </div>
-
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-              <div className="flex items-start">
-                <span className="text-amber-600 text-xl mr-3 mt-0.5">⚠️</span>
-                <div>
-                  <h4 className="font-semibold text-amber-800 mb-1">Important</h4>
-                  <p className="text-amber-700 text-sm">
-                    Please provide these credentials to your client. They should change their password after first login for security.
-                  </p>
-                </div>
-              </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-[#2a3d36]/55">Package</span>
+              <span className="font-bold text-[#c4783a]">₦{Number(business.price || 0).toLocaleString()}</span>
             </div>
           </div>
 
-          <div className="flex space-x-3">
+          <div className="rounded-lg border border-teal-200 bg-teal-50 p-4 space-y-2 text-sm">
+            <p className="font-semibold text-teal-900 mb-1">Admin account</p>
+            <div className="flex justify-between gap-3">
+              <span className="text-teal-800/70">Username</span>
+              <span className="font-mono font-medium text-teal-950">{business.adminUsername}</span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-teal-800/70">Password</span>
+              <span className="font-mono font-medium text-teal-950">{business.adminPassword}</span>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <p className="font-semibold text-amber-900 text-sm mb-1">Important</p>
+            <p className="text-amber-800/80 text-sm">
+              Give these credentials to your client. They should change the password after first login.
+            </p>
+          </div>
+
+          <div className="flex gap-2 pt-1">
             <button
+              type="button"
               onClick={onClose}
-              className="flex-1 bg-slate-600 hover:bg-slate-700 text-white py-3 px-4 rounded-lg font-medium transition-colors"
+              className="flex-1 border border-[#121c19]/15 hover:bg-[#f4f6f5] text-[#121c19] py-2.5 rounded-md text-sm font-semibold"
             >
               Close
             </button>
             <button
+              type="button"
               onClick={() => {
-                // Copy credentials to clipboard
                 const credentials = `Business: ${business.name}\nClient ID: ${business.clientId}\nUsername: ${business.adminUsername}\nPassword: ${business.adminPassword}`
-                navigator.clipboard.writeText(credentials)
-                toast.success('Credentials copied to clipboard!')
+                void navigator.clipboard.writeText(credentials)
+                toast.success('Credentials copied')
               }}
-              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-lg font-medium transition-colors"
+              className="flex-1 bg-[#121c19] hover:bg-[#1a2924] text-white py-2.5 rounded-md text-sm font-semibold"
             >
-              📋 Copy Details
+              Copy details
             </button>
           </div>
         </div>
@@ -2424,202 +2560,272 @@ function SystemReports() {
   const [loading, setLoading] = useState(true)
   const [summary, setSummary] = useState<any>(null)
   const [dateRange, setDateRange] = useState({
-    start: new Date(new Date().setDate(1)).toISOString().split('T')[0], // First day of month
-    end: new Date().toISOString().split('T')[0] // Today
+    start: new Date(new Date().setDate(1)).toISOString().split('T')[0],
+    end: new Date().toISOString().split('T')[0],
   })
 
   useEffect(() => {
-    loadSummary()
-  }, [dateRange])
+    void loadSummary()
+  }, [dateRange.start, dateRange.end])
 
   const loadSummary = async () => {
     try {
       setLoading(true)
-      const result = await invoke('get_system_revenue_summary', {
+      const result = (await invoke('get_system_revenue_summary', {
         start_date: dateRange.start,
-        end_date: dateRange.end
-      }) as any
+        end_date: dateRange.end,
+      })) as any
       setSummary(result)
     } catch (error) {
       console.error('Failed to load system summary:', error)
-      toast.error('Failed to load system reports')
+      toast.error(`Failed to load system reports: ${error}`)
+      setSummary(null)
     } finally {
       setLoading(false)
     }
   }
 
-  if (loading) {
-    return (
-      <div className="flex-1 overflow-auto bg-slate-50">
-        <div className="p-8 w-full">
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p className="text-slate-600">Loading system reports...</p>
-          </div>
-        </div>
-      </div>
-    )
+  const money = (n: number | undefined) =>
+    `₦${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+
+  if (loading && !summary) {
+    return <PageLoader label="Loading system reports…" />
   }
 
   return (
-    <div className="flex-1 overflow-auto bg-slate-50">
-      <div className="p-8 w-full">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-800 mb-2">System Reports</h1>
-          <p className="text-slate-600 text-lg">View system-wide analytics and performance metrics</p>
-        </div>
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Platform
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl xl:text-4xl font-bold tracking-tight text-[#121c19]">
+              System Reports
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70 text-base">
+              Platform-wide revenue across all onboarded clients.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadSummary()}
+            disabled={loading}
+            className="border border-[#121c19]/15 hover:bg-white disabled:opacity-50 text-[#121c19] px-5 py-2.5 rounded-md text-sm font-semibold self-start"
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </header>
 
-        {/* Date Range Filter */}
-        <div className="mb-6 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <div className="flex gap-4 items-end">
-            <div className="flex-1">
-              <label className="block text-sm font-medium text-slate-700 mb-2">Start Date</label>
+        <div className="mb-6 rounded-xl border border-[#d4dcd8] bg-white p-4 sm:p-5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:items-end">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+                From
+              </label>
               <input
                 type="date"
                 value={dateRange.start}
                 onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2.5 border border-[#d4dcd8] rounded-md bg-white text-sm text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/30"
               />
             </div>
-            <div className="flex-1">
-              <label className="block text-sm font-medium text-slate-700 mb-2">End Date</label>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+                To
+              </label>
               <input
                 type="date"
                 value={dateRange.end}
                 onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2.5 border border-[#d4dcd8] rounded-md bg-white text-sm text-[#121c19] focus:outline-none focus:ring-2 focus:ring-[#c4783a]/30"
               />
             </div>
-            <button
-              onClick={loadSummary}
-              className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
-            >
-              🔄 Refresh
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const end = new Date().toISOString().split('T')[0]
+                  const start = new Date(new Date().setDate(1)).toISOString().split('T')[0]
+                  setDateRange({ start, end })
+                }}
+                className="px-3 py-2.5 rounded-md text-xs font-semibold border border-[#d4dcd8] hover:bg-[#f4f6f5] text-[#121c19]"
+              >
+                This month
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const end = new Date()
+                  const start = new Date()
+                  start.setDate(end.getDate() - 6)
+                  setDateRange({
+                    start: start.toISOString().split('T')[0],
+                    end: end.toISOString().split('T')[0],
+                  })
+                }}
+                className="px-3 py-2.5 rounded-md text-xs font-semibold border border-[#d4dcd8] hover:bg-[#f4f6f5] text-[#121c19]"
+              >
+                Last 7 days
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Summary Cards */}
-        {summary && (
+        {!summary ? (
+          <div className="rounded-xl border border-[#d4dcd8] bg-white px-6 py-14 text-center">
+            <p className="font-display text-lg font-bold text-[#121c19]">Couldn’t load reports</p>
+            <p className="text-sm text-[#2a3d36]/55 mt-1 mb-5">Check your connection and try again.</p>
+            <button
+              type="button"
+              onClick={() => void loadSummary()}
+              className="bg-[#121c19] text-white px-5 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-              <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-6 text-white">
-                <div className="text-3xl mb-2">💰</div>
-                <div className="text-2xl font-bold mb-1">₦{summary.total_revenue?.toLocaleString() || '0'}</div>
-                <div className="text-blue-100 text-sm">Total Revenue ({dateRange.start} to {dateRange.end})</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
+              <MetricCard
+                title="Period revenue"
+                value={money(summary.total_revenue)}
+                hint={`${dateRange.start} → ${dateRange.end}`}
+                accent="copper"
+              />
+              <MetricCard
+                title="Transactions"
+                value={String(summary.total_transactions || 0)}
+                accent="ink"
+              />
+              <MetricCard
+                title="Active clients"
+                value={String(summary.total_businesses || 0)}
+                accent="teal"
+              />
+              <MetricCard
+                title="Avg per client"
+                value={money(summary.average_revenue_per_business)}
+                accent="rose"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+              <div className="rounded-xl border border-[#d4dcd8] bg-white p-5">
+                <p className="text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+                  Today
+                </p>
+                <p className="font-display text-3xl font-bold text-[#121c19] mt-2">
+                  {money(summary.today_revenue)}
+                </p>
               </div>
-              <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-6 text-white">
-                <div className="text-3xl mb-2">📊</div>
-                <div className="text-2xl font-bold mb-1">{summary.total_transactions || 0}</div>
-                <div className="text-green-100 text-sm">Total Transactions</div>
-              </div>
-              <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl shadow-lg p-6 text-white">
-                <div className="text-3xl mb-2">🏢</div>
-                <div className="text-2xl font-bold mb-1">{summary.total_businesses || 0}</div>
-                <div className="text-purple-100 text-sm">Active Clients</div>
-              </div>
-              <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl shadow-lg p-6 text-white">
-                <div className="text-3xl mb-2">📈</div>
-                <div className="text-2xl font-bold mb-1">₦{summary.average_revenue_per_business?.toLocaleString() || '0'}</div>
-                <div className="text-orange-100 text-sm">Avg Revenue per Client</div>
+              <div className="rounded-xl border border-[#d4dcd8] bg-white p-5">
+                <p className="text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+                  This month
+                </p>
+                <p className="font-display text-3xl font-bold text-[#121c19] mt-2">
+                  {money(summary.month_revenue)}
+                </p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-                <h3 className="text-lg font-bold text-slate-800 mb-4">📅 Today's Revenue</h3>
-                <div className="text-3xl font-bold text-green-600">₦{summary.today_revenue?.toLocaleString() || '0'}</div>
+            <section className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+              <div className="px-5 py-4 border-b border-[#e8ecea]">
+                <h2 className="font-display text-lg font-bold text-[#121c19]">Client performance</h2>
+                <p className="text-sm text-[#2a3d36]/55 mt-0.5">
+                  Revenue by onboarded business for the selected range
+                </p>
               </div>
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-                <h3 className="text-lg font-bold text-slate-800 mb-4">📆 This Month's Revenue</h3>
-                <div className="text-3xl font-bold text-blue-600">₦{summary.month_revenue?.toLocaleString() || '0'}</div>
-              </div>
-            </div>
 
-            {/* Client Performance */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-6 border-b border-slate-200">
-                <h2 className="text-xl font-bold text-slate-800">Client Performance</h2>
-                <p className="text-slate-600 text-sm mt-1">Revenue by client business</p>
-              </div>
-              <div className="md:hidden divide-y divide-slate-200">
-                {summary.business_revenue && summary.business_revenue.length > 0 ? (
-                  summary.business_revenue.map((business: any, index: number) => (
+              <div className="md:hidden divide-y divide-[#e8ecea]">
+                {(summary.business_revenue || []).length === 0 ? (
+                  <p className="px-5 py-10 text-center text-sm text-[#2a3d36]/50">
+                    No client data for this range
+                  </p>
+                ) : (
+                  (summary.business_revenue || []).map((business: any, index: number) => (
                     <div key={business.business_id} className="p-4">
                       <div className="flex items-center gap-3 mb-3">
-                        <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                          <span className="text-blue-600 font-bold text-sm">{index + 1}</span>
+                        <div className="w-8 h-8 rounded-full bg-[#f4f6f5] border border-[#d4dcd8] flex items-center justify-center shrink-0">
+                          <span className="text-[#121c19] font-bold text-xs">{index + 1}</span>
                         </div>
-                        <p className="font-medium text-slate-800">{business.business_name}</p>
+                        <p className="font-semibold text-[#121c19]">{business.business_name}</p>
                       </div>
                       <dl className="grid grid-cols-2 gap-3 text-sm">
                         <div>
-                          <dt className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Revenue</dt>
-                          <dd className="font-semibold text-slate-800">₦{business.revenue?.toLocaleString() || '0'}</dd>
+                          <dt className="text-[10px] uppercase tracking-wide text-[#2a3d36]/40 font-semibold">
+                            Revenue
+                          </dt>
+                          <dd className="font-semibold text-[#121c19]">{money(business.revenue)}</dd>
                         </div>
                         <div>
-                          <dt className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Transactions</dt>
-                          <dd className="text-slate-700">{business.transactions || 0}</dd>
-                        </div>
-                        <div className="col-span-2">
-                          <dt className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Avg per transaction</dt>
-                          <dd className="text-slate-700">
-                            ₦{business.transactions > 0 ? (business.revenue / business.transactions).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '0'}
-                          </dd>
+                          <dt className="text-[10px] uppercase tracking-wide text-[#2a3d36]/40 font-semibold">
+                            Sales
+                          </dt>
+                          <dd className="text-[#2a3d36]/70">{business.transactions || 0}</dd>
                         </div>
                       </dl>
                     </div>
                   ))
-                ) : (
-                  <p className="px-6 py-8 text-center text-slate-500">
-                    No revenue data available for the selected date range
-                  </p>
                 )}
               </div>
+
               <div className="hidden md:block overflow-x-auto">
                 <table className="w-full">
-                  <thead className="bg-slate-50">
+                  <thead className="bg-[#f4f6f5]">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Business</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-slate-700 uppercase">Revenue</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-slate-700 uppercase">Transactions</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-slate-700 uppercase">Avg per Transaction</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+                        Business
+                      </th>
+                      <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+                        Revenue
+                      </th>
+                      <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+                        Transactions
+                      </th>
+                      <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-[#2a3d36]/45">
+                        Avg / sale
+                      </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {summary.business_revenue && summary.business_revenue.length > 0 ? (
-                      summary.business_revenue.map((business: any, index: number) => (
-                        <tr key={business.business_id} className="hover:bg-slate-50">
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="flex items-center">
-                              <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center mr-3">
-                                <span className="text-blue-600 font-bold">{index + 1}</span>
+                  <tbody className="divide-y divide-[#e8ecea]">
+                    {(summary.business_revenue || []).length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-5 py-10 text-center text-sm text-[#2a3d36]/50">
+                          No client data for this range
+                        </td>
+                      </tr>
+                    ) : (
+                      (summary.business_revenue || []).map((business: any, index: number) => (
+                        <tr key={business.business_id} className="hover:bg-[#f4f6f5]/70">
+                          <td className="px-5 py-3.5">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-[#f4f6f5] border border-[#d4dcd8] flex items-center justify-center">
+                                <span className="text-[#121c19] font-bold text-xs">{index + 1}</span>
                               </div>
-                              <div className="font-medium text-slate-800">{business.business_name}</div>
+                              <span className="font-semibold text-[#121c19]">{business.business_name}</span>
                             </div>
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-right font-semibold text-slate-800">
-                            ₦{business.revenue?.toLocaleString() || '0'}
+                          <td className="px-5 py-3.5 text-right font-semibold text-[#121c19]">
+                            {money(business.revenue)}
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-right text-slate-600">
+                          <td className="px-5 py-3.5 text-right text-[#2a3d36]/70">
                             {business.transactions || 0}
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-right text-slate-600">
-                            ₦{business.transactions > 0 ? (business.revenue / business.transactions).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '0'}
+                          <td className="px-5 py-3.5 text-right text-[#2a3d36]/70">
+                            {money(
+                              business.transactions > 0
+                                ? business.revenue / business.transactions
+                                : 0
+                            )}
                           </td>
                         </tr>
                       ))
-                    ) : (
-                      <tr>
-                        <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
-                          No revenue data available for the selected date range
-                        </td>
-                      </tr>
                     )}
                   </tbody>
                 </table>
               </div>
-            </div>
+            </section>
           </>
         )}
       </div>
@@ -2627,67 +2833,69 @@ function SystemReports() {
   )
 }
 
-// Onboarding Step Components
+const onboardFieldClass =
+  'w-full px-4 py-3 border border-[#d4dcd8] rounded-md bg-white text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:ring-2 focus:ring-[#c4783a]/30'
+
 function BusinessInfoStep({ formData, updateFormData }: {
   formData: any
   updateFormData: (field: string, value: any) => void
 }) {
   return (
     <div>
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">Business Information</h2>
-        <p className="text-slate-600">Tell us about your client's business</p>
+      <div className="mb-6">
+        <h2 className="font-display text-xl font-bold text-[#121c19]">Business information</h2>
+        <p className="text-sm text-[#2a3d36]/55 mt-1">Tell us about your client&apos;s business</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="md:col-span-2">
-          <label className="block text-sm font-medium text-slate-700 mb-2">
-            Business Name *
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+            Business name *
           </label>
           <input
             type="text"
             value={formData.businessName}
             onChange={(e) => updateFormData('businessName', e.target.value)}
-            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className={onboardFieldClass}
             placeholder="Enter business name"
           />
         </div>
 
         <div className="md:col-span-2">
-          <label className="block text-sm font-medium text-slate-700 mb-2">
-            Business Address *
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+            Business address *
           </label>
           <textarea
             value={formData.address}
             onChange={(e) => updateFormData('address', e.target.value)}
             rows={3}
-            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className={onboardFieldClass}
             placeholder="Enter complete business address"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-2">
-            Phone Number
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+            Phone number
           </label>
           <input
             type="tel"
             value={formData.phone}
             onChange={(e) => updateFormData('phone', e.target.value)}
-            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className={onboardFieldClass}
             placeholder="+234 xxx xxx xxxx"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-2">
-            Email Address
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+            Email address
           </label>
           <input
             type="email"
             value={formData.email}
             onChange={(e) => updateFormData('email', e.target.value)}
-            className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className={onboardFieldClass}
             placeholder="business@email.com"
           />
         </div>
@@ -2701,27 +2909,9 @@ function ModuleSelectionStep({ formData, updateFormData }: {
   updateFormData: (field: string, value: any) => void
 }) {
   const modules = [
-    {
-      id: 'BAR',
-      name: 'BAR Module',
-      description: 'Drinks, cocktails, and beverage management',
-      price: 200000,
-      icon: '🍸'
-    },
-    {
-      id: 'KITCHEN',
-      name: 'Kitchen Module',
-      description: 'Food orders, recipes, and kitchen operations',
-      price: 200000,
-      icon: '👨‍🍳'
-    },
-    {
-      id: 'ROOM',
-      name: 'Room Module',
-      description: 'Hotel rooms, bookings, and amenities',
-      price: 200000,
-      icon: '🏨'
-    }
+    { id: 'BAR', name: 'Bar', description: 'Drinks and beverage management', price: 200000 },
+    { id: 'KITCHEN', name: 'Kitchen', description: 'Food orders and kitchen ops', price: 200000 },
+    { id: 'ROOM', name: 'Room', description: 'Rooms, bookings, amenities', price: 200000 },
   ]
 
   const toggleModule = (moduleId: string) => {
@@ -2729,65 +2919,59 @@ function ModuleSelectionStep({ formData, updateFormData }: {
     const newModules = currentModules.includes(moduleId)
       ? currentModules.filter((id: string) => id !== moduleId)
       : [...currentModules, moduleId]
-
     updateFormData('selectedModules', newModules)
   }
 
   return (
     <div>
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">Select Business Modules</h2>
-        <p className="text-slate-600">Choose which services your client needs</p>
+      <div className="mb-6">
+        <h2 className="font-display text-xl font-bold text-[#121c19]">Select modules</h2>
+        <p className="text-sm text-[#2a3d36]/55 mt-1">Choose which services this client needs</p>
       </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {modules.map((module) => {
           const isSelected = formData.selectedModules.includes(module.id)
-
           return (
-            <div
+            <button
               key={module.id}
+              type="button"
               onClick={() => toggleModule(module.id)}
-              className={`border-2 rounded-xl p-6 cursor-pointer transition-all ${
+              className={`text-left rounded-xl border p-5 transition-colors ${
                 isSelected
-                  ? 'border-blue-500 bg-blue-50 shadow-lg'
-                  : 'border-slate-200 hover:border-slate-300 hover:shadow-md'
+                  ? 'border-[#c4783a] bg-[#c4783a]/08'
+                  : 'border-[#d4dcd8] bg-white hover:border-[#c4783a]/40'
               }`}
             >
-              <div className="text-center mb-4">
-                <div className="text-4xl mb-2">{module.icon}</div>
-                <h3 className="text-lg font-semibold text-slate-800">{module.name}</h3>
-                <p className="text-slate-600 text-sm mt-1">{module.description}</p>
-          </div>
-
-              <div className="flex items-center justify-between">
-                <span className="text-lg font-bold text-slate-800">
-                  ₦{module.price.toLocaleString()}
+              <div className="flex items-start justify-between gap-2 mb-3">
+                <h3 className="font-display text-lg font-bold text-[#121c19]">{module.name}</h3>
+                <span
+                  className={`h-5 w-5 rounded-full border flex items-center justify-center text-[10px] font-bold shrink-0 ${
+                    isSelected
+                      ? 'bg-[#c4783a] border-[#c4783a] text-white'
+                      : 'border-[#d4dcd8] text-transparent'
+                  }`}
+                >
+                  ✓
                 </span>
-                <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center ${
-                  isSelected ? 'bg-blue-500 border-blue-500' : 'border-slate-300'
-                }`}>
-                  {isSelected && <span className="text-white text-sm">✓</span>}
-          </div>
-          </div>
-        </div>
+              </div>
+              <p className="text-sm text-[#2a3d36]/55 mb-4">{module.description}</p>
+              <p className="font-semibold text-[#121c19]">₦{module.price.toLocaleString()}</p>
+            </button>
           )
         })}
       </div>
 
       {formData.selectedModules.length > 0 && (
-        <div className="mt-8 p-4 bg-blue-50 rounded-lg border border-blue-200">
-          <h4 className="font-semibold text-blue-800 mb-2">Selected Modules:</h4>
-          <div className="flex flex-wrap gap-2">
-            {formData.selectedModules.map((moduleId: string) => {
-              const module = modules.find(m => m.id === moduleId)
-              return module ? (
-                <span key={moduleId} className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm">
-                  {module.icon} {module.name}
-                </span>
-              ) : null
-            })}
-          </div>
+        <div className="mt-5 flex flex-wrap gap-1.5">
+          {formData.selectedModules.map((moduleId: string) => (
+            <span
+              key={moduleId}
+              className="text-[11px] font-semibold px-2 py-0.5 rounded-md border border-[#d4dcd8] bg-[#f4f6f5] text-[#121c19]"
+            >
+              {moduleId}
+            </span>
+          ))}
         </div>
       )}
     </div>
@@ -2799,104 +2983,100 @@ function BrandingStep({ formData, updateFormData }: {
   updateFormData: (field: string, value: any) => void
 }) {
   const colorOptions = [
-    { name: 'Blue', primary: '#3B82F6', secondary: '#1F2937' },
-    { name: 'Green', primary: '#10B981', secondary: '#064E3B' },
-    { name: 'Purple', primary: '#8B5CF6', secondary: '#581C87' },
-    { name: 'Orange', primary: '#F59E0B', secondary: '#92400E' },
-    { name: 'Red', primary: '#EF4444', secondary: '#991B1B' },
-    { name: 'Teal', primary: '#14B8A6', secondary: '#134E4A' }
+    { name: 'Copper', primary: '#c4783a', secondary: '#121c19' },
+    { name: 'Teal', primary: '#0f766e', secondary: '#134e4a' },
+    { name: 'Ink', primary: '#121c19', secondary: '#2a3d36' },
+    { name: 'Blue', primary: '#2563eb', secondary: '#1e293b' },
+    { name: 'Rose', primary: '#e11d48', secondary: '#881337' },
+    { name: 'Amber', primary: '#d97706', secondary: '#78350f' },
   ]
 
   return (
     <div>
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">Business Branding</h2>
-        <p className="text-slate-600">Customize the look and feel for your client's business</p>
+      <div className="mb-6">
+        <h2 className="font-display text-xl font-bold text-[#121c19]">Branding</h2>
+        <p className="text-sm text-[#2a3d36]/55 mt-1">Choose colors for this client&apos;s POS</p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div>
-          <h3 className="text-lg font-semibold text-slate-800 mb-4">Choose Color Theme</h3>
-          <div className="grid grid-cols-2 gap-4">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-3">
+            Theme presets
+          </h3>
+          <div className="grid grid-cols-2 gap-3">
             {colorOptions.map((color) => (
               <button
                 key={color.name}
+                type="button"
                 onClick={() => {
                   updateFormData('primaryColor', color.primary)
                   updateFormData('secondaryColor', color.secondary)
                 }}
-                className={`p-4 rounded-lg border-2 transition-all ${
+                className={`p-3 rounded-lg border text-left transition-colors ${
                   formData.primaryColor === color.primary
-                    ? 'border-slate-800 shadow-lg'
-                    : 'border-slate-200 hover:border-slate-300'
+                    ? 'border-[#121c19] bg-[#f4f6f5]'
+                    : 'border-[#d4dcd8] hover:border-[#c4783a]/40'
                 }`}
               >
-                <div className="flex space-x-2 mb-2">
-                  <div
-                    className="w-6 h-6 rounded"
-                    style={{ backgroundColor: color.primary }}
-                  />
-                  <div
-                    className="w-6 h-6 rounded"
-                    style={{ backgroundColor: color.secondary }}
-                  />
+                <div className="flex gap-2 mb-2">
+                  <div className="w-6 h-6 rounded" style={{ backgroundColor: color.primary }} />
+                  <div className="w-6 h-6 rounded" style={{ backgroundColor: color.secondary }} />
                 </div>
-                <span className="text-sm font-medium text-slate-700">{color.name}</span>
+                <span className="text-sm font-semibold text-[#121c19]">{color.name}</span>
               </button>
             ))}
           </div>
         </div>
 
         <div>
-          <h3 className="text-lg font-semibold text-slate-800 mb-4">Preview</h3>
-          <div className="border border-slate-200 rounded-lg overflow-hidden">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-3">
+            Preview
+          </h3>
+          <div className="border border-[#d4dcd8] rounded-lg overflow-hidden">
             <div
-              className="h-16 flex items-center justify-center text-white font-bold"
+              className="h-14 flex items-center justify-center text-white text-sm font-semibold"
               style={{ backgroundColor: formData.primaryColor }}
             >
-              Header - {formData.businessName || 'Business Name'}
+              {formData.businessName || 'Business name'}
             </div>
-            <div className="p-4 bg-white">
-              <div
-                className="inline-block px-4 py-2 rounded text-white text-sm font-medium mb-3"
+            <div className="p-4 bg-white flex flex-wrap gap-2">
+              <span
+                className="inline-block px-3 py-1.5 rounded-md text-white text-xs font-semibold"
                 style={{ backgroundColor: formData.primaryColor }}
               >
-                Primary Button
-              </div>
-              <div
-                className="inline-block px-4 py-2 rounded border text-sm font-medium"
+                Primary
+              </span>
+              <span
+                className="inline-block px-3 py-1.5 rounded-md border text-xs font-semibold"
                 style={{
                   borderColor: formData.secondaryColor,
-                  color: formData.secondaryColor
+                  color: formData.secondaryColor,
                 }}
               >
-                Secondary Button
-              </div>
+                Secondary
+              </span>
             </div>
           </div>
-        </div>
-      </div>
 
-      <div className="mt-8 p-4 bg-slate-50 rounded-lg">
-        <h4 className="font-semibold text-slate-800 mb-2">Custom Colors (Optional)</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm text-slate-600 mb-1">Primary Color</label>
-            <input
-              type="color"
-              value={formData.primaryColor}
-              onChange={(e) => updateFormData('primaryColor', e.target.value)}
-              className="w-full h-12 border border-slate-300 rounded cursor-pointer"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-slate-600 mb-1">Secondary Color</label>
-            <input
-              type="color"
-              value={formData.secondaryColor}
-              onChange={(e) => updateFormData('secondaryColor', e.target.value)}
-              className="w-full h-12 border border-slate-300 rounded cursor-pointer"
-            />
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-[#2a3d36]/45 mb-1">Primary</label>
+              <input
+                type="color"
+                value={formData.primaryColor}
+                onChange={(e) => updateFormData('primaryColor', e.target.value)}
+                className="w-full h-10 border border-[#d4dcd8] rounded-md cursor-pointer"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-[#2a3d36]/45 mb-1">Secondary</label>
+              <input
+                type="color"
+                value={formData.secondaryColor}
+                onChange={(e) => updateFormData('secondaryColor', e.target.value)}
+                className="w-full h-10 border border-[#d4dcd8] rounded-md cursor-pointer"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -2905,73 +3085,62 @@ function BrandingStep({ formData, updateFormData }: {
 }
 
 function PricingStep({ formData }: { formData: any }) {
-  const calculatePrice = () => {
-    return formData.selectedModules.reduce((total: number, module: string) => {
-      switch (module) {
-        case 'BAR':
-        case 'KITCHEN':
-        case 'ROOM':
-          return total + 200000
-        default:
-          return total
-      }
-    }, 0)
-  }
-
-  const basePrice = calculatePrice()
-  const discount = formData.selectedModules.length === 2 ? 50000 :
-                   formData.selectedModules.length === 3 ? 100000 : 0
+  const basePrice = formData.selectedModules.reduce((total: number, module: string) => {
+    if (module === 'BAR' || module === 'KITCHEN' || module === 'ROOM') return total + 200000
+    return total
+  }, 0)
+  const discount =
+    formData.selectedModules.length === 2
+      ? 50000
+      : formData.selectedModules.length === 3
+        ? 100000
+        : 0
   const finalPrice = Math.max(0, basePrice - discount)
 
   return (
     <div>
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">Pricing Summary</h2>
-        <p className="text-slate-600">Review the pricing for your client's selected modules</p>
+      <div className="mb-6">
+        <h2 className="font-display text-xl font-bold text-[#121c19]">Pricing summary</h2>
+        <p className="text-sm text-[#2a3d36]/55 mt-1">Review the package for this client</p>
       </div>
 
-      <div className="max-w-2xl mx-auto">
-        <div className="bg-white border border-slate-200 rounded-xl p-6 mb-6">
-          <h3 className="text-xl font-bold text-slate-800 mb-4">Business: {formData.businessName || 'Business Name'}</h3>
+      <div className="max-w-lg mx-auto rounded-xl border border-[#d4dcd8] bg-[#f4f6f5] p-5">
+        <p className="font-display text-lg font-bold text-[#121c19] mb-4">
+          {formData.businessName || 'Business name'}
+        </p>
 
-          <div className="space-y-3 mb-6">
-            <h4 className="font-semibold text-slate-700">Selected Modules:</h4>
-            {formData.selectedModules.map((module: string) => (
-              <div key={module} className="flex justify-between items-center py-2 border-b border-slate-100">
-                <span className="text-slate-700">{module} Module</span>
-                <span className="font-semibold">₦200,000</span>
-              </div>
-            ))}
+        <div className="space-y-2 mb-4">
+          {formData.selectedModules.map((module: string) => (
+            <div
+              key={module}
+              className="flex justify-between items-center py-2 border-b border-[#d4dcd8] text-sm"
+            >
+              <span className="text-[#2a3d36]/70">{module} module</span>
+              <span className="font-semibold text-[#121c19]">₦200,000</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between text-[#2a3d36]/60">
+            <span>Subtotal</span>
+            <span>₦{basePrice.toLocaleString()}</span>
           </div>
-
-          <div className="border-t border-slate-200 pt-4 space-y-2">
-            <div className="flex justify-between text-slate-600">
-              <span>Subtotal:</span>
-              <span>₦{basePrice.toLocaleString()}</span>
+          {discount > 0 && (
+            <div className="flex justify-between text-teal-700 font-medium">
+              <span>Bundle discount</span>
+              <span>-₦{discount.toLocaleString()}</span>
             </div>
-            {discount > 0 && (
-              <div className="flex justify-between text-green-600">
-                <span>Bundle Discount:</span>
-                <span>-₦{discount.toLocaleString()}</span>
-              </div>
-            )}
-            <div className="flex justify-between text-xl font-bold text-slate-800 border-t border-slate-300 pt-2">
-              <span>Total Price:</span>
-              <span>₦{finalPrice.toLocaleString()}</span>
-            </div>
+          )}
+          <div className="flex justify-between font-display text-xl font-bold text-[#121c19] pt-2 border-t border-[#d4dcd8]">
+            <span>Total</span>
+            <span className="text-[#c4783a]">₦{finalPrice.toLocaleString()}</span>
           </div>
         </div>
 
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <h4 className="font-semibold text-blue-800 mb-2">💰 Monthly Support (Optional)</h4>
-          <div className="flex justify-between items-center">
-            <span className="text-blue-700">Basic Support Package</span>
-            <span className="font-semibold text-blue-800">₦15,000/month</span>
-          </div>
-          <p className="text-xs text-blue-600 mt-1">
-            Includes updates, technical support, and maintenance
-          </p>
-        </div>
+        <p className="mt-4 text-xs text-[#2a3d36]/45">
+          Optional support: ₦15,000/month for updates and technical help.
+        </p>
       </div>
     </div>
   )
@@ -2981,99 +3150,97 @@ function AdminSetupStep({ formData, updateFormData }: {
   formData: any
   updateFormData: (field: string, value: any) => void
 }) {
+  const packageTotal = Math.max(
+    0,
+    formData.selectedModules.reduce((total: number, module: string) => {
+      if (module === 'BAR' || module === 'KITCHEN' || module === 'ROOM') return total + 200000
+      return total
+    }, 0) -
+      (formData.selectedModules.length === 2
+        ? 50000
+        : formData.selectedModules.length === 3
+          ? 100000
+          : 0)
+  )
+
   return (
     <div>
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">Business Admin Account</h2>
-        <p className="text-slate-600">Create the main administrator account for this business</p>
+      <div className="mb-6">
+        <h2 className="font-display text-xl font-bold text-[#121c19]">Admin account</h2>
+        <p className="text-sm text-[#2a3d36]/55 mt-1">
+          Create the main administrator for this business
+        </p>
       </div>
 
-      <div className="max-w-2xl mx-auto">
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
-          <div className="flex items-start">
-            <span className="text-amber-600 text-xl mr-3">⚠️</span>
-            <div>
-              <h4 className="font-semibold text-amber-800 mb-1">Important</h4>
-              <p className="text-amber-700 text-sm">
-                This will create the business owner account. They can later create additional staff accounts
-                (Manager, Secretary, Staff) from within their business dashboard.
-              </p>
-            </div>
-          </div>
+      <div className="max-w-xl mx-auto space-y-4">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p className="font-semibold text-amber-900 text-sm mb-1">Note</p>
+          <p className="text-amber-800/80 text-sm">
+            This creates the business owner. They can add Managers, Secretaries, and Staff later.
+          </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Admin Full Name *
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+              Admin full name *
             </label>
             <input
               type="text"
               value={formData.adminName}
               onChange={(e) => updateFormData('adminName', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={onboardFieldClass}
               placeholder="Enter admin's full name"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
               Username *
             </label>
             <input
               type="text"
               value={formData.adminUsername}
               onChange={(e) => updateFormData('adminUsername', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={onboardFieldClass}
               placeholder="Choose a username"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Email Address
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#2a3d36]/45 mb-1.5">
+              Email
             </label>
             <input
               type="email"
               value={formData.adminEmail}
               onChange={(e) => updateFormData('adminEmail', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={onboardFieldClass}
               placeholder="admin@business.com"
             />
           </div>
-
-          <div className="md:col-span-2">
-            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-              <h4 className="font-semibold text-slate-800 mb-2">Account Details</h4>
-              <div className="text-sm text-slate-600 space-y-1">
-                <p><strong>Role:</strong> Business Administrator</p>
-                <p><strong>Permissions:</strong> Full business management, staff creation, reports</p>
-                <p><strong>Password:</strong> Will be auto-generated and emailed to admin</p>
-              </div>
-            </div>
-          </div>
         </div>
 
-        <div className="mt-8 p-6 bg-green-50 border border-green-200 rounded-lg">
-          <h4 className="font-semibold text-green-800 mb-3">🎉 Setup Complete!</h4>
-          <p className="text-green-700 text-sm mb-3">
-            Clicking "Complete Setup" will:
+        <div className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-4 text-sm text-[#2a3d36]/65 space-y-1">
+          <p>
+            <span className="font-semibold text-[#121c19]">Role:</span> Business SuperAdmin
           </p>
-          <ul className="text-green-700 text-sm space-y-1">
-            <li>• Create the business account</li>
-            <li>• Set up selected modules</li>
-            <li>• Configure branding and theme</li>
-            <li>• Create the business admin account</li>
-            <li>• Generate invoice for ₦{Math.max(0, formData.selectedModules.reduce((total: number, module: string) => {
-              switch (module) {
-                case 'BAR':
-                case 'KITCHEN':
-                case 'ROOM':
-                  return total + 200000
-                default:
-                  return total
-              }
-            }, 0) - (formData.selectedModules.length === 2 ? 50000 : formData.selectedModules.length === 3 ? 100000 : 0)).toLocaleString()}</li>
+          <p>
+            <span className="font-semibold text-[#121c19]">Password:</span> Auto-generated on
+            complete (shown once)
+          </p>
+          <p>
+            <span className="font-semibold text-[#121c19]">Package:</span> ₦
+            {packageTotal.toLocaleString()}
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-teal-200 bg-teal-50 p-4">
+          <p className="font-semibold text-teal-900 text-sm mb-2">Ready to finish</p>
+          <ul className="text-sm text-teal-800/80 space-y-1">
+            <li>• Create the business and modules</li>
+            <li>• Apply branding colors</li>
+            <li>• Create admin login credentials</li>
           </ul>
         </div>
       </div>
@@ -7065,12 +7232,24 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
     }
   }
 
-  const handleMarkSaleCompleted = async (saleId: number) => {
+  const handleMarkSaleCompleted = async (sale: any) => {
     try {
-      await invoke('mark_sale_as_completed', { saleId })
-      toast.success('Sale marked as completed')
+      await invoke('mark_sale_as_completed', { saleId: sale.id })
+      const isDebt = String(sale.payment_method || '').toUpperCase() === 'DEBT'
+      toast.success(
+        isDebt
+          ? 'Debt fully paid — sale marked completed'
+          : 'Sale marked as completed'
+      )
       await loadAllData()
     } catch (error) {
+      const msg = String(error || '')
+      // Partial debt payment is expected to keep the sale pending
+      if (msg.toLowerCase().includes('partial payment') || msg.toLowerCase().includes('stays pending')) {
+        toast(msg.replace(/^Error:\s*/i, ''), { icon: 'ℹ️' })
+        await loadAllData()
+        return
+      }
       toast.error(`Failed to mark sale as completed: ${error}`)
     }
   }
@@ -7160,7 +7339,9 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
                   <p className="text-sm text-[#2a3d36]/55">No pending sales</p>
                 ) : (
                   <div className="space-y-2">
-                    {pendingSales.slice(0, 3).map((sale) => (
+                    {pendingSales.slice(0, 3).map((sale) => {
+                      const isDebt = String(sale.payment_method || '').toUpperCase() === 'DEBT'
+                      return (
                       <div
                         key={sale.id}
                         className="rounded-md bg-white border border-[#d4dcd8] px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
@@ -7168,19 +7349,21 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
                         <div>
                           <p className="font-semibold text-[#121c19]">Sale #{sale.id}</p>
                           <p className="text-sm text-[#2a3d36]/60">
-                            {sale.user_name || 'Unknown'} · {sale.item_count || 0} items · ₦
+                            {sale.user_name || 'Unknown'} · {sale.item_count || 0} items ·{' '}
+                            {sale.payment_method || 'N/A'} · ₦
                             {Number(sale.total_amount || 0).toLocaleString()}
                           </p>
                         </div>
                         <button
                           type="button"
-                          onClick={() => void handleMarkSaleCompleted(sale.id)}
+                          onClick={() => void handleMarkSaleCompleted(sale)}
                           className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2 rounded-md text-sm font-semibold"
                         >
-                          Mark complete
+                          {isDebt ? 'Mark paid' : 'Mark complete'}
                         </button>
                       </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 )}
               </section>
@@ -7259,7 +7442,9 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
                 <p className="text-sm text-[#2a3d36]/55 py-8 text-center">No pending sales</p>
               ) : (
                 <div className="space-y-3">
-                  {pendingSales.map((sale) => (
+                  {pendingSales.map((sale) => {
+                    const isDebt = String(sale.payment_method || '').toUpperCase() === 'DEBT'
+                    return (
                     <article
                       key={sale.id}
                       className="rounded-lg border border-[#d4dcd8] p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
@@ -7271,6 +7456,11 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
                           {sale.payment_method || 'N/A'}
                         </p>
                         <p className="text-xs text-[#2a3d36]/45 mt-1">{sale.created_at || '—'}</p>
+                        {isDebt && (
+                          <p className="text-xs text-amber-700 mt-1 font-medium">
+                            Debt sale — marking paid will reduce this customer’s debt balance
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-center gap-3">
                         <p className="font-bold text-[#121c19]">
@@ -7278,14 +7468,15 @@ function PendingItemsDashboard({ currentUser, businessInfo }: { currentUser: any
                         </p>
                         <button
                           type="button"
-                          onClick={() => void handleMarkSaleCompleted(sale.id)}
+                          onClick={() => void handleMarkSaleCompleted(sale)}
                           className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2 rounded-md text-sm font-semibold"
                         >
-                          Mark complete
+                          {isDebt ? 'Mark paid' : 'Mark complete'}
                         </button>
                       </div>
                     </article>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>

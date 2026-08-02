@@ -70,6 +70,93 @@ function toDateInputValue(value?: string | null) {
   return `${y}-${m}-${day}`
 }
 
+function SaleStatusBadge({ status }: { status?: string | null }) {
+  const value = String(status || 'UNKNOWN').toUpperCase()
+  const styles =
+    value === 'COMPLETED' || value === 'PAID'
+      ? 'bg-teal-50 text-teal-800 border-teal-200'
+      : value === 'PENDING'
+        ? 'bg-amber-50 text-amber-800 border-amber-200'
+        : value === 'CANCELLED'
+          ? 'bg-rose-50 text-rose-800 border-rose-200'
+          : 'bg-[#f4f6f5] text-[#2a3d36] border-[#d4dcd8]'
+  const label =
+    value === 'COMPLETED' || value === 'PAID'
+      ? 'Completed'
+      : value === 'PENDING'
+        ? 'Pending'
+        : value === 'CANCELLED'
+          ? 'Cancelled'
+          : value
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md border ${styles}`}
+    >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${
+          value === 'COMPLETED' || value === 'PAID'
+            ? 'bg-teal-600'
+            : value === 'PENDING'
+              ? 'bg-amber-500'
+              : value === 'CANCELLED'
+                ? 'bg-rose-500'
+                : 'bg-[#2a3d36]/40'
+        }`}
+      />
+      {label}
+    </span>
+  )
+}
+
+function PaymentMethodBadge({ method }: { method?: string | null }) {
+  const value = String(method || '—').toUpperCase()
+  const styles =
+    value === 'DEBT'
+      ? 'bg-orange-50 text-orange-800 border-orange-200'
+      : value === 'CASH'
+        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+        : value === 'EXTERNAL_POS'
+          ? 'bg-sky-50 text-sky-800 border-sky-200'
+          : 'bg-[#f4f6f5] text-[#2a3d36] border-[#d4dcd8]'
+  return (
+    <span className={`inline-flex text-xs font-semibold px-2.5 py-1 rounded-md border ${styles}`}>
+      {value === 'EXTERNAL_POS' ? 'External POS' : value}
+    </span>
+  )
+}
+
+function DebtProgressBlock({ sale }: { sale: any }) {
+  const isDebt = String(sale?.payment_method || '').toUpperCase() === 'DEBT'
+  if (!isDebt) {
+    return (
+      <p className="font-semibold text-[#121c19]">{money(sale.total_amount)}</p>
+    )
+  }
+  const total = Number(sale.total_amount || 0)
+  const paid = Number(sale.debt_paid ?? 0)
+  const left = Number(
+    sale.debt_remaining != null ? sale.debt_remaining : Math.max(0, total - paid)
+  )
+  const pct = total > 0 ? Math.min(100, Math.round((paid / total) * 100)) : 0
+  return (
+    <div className="min-w-[9.5rem]">
+      <p className="font-semibold text-[#121c19] text-right">{money(total)}</p>
+      <div className="mt-1.5 h-1.5 rounded-full bg-[#e8ecea] overflow-hidden">
+        <div
+          className={`h-full rounded-full ${left <= 0.0001 ? 'bg-teal-600' : 'bg-amber-500'}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-1 flex justify-between gap-2 text-[11px] font-semibold">
+        <span className="text-teal-700">Paid {money(paid)}</span>
+        <span className={left <= 0.0001 ? 'text-teal-700' : 'text-amber-700'}>
+          Left {money(left)}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 export function StaffPOSInterface({
   currentUser,
   businessInfo,
@@ -1381,6 +1468,8 @@ export function SalesLogDashboard({
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const [printingId, setPrintingId] = useState<number | null>(null)
   const [viewingId, setViewingId] = useState<number | null>(null)
   const [viewReceipt, setViewReceipt] = useState<any | null>(null)
@@ -1393,11 +1482,12 @@ export function SalesLogDashboard({
   const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(
     String(currentUser?.role || '')
   )
+  const today = toDateInputValue()
 
   useEffect(() => {
     if (businessId) void load()
     else setLoading(false)
-  }, [businessId, ownOnly, currentUser?.id])
+  }, [businessId, ownOnly, currentUser?.id, dateFrom, dateTo])
 
   const load = async () => {
     try {
@@ -1405,6 +1495,8 @@ export function SalesLogDashboard({
       const data = (await invoke('get_sales_log', {
         businessId,
         staffId: ownOnly ? currentUser?.id : null,
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
       })) as any[]
       setRows(Array.isArray(data) ? data : [])
     } catch (error) {
@@ -1413,6 +1505,39 @@ export function SalesLogDashboard({
     } finally {
       setLoading(false)
     }
+  }
+
+  const formatLocalDate = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+
+  const setDatePreset = (preset: 'today' | 'yesterday' | 'week' | 'clear') => {
+    const now = new Date()
+    if (preset === 'clear') {
+      setDateFrom('')
+      setDateTo('')
+      return
+    }
+    if (preset === 'today') {
+      const d = formatLocalDate(now)
+      setDateFrom(d)
+      setDateTo(d)
+      return
+    }
+    if (preset === 'yesterday') {
+      const y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+      const d = formatLocalDate(y)
+      setDateFrom(d)
+      setDateTo(d)
+      return
+    }
+    // week: last 7 days including today
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6)
+    setDateFrom(formatLocalDate(start))
+    setDateTo(formatLocalDate(now))
   }
 
   const openEditDate = async (sale: any) => {
@@ -1506,6 +1631,11 @@ export function SalesLogDashboard({
         staff_name: receipt.staff_name || sale.staff_name,
         customer_name:
           receipt.customer_name || sale.customer_name || 'Walk-in customer',
+        debt_paid: sale.debt_paid,
+        debt_remaining: sale.debt_remaining,
+        payment_method: receipt.payment_method || sale.payment_method,
+        payment_status: receipt.payment_status || sale.payment_status,
+        total_amount: receipt.total_amount ?? sale.total_amount,
       })
     } catch (error) {
       toast.error(`Failed to load sale: ${error}`)
@@ -1596,31 +1726,97 @@ export function SalesLogDashboard({
           </div>
         </div>
 
-        <input
-          type="search"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search by customer, staff, method, status, id…"
-          className="w-full mb-4 px-4 py-2.5 rounded-lg border border-[#d4dcd8] bg-white text-sm"
-        />
+        <div className="rounded-xl border border-[#d4dcd8] bg-white p-4 mb-4 space-y-3">
+          <div className="flex flex-col lg:flex-row gap-3 lg:items-end">
+            <div className="flex-1">
+              <label className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                Search
+              </label>
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by customer, staff, method, status, id…"
+                className="mt-1.5 w-full px-4 py-2.5 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] text-sm"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:min-w-[20rem]">
+              <div>
+                <label className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                  From date
+                </label>
+                <input
+                  type="date"
+                  value={dateFrom}
+                  max={dateTo || today}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setDateFrom(v)
+                    if (dateTo && v && v > dateTo) setDateTo(v)
+                  }}
+                  className="mt-1.5 w-full px-3 py-2.5 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                  To date
+                </label>
+                <input
+                  type="date"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  max={today}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setDateTo(v)
+                    if (dateFrom && v && v < dateFrom) setDateFrom(v)
+                  }}
+                  className="mt-1.5 w-full px-3 py-2.5 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] text-sm"
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-[#2a3d36]/50 mr-1">Quick:</span>
+            {(
+              [
+                { id: 'today' as const, label: 'Today' },
+                { id: 'yesterday' as const, label: 'Yesterday' },
+                { id: 'week' as const, label: 'Last 7 days' },
+                { id: 'clear' as const, label: 'All dates' },
+              ] as const
+            ).map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setDatePreset(p.id)}
+                className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/15 hover:bg-[#f4f6f5]"
+              >
+                {p.label}
+              </button>
+            ))}
+            {(dateFrom || dateTo) && (
+              <p className="text-xs text-[#2a3d36]/55 ml-auto">
+                Showing {dateFrom || '…'} → {dateTo || '…'}
+                {dateFrom && dateTo && dateFrom === dateTo ? ' (single day)' : ''}
+              </p>
+            )}
+          </div>
+        </div>
 
         <div className="md:hidden space-y-3">
           {filtered.map((sale) => (
             <article key={sale.id} className="rounded-xl border border-[#d4dcd8] bg-white p-4">
-              <div className="flex justify-between gap-3">
+              <div className="flex justify-between gap-3 items-start">
                 <p className="font-semibold text-[#121c19]">#{sale.id}</p>
-                <p className="font-bold text-[#121c19]">{money(sale.total_amount)}</p>
+                <DebtProgressBlock sale={sale} />
               </div>
               <p className="text-sm text-[#121c19] mt-1">{saleCustomerName(sale)}</p>
               <p className="text-sm text-[#2a3d36]/60 mt-0.5">{sale.staff_name}</p>
               <p className="text-xs text-[#2a3d36]/45 mt-2">{formatWhen(sale.created_at)}</p>
               <div className="mt-3 flex flex-wrap gap-2 items-center">
-                <span className="text-xs font-semibold px-2 py-1 rounded-md border border-[#d4dcd8] bg-[#f4f6f5]">
-                  {sale.payment_method}
-                </span>
-                <span className="text-xs font-semibold px-2 py-1 rounded-md border border-[#d4dcd8] bg-[#f4f6f5]">
-                  {sale.payment_status}
-                </span>
+                <PaymentMethodBadge method={sale.payment_method} />
+                <SaleStatusBadge status={sale.payment_status} />
                 <div className="ml-auto flex flex-wrap gap-2 justify-end">
                   <button
                     type="button"
@@ -1662,7 +1858,7 @@ export function SalesLogDashboard({
                 <th className="px-5 py-3 font-semibold">Staff</th>
                 <th className="px-5 py-3 font-semibold">Method</th>
                 <th className="px-5 py-3 font-semibold">Status</th>
-                <th className="px-5 py-3 font-semibold text-right">Amount</th>
+                <th className="px-5 py-3 font-semibold text-right">Amount / debt</th>
                 <th className="px-5 py-3 font-semibold">When</th>
                 <th className="px-5 py-3 font-semibold text-right">Actions</th>
               </tr>
@@ -1673,9 +1869,17 @@ export function SalesLogDashboard({
                   <td className="px-5 py-4 font-semibold text-[#121c19]">#{sale.id}</td>
                   <td className="px-5 py-4 text-[#121c19]">{saleCustomerName(sale)}</td>
                   <td className="px-5 py-4 text-[#2a3d36]/70">{sale.staff_name}</td>
-                  <td className="px-5 py-4">{sale.payment_method}</td>
-                  <td className="px-5 py-4">{sale.payment_status}</td>
-                  <td className="px-5 py-4 text-right font-semibold">{money(sale.total_amount)}</td>
+                  <td className="px-5 py-4">
+                    <PaymentMethodBadge method={sale.payment_method} />
+                  </td>
+                  <td className="px-5 py-4">
+                    <SaleStatusBadge status={sale.payment_status} />
+                  </td>
+                  <td className="px-5 py-4 text-right">
+                    <div className="inline-flex justify-end">
+                      <DebtProgressBlock sale={sale} />
+                    </div>
+                  </td>
                   <td className="px-5 py-4 text-sm text-[#2a3d36]/60 whitespace-nowrap">
                     {formatWhen(sale.created_at)}
                   </td>
@@ -1765,19 +1969,30 @@ export function SalesLogDashboard({
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
                   Method
                 </p>
-                <p className="mt-1 font-semibold text-[#121c19]">
-                  {viewReceipt.payment_method || '—'}
-                </p>
+                <div className="mt-2">
+                  <PaymentMethodBadge method={viewReceipt.payment_method} />
+                </div>
               </div>
               <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
                   Status
                 </p>
-                <p className="mt-1 font-semibold text-[#121c19]">
-                  {viewReceipt.payment_status || '—'}
-                </p>
+                <div className="mt-2">
+                  <SaleStatusBadge status={viewReceipt.payment_status} />
+                </div>
               </div>
             </div>
+
+            {String(viewReceipt.payment_method || '').toUpperCase() === 'DEBT' && (
+              <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-orange-800/70 mb-3">
+                  Debt progress
+                </p>
+                <div className="flex justify-end">
+                  <DebtProgressBlock sale={viewReceipt} />
+                </div>
+              </div>
+            )}
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
