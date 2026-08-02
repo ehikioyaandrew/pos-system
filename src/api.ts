@@ -668,12 +668,15 @@ async function processSale(request: Record<string, unknown>) {
   }
 
   const saleId = Date.now()
+  // Only DEBT stays Pending until the customer balance is cleared.
+  // Cash / Card / External POS are completed as soon as the sale is recorded.
+  const paymentStatus = paymentMethod === 'DEBT' ? 'PENDING' : 'COMPLETED'
   const salePayload = {
     id: saleId,
     user_id: staffId,
     total_amount: totalAmount,
     payment_method: paymentMethod,
-    payment_status: 'PENDING',
+    payment_status: paymentStatus,
     notes,
     created_at: createdAt,
     synced_at: new Date().toISOString(),
@@ -1035,12 +1038,26 @@ async function getSaleReceipt(saleId: number, businessId?: number | null) {
     }
   }
 
+  const paymentMethod = String(sale.payment_method || 'CASH').toUpperCase()
+  let paymentStatus = String(sale.payment_status || 'COMPLETED').toUpperCase()
+  // Heal legacy rows: non-debt sales were incorrectly saved as PENDING
+  if (paymentMethod !== 'DEBT' && paymentStatus === 'PENDING') {
+    paymentStatus = 'COMPLETED'
+    const { error: statusHealError } = await supabase
+      .from('sales_backup')
+      .update({ payment_status: 'COMPLETED', synced_at: new Date().toISOString() })
+      .eq('id', saleId)
+    if (statusHealError) {
+      console.warn('Failed to heal payment_status:', statusHealError.message)
+    }
+  }
+
   return {
     id: sale.id,
     created_at: sale.created_at,
     total_amount: totalAmount,
-    payment_method: sale.payment_method || 'CASH',
-    payment_status: sale.payment_status || 'COMPLETED',
+    payment_method: paymentMethod,
+    payment_status: paymentStatus,
     staff_name: staffName,
     customer_name: parseDebtCustomer(sale.notes) || WALK_IN_CUSTOMER,
     location: sale.location || null,

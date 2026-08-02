@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { invoke } from './api'
 import { Table } from './components/Table'
@@ -70,8 +70,19 @@ function toDateInputValue(value?: string | null) {
   return `${y}-${m}-${day}`
 }
 
-function SaleStatusBadge({ status }: { status?: string | null }) {
-  const value = String(status || 'UNKNOWN').toUpperCase()
+function SaleStatusBadge({
+  status,
+  method,
+}: {
+  status?: string | null
+  method?: string | null
+}) {
+  const methodValue = String(method || '').toUpperCase()
+  // Pending is only meaningful for DEBT. Paid methods always show Completed.
+  let value = String(status || 'UNKNOWN').toUpperCase()
+  if (methodValue && methodValue !== 'DEBT' && value === 'PENDING') {
+    value = 'COMPLETED'
+  }
   const styles =
     value === 'COMPLETED' || value === 'PAID'
       ? 'bg-teal-50 text-teal-800 border-teal-200'
@@ -178,6 +189,8 @@ export function StaffPOSInterface({
   const [swimTimers, setSwimTimers] = useState<SwimmingTimer[]>([])
   const [nowTick, setNowTick] = useState(Date.now())
   const businessId = currentUser?.business_id || businessInfo?.id
+  const addToCartLockRef = useRef(false)
+  const paymentLockRef = useRef(false)
 
   useEffect(() => {
     if (businessId) void loadProducts()
@@ -335,6 +348,13 @@ export function StaffPOSInterface({
     mode === 'staff' ? productStaffPrice(product) : productNormalPrice(product)
 
   const addToCart = (product: any) => {
+    // Block rapid double-taps so one click cannot enqueue the same add twice
+    if (addToCartLockRef.current) return
+    addToCartLockRef.current = true
+    window.setTimeout(() => {
+      addToCartLockRef.current = false
+    }, 450)
+
     const location = saleLocation
     const stock = stockOf(product, location)
     if (stock <= 0) {
@@ -348,29 +368,28 @@ export function StaffPOSInterface({
       )
       return
     }
-    const existing = cart.find(
-      (i) =>
-        i.product.id === product.id &&
-        (i.location || 'fridge') === location &&
-        (i.priceMode || 'normal') === priceMode
-    )
-    if (existing) {
-      if (existing.quantity + 1 > stock) {
-        toast.error(`Only ${stock} left in ${locationLabel(location)}`)
-        return
-      }
-      setCart(
-        cart.map((i) =>
+    setCart((prev) => {
+      const existing = prev.find(
+        (i) =>
+          i.product.id === product.id &&
+          (i.location || 'fridge') === location &&
+          (i.priceMode || 'normal') === priceMode
+      )
+      if (existing) {
+        if (existing.quantity + 1 > stock) {
+          toast.error(`Only ${stock} left in ${locationLabel(location)}`)
+          return prev
+        }
+        return prev.map((i) =>
           i.product.id === product.id &&
           (i.location || 'fridge') === location &&
           (i.priceMode || 'normal') === priceMode
             ? { ...i, quantity: i.quantity + 1 }
             : i
         )
-      )
-    } else {
-      setCart([
-        ...cart,
+      }
+      return [
+        ...prev,
         {
           product,
           quantity: 1,
@@ -378,8 +397,8 @@ export function StaffPOSInterface({
           location,
           priceMode,
         },
-      ])
-    }
+      ]
+    })
   }
 
   const setCartLinePriceMode = (
@@ -456,6 +475,9 @@ export function StaffPOSInterface({
     customerName?: string,
     saleDate?: string
   ) => {
+    if (paymentLockRef.current || processingPayment) return
+    paymentLockRef.current = true
+
     for (const item of cart) {
       const loc = (item.location || saleLocation) as SaleLocation
       const available = stockOf(item.product, loc)
@@ -463,6 +485,7 @@ export function StaffPOSInterface({
         toast.error(
           `${item.product.name}: only ${available} in ${locationLabel(loc)}. Adjust cart.`
         )
+        paymentLockRef.current = false
         return
       }
     }
@@ -551,6 +574,10 @@ export function StaffPOSInterface({
       toast.error(`Payment failed: ${error}`)
     } finally {
       setProcessingPayment(false)
+      // Keep lock briefly so a second Confirm click cannot create a duplicate sale
+      window.setTimeout(() => {
+        paymentLockRef.current = false
+      }, 1200)
     }
   }
 
@@ -1012,6 +1039,7 @@ function PaymentModal({
   }, [paymentMethod, businessId])
 
   const handlePay = () => {
+    if (processing) return
     if (paymentMethod === 'CASH' && (parseFloat(customerPaid) || 0) < total) {
       toast.error('Amount paid is less than total')
       return
@@ -1816,7 +1844,7 @@ export function SalesLogDashboard({
               <p className="text-xs text-[#2a3d36]/45 mt-2">{formatWhen(sale.created_at)}</p>
               <div className="mt-3 flex flex-wrap gap-2 items-center">
                 <PaymentMethodBadge method={sale.payment_method} />
-                <SaleStatusBadge status={sale.payment_status} />
+                <SaleStatusBadge status={sale.payment_status} method={sale.payment_method} />
                 <div className="ml-auto flex flex-wrap gap-2 justify-end">
                   <button
                     type="button"
@@ -1873,7 +1901,7 @@ export function SalesLogDashboard({
                     <PaymentMethodBadge method={sale.payment_method} />
                   </td>
                   <td className="px-5 py-4">
-                    <SaleStatusBadge status={sale.payment_status} />
+                    <SaleStatusBadge status={sale.payment_status} method={sale.payment_method} />
                   </td>
                   <td className="px-5 py-4 text-right">
                     <div className="inline-flex justify-end">
@@ -1978,7 +2006,10 @@ export function SalesLogDashboard({
                   Status
                 </p>
                 <div className="mt-2">
-                  <SaleStatusBadge status={viewReceipt.payment_status} />
+                  <SaleStatusBadge
+                    status={viewReceipt.payment_status}
+                    method={viewReceipt.payment_method}
+                  />
                 </div>
               </div>
             </div>
