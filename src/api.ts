@@ -11,6 +11,36 @@ function mapUser(user: BackupUser): BackupUser {
   }
 }
 
+async function logUserLogin(user: BackupUser) {
+  const businessId = Number((user as any).business_id || 0)
+  // SuperSuperAdmin has no business — skip (Audit Log is per business)
+  if (!businessId) return
+  // Ghost / support users must never appear in the business audit log
+  if ((user as any).is_hidden === true) return
+  const now = new Date().toISOString()
+  const row = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    business_id: businessId,
+    actor_user_id: Number(user.id),
+    action: 'LOGIN',
+    entity_type: 'user',
+    entity_id: String(user.id),
+    summary: `${user.name || user.username || 'User'} signed in`,
+    before_json: null,
+    after_json: JSON.stringify({
+      username: user.username,
+      role: user.role,
+      name: user.name || null,
+    }),
+    created_at: now,
+    synced_at: now,
+  }
+  const { error } = await supabase.from('activity_logs_backup').insert(row)
+  if (error) {
+    console.warn('Login audit log failed:', error.message)
+  }
+}
+
 function argNumber(args: unknown, ...keys: string[]): number | null {
   if (typeof args === 'number' && Number.isFinite(args)) return args
   if (typeof args === 'string' && args.trim() !== '' && !Number.isNaN(Number(args))) {
@@ -88,7 +118,9 @@ export async function authenticateWebUser(
         .update({ last_login: new Date().toISOString() })
         .eq('id', created.id)
 
-      return { user: mapUser(created as BackupUser) }
+      const mapped = mapUser(created as BackupUser)
+      void logUserLogin(mapped)
+      return { user: mapped }
     }
 
     await supabase
@@ -96,11 +128,13 @@ export async function authenticateWebUser(
       .update({ last_login: new Date().toISOString() })
       .eq('id', existing.id)
 
+    const mappedAdmin = mapUser({
+      ...(existing as BackupUser),
+      last_login: new Date().toISOString(),
+    })
+    void logUserLogin(mappedAdmin)
     return {
-      user: mapUser({
-        ...(existing as BackupUser),
-        last_login: new Date().toISOString(),
-      }),
+      user: mappedAdmin,
     }
   }
 
@@ -131,7 +165,9 @@ export async function authenticateWebUser(
     console.error('Failed to update last_login:', updateError)
   }
 
-  return { user: mapUser({ ...user, last_login: lastLogin }) }
+  const mapped = mapUser({ ...user, last_login: lastLogin })
+  void logUserLogin(mapped)
+  return { user: mapped }
 }
 
 export async function changeWebPassword(
@@ -542,22 +578,37 @@ async function getActivityLogs(businessId: number, limit = 100) {
     ...new Set(rows.map((r) => Number(r.actor_user_id)).filter(Boolean)),
   ]
   const nameMap = new Map<number, string>()
+  const ghostIds = new Set<number>()
   if (actorIds.length) {
     const { data: users } = await supabase
       .from('users_backup')
-      .select('id, name, username')
+      .select('id, name, username, is_hidden')
       .in('id', actorIds)
     for (const u of users || []) {
+      if ((u as any).is_hidden === true) {
+        ghostIds.add(Number(u.id))
+        continue
+      }
       nameMap.set(Number(u.id), u.name || u.username || `User #${u.id}`)
     }
   }
 
-  return rows.map((r) => ({
-    ...r,
-    actor_name: r.actor_user_id
-      ? nameMap.get(Number(r.actor_user_id)) || `User #${r.actor_user_id}`
-      : 'System',
-  }))
+  // Hide ghost/support users (e.g. admin2) and username-marked ghosts from the log
+  return rows
+    .filter((r) => {
+      const actorId = Number(r.actor_user_id)
+      if (actorId && ghostIds.has(actorId)) return false
+      const summary = String(r.summary || '').toLowerCase()
+      const after = String(r.after_json || '').toLowerCase()
+      if (summary.includes('admin2') || after.includes('"username":"admin2"')) return false
+      return true
+    })
+    .map((r) => ({
+      ...r,
+      actor_name: r.actor_user_id
+        ? nameMap.get(Number(r.actor_user_id)) || `User #${r.actor_user_id}`
+        : 'System',
+    }))
 }
 
 async function updateSaleDetails(opts: {
