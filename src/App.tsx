@@ -13,10 +13,32 @@ import {
   StaffInventoryCheck,
   SalesLogDashboard,
   DebtManagementDashboard,
+  AuditLogDashboard,
 } from './floorViews'
 import * as XLSX from 'xlsx'
 
 const SESSION_KEY = 'pos_web_user'
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes idle
+const MAX_SESSION_MS = 8 * 60 * 60 * 1000 // 8 hours absolute
+
+function touchSessionUser(user: any) {
+  const now = Date.now()
+  return {
+    ...user,
+    session_started_at: Number(user?.session_started_at) || now,
+    last_activity_at: now,
+  }
+}
+
+function isSessionExpired(user: any) {
+  if (!user) return true
+  const now = Date.now()
+  const started = Number(user.session_started_at) || 0
+  const last = Number(user.last_activity_at) || started
+  if (started && now - started > MAX_SESSION_MS) return true
+  if (last && now - last > IDLE_TIMEOUT_MS) return true
+  return false
+}
 
 // Helper component to display product images (web: use URL / path directly)
 function ProductImage({ imagePath, alt }: { imagePath: string, alt: string }) {
@@ -66,11 +88,18 @@ function App() {
       const saved = localStorage.getItem(SESSION_KEY)
       if (saved) {
         const user = JSON.parse(saved)
-        setCurrentUser(user)
-        if (user?.has_temporary_password) {
-          setShowPasswordChange(true)
+        if (isSessionExpired(user)) {
+          localStorage.removeItem(SESSION_KEY)
+          toast.error('Session expired. Please sign in again.')
         } else {
-          setCurrentView('dashboard')
+          const touched = touchSessionUser(user)
+          setCurrentUser(touched)
+          localStorage.setItem(SESSION_KEY, JSON.stringify(touched))
+          if (touched?.has_temporary_password) {
+            setShowPasswordChange(true)
+          } else {
+            setCurrentView('dashboard')
+          }
         }
       }
     } catch (error) {
@@ -82,13 +111,76 @@ function App() {
   }, [])
 
   const persistUser = (user: any | null) => {
-    setCurrentUser(user)
     if (user) {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(user))
+      const touched = touchSessionUser({
+        ...user,
+        session_started_at: user.session_started_at || Date.now(),
+      })
+      setCurrentUser(touched)
+      localStorage.setItem(SESSION_KEY, JSON.stringify(touched))
     } else {
+      setCurrentUser(null)
       localStorage.removeItem(SESSION_KEY)
     }
   }
+
+  const handleLogout = (reason?: string) => {
+    persistUser(null)
+    setShowPasswordChange(false)
+    setCurrentView('login')
+    if (reason) toast.error(reason)
+  }
+
+  // Idle / absolute session auto-logout
+  useEffect(() => {
+    if (!currentUser || currentView === 'login') return
+
+    let lastWrite = 0
+    const bump = () => {
+      try {
+        const raw = localStorage.getItem(SESSION_KEY)
+        if (!raw) return
+        const user = JSON.parse(raw)
+        if (isSessionExpired(user)) {
+          handleLogout('Session expired due to inactivity. Please sign in again.')
+          return
+        }
+        const now = Date.now()
+        // Throttle writes — activity can fire very often
+        if (now - lastWrite < 15_000) return
+        lastWrite = now
+        const touched = touchSessionUser(user)
+        localStorage.setItem(SESSION_KEY, JSON.stringify(touched))
+        setCurrentUser((prev: any) =>
+          prev ? { ...prev, last_activity_at: touched.last_activity_at } : prev
+        )
+      } catch {
+        // ignore
+      }
+    }
+
+    const onActivity = () => bump()
+    const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'] as const
+    for (const ev of events) window.addEventListener(ev, onActivity, { passive: true })
+
+    const timer = window.setInterval(() => {
+      try {
+        const raw = localStorage.getItem(SESSION_KEY)
+        if (!raw) return
+        const user = JSON.parse(raw)
+        if (isSessionExpired(user)) {
+          handleLogout('Session expired due to inactivity. Please sign in again.')
+        }
+      } catch {
+        // ignore
+      }
+    }, 30_000)
+
+    return () => {
+      for (const ev of events) window.removeEventListener(ev, onActivity)
+      window.clearInterval(timer)
+    }
+  }, [currentUser?.id, currentView])
 
   if (loading) {
     return (
@@ -114,8 +206,7 @@ function App() {
           }}
           onCancel={() => {
             setShowPasswordChange(false)
-            persistUser(null)
-            setCurrentView('login')
+            handleLogout()
           }}
         />
       ) : currentView === 'customer' ? (
@@ -139,10 +230,7 @@ function App() {
         />
       ) : (
         <DashboardView
-          onLogout={() => {
-            persistUser(null)
-            setCurrentView('login')
-          }}
+          onLogout={() => handleLogout()}
           currentUser={currentUser}
         />
       )}
@@ -914,6 +1002,17 @@ function NavIcon({ name }: { name: string }) {
           <path d="M12 7v5l3 2" />
         </svg>
       )
+    case 'audit':
+      return (
+        <svg {...common}>
+          <path d="M8 6h13" />
+          <path d="M8 12h13" />
+          <path d="M8 18h13" />
+          <path d="M3 6h.01" />
+          <path d="M3 12h.01" />
+          <path d="M3 18h.01" />
+        </svg>
+      )
     case 'pos':
       return (
         <svg {...common}>
@@ -1241,6 +1340,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Management" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
               <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} icon="settings" label="Settings" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
@@ -1252,6 +1352,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Overview" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
               <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} icon="settings" label="Settings" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
@@ -1264,6 +1365,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Records" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
+              <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
           ) : (
@@ -1360,6 +1462,11 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
       case 'debt':
         if (isSuperAdmin || isManager || isSecretary || isFloorStaff) {
           return <DebtManagementDashboard currentUser={currentUser} businessInfo={businessInfo} />
+        }
+        return <AccessDenied />
+      case 'audit-log':
+        if (isSuperAdmin || isManager || isSecretary) {
+          return <AuditLogDashboard currentUser={currentUser} businessInfo={businessInfo} />
         }
         return <AccessDenied />
       case 'inventory':

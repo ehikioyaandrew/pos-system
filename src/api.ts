@@ -476,11 +476,96 @@ async function findSaleItemTable(saleId: number) {
   return { table: 'sale_items_backup', rows: [] as any[] }
 }
 
+async function writeActivityLog(opts: {
+  businessId: number
+  actorUserId?: number | null
+  action: string
+  entityType?: string | null
+  entityId?: number | string | null
+  summary?: string | null
+  before?: unknown
+  after?: unknown
+}) {
+  const now = new Date().toISOString()
+  const row = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    business_id: Number(opts.businessId),
+    actor_user_id: opts.actorUserId ? Number(opts.actorUserId) : null,
+    action: String(opts.action || 'UNKNOWN'),
+    entity_type: opts.entityType ? String(opts.entityType) : null,
+    entity_id: opts.entityId != null ? String(opts.entityId) : null,
+    summary: opts.summary ? String(opts.summary) : null,
+    before_json: opts.before != null ? JSON.stringify(opts.before) : null,
+    after_json: opts.after != null ? JSON.stringify(opts.after) : null,
+    created_at: now,
+    synced_at: now,
+  }
+
+  const { error } = await supabase.from('activity_logs_backup').insert(row)
+  if (error) {
+    // Table may not exist yet — keep app working
+    console.warn('activity_logs_backup insert failed:', error.message)
+    try {
+      const key = `pos_activity_logs_${opts.businessId}`
+      const raw = localStorage.getItem(key)
+      const list = raw ? JSON.parse(raw) : []
+      list.unshift(row)
+      localStorage.setItem(key, JSON.stringify(list.slice(0, 500)))
+    } catch {
+      // ignore
+    }
+  }
+  return row
+}
+
+async function getActivityLogs(businessId: number, limit = 100) {
+  const { data, error } = await supabase
+    .from('activity_logs_backup')
+    .select('*')
+    .eq('business_id', businessId)
+    .order('created_at', { ascending: false })
+    .limit(Math.min(Math.max(limit, 1), 300))
+
+  if (error) {
+    try {
+      const key = `pos_activity_logs_${businessId}`
+      const raw = localStorage.getItem(key)
+      const list = raw ? JSON.parse(raw) : []
+      return Array.isArray(list) ? list.slice(0, limit) : []
+    } catch {
+      throw new Error(error.message)
+    }
+  }
+
+  const rows = data || []
+  const actorIds = [
+    ...new Set(rows.map((r) => Number(r.actor_user_id)).filter(Boolean)),
+  ]
+  const nameMap = new Map<number, string>()
+  if (actorIds.length) {
+    const { data: users } = await supabase
+      .from('users_backup')
+      .select('id, name, username')
+      .in('id', actorIds)
+    for (const u of users || []) {
+      nameMap.set(Number(u.id), u.name || u.username || `User #${u.id}`)
+    }
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    actor_name: r.actor_user_id
+      ? nameMap.get(Number(r.actor_user_id)) || `User #${r.actor_user_id}`
+      : 'System',
+  }))
+}
+
 async function updateSaleDetails(opts: {
   saleId: number
   businessId: number
   saleDate?: string | null
   items?: Array<{ product_id: number; unit_price: number; quantity?: number }> | null
+  actorUserId?: number | null
 }) {
   const saleId = Number(opts.saleId)
   const businessId = Number(opts.businessId)
@@ -505,6 +590,7 @@ async function updateSaleDetails(opts: {
     throw new Error('Sale does not belong to this business')
   }
 
+  const beforeTotal = Number(sale.total_amount || 0)
   const syncedAt = new Date().toISOString()
   const salePatch: Record<string, unknown> = { synced_at: syncedAt }
   let createdAt = sale.created_at
@@ -519,43 +605,64 @@ async function updateSaleDetails(opts: {
     const { table, rows } = await findSaleItemTable(saleId)
     if (!rows.length) throw new Error('No sale items found to update')
 
-    let totalAmount = 0
-    for (const row of rows) {
-      const patch = priceUpdates.find(
-        (p) => Number(p.product_id) === Number(row.product_id)
-      )
-      const qty = Number(row.quantity || 0)
-      const unitPrice = patch
-        ? Number(patch.unit_price)
-        : Number(row.unit_price || 0)
-      if (!(unitPrice >= 0)) throw new Error('Selling price cannot be negative')
-      const lineTotal = qty * unitPrice
-      totalAmount += lineTotal
+    // Expand into concrete lines (supports splitting one product into normal + staff qty)
+    const nextLines = priceUpdates
+      .map((p) => ({
+        product_id: Number(p.product_id),
+        quantity: Number(p.quantity || 0),
+        unit_price: Number(p.unit_price || 0),
+      }))
+      .filter((p) => p.product_id && p.quantity > 0)
 
-      if (patch) {
-        const { error: itemError } = await supabase
-          .from(table)
-          .update({
-            unit_price: unitPrice,
-            total_price: lineTotal,
-            synced_at: syncedAt,
-          })
-          .eq('id', row.id)
-          .eq('sale_id', saleId)
-        if (itemError) {
-          // Fallback without id match
-          const retry = await supabase
-            .from(table)
-            .update({
-              unit_price: unitPrice,
-              total_price: lineTotal,
-              synced_at: syncedAt,
-            })
-            .eq('sale_id', saleId)
-            .eq('product_id', row.product_id)
-          if (retry.error) throw new Error(retry.error.message)
-        }
+    if (!nextLines.length) throw new Error('No valid sale lines to save')
+
+    for (const line of nextLines) {
+      if (!(line.unit_price >= 0)) throw new Error('Selling price cannot be negative')
+    }
+
+    // Keep total qty per product the same (price split only — no stock change)
+    const originalQty = new Map<number, number>()
+    for (const row of rows) {
+      const pid = Number(row.product_id)
+      originalQty.set(pid, (originalQty.get(pid) || 0) + Number(row.quantity || 0))
+    }
+    const nextQty = new Map<number, number>()
+    for (const line of nextLines) {
+      nextQty.set(line.product_id, (nextQty.get(line.product_id) || 0) + line.quantity)
+    }
+    for (const [pid, qty] of originalQty) {
+      if (Math.abs((nextQty.get(pid) || 0) - qty) > 0.001) {
+        throw new Error(
+          `Quantity for product #${pid} must stay ${qty} (got ${nextQty.get(pid) || 0}). Split prices only.`
+        )
       }
+    }
+    for (const [pid] of nextQty) {
+      if (!originalQty.has(pid)) {
+        throw new Error(`Cannot add new product #${pid} when editing a sale`)
+      }
+    }
+
+    // Replace all lines for this sale
+    const { error: delError } = await supabase.from(table).delete().eq('sale_id', saleId)
+    if (delError) throw new Error(delError.message)
+
+    let totalAmount = 0
+    const baseId = Date.now()
+    for (let i = 0; i < nextLines.length; i++) {
+      const line = nextLines[i]
+      const lineTotal = line.quantity * line.unit_price
+      totalAmount += lineTotal
+      const { error: insError } = await supabase.from(table).insert({
+        id: baseId + i + 1,
+        sale_id: saleId,
+        product_id: line.product_id,
+        quantity: line.quantity,
+        unit_price: line.unit_price,
+        total_price: lineTotal,
+        synced_at: syncedAt,
+      })
+      if (insError) throw new Error(insError.message)
     }
     salePatch.total_amount = totalAmount
   }
@@ -566,21 +673,48 @@ async function updateSaleDetails(opts: {
     .eq('id', saleId)
   if (updateError) throw new Error(updateError.message)
 
-  // Keep linked debt charge date/amount in sync when present
+  const afterTotal =
+    salePatch.total_amount != null ? Number(salePatch.total_amount) : beforeTotal
+
+  // Keep linked debt CHARGE + customer debt account balance in sync
   try {
     const useRemote = await debtsTableAvailable()
     const debtPatch: Record<string, unknown> = { synced_at: syncedAt }
     if (salePatch.created_at) debtPatch.entry_date = createdAt
-    if (salePatch.total_amount != null) debtPatch.amount = salePatch.total_amount
+    if (salePatch.total_amount != null) debtPatch.amount = afterTotal
+
+    let debtId: number | null = null
+    let customerName: string | null = null
 
     if (Object.keys(debtPatch).length > 1) {
       if (useRemote) {
-        await supabase
+        const { data: chargeRows } = await supabase
           .from('debt_entries_backup')
-          .update(debtPatch)
+          .select('id, debt_id')
           .eq('sale_id', saleId)
           .eq('business_id', businessId)
           .eq('entry_type', 'CHARGE')
+          .limit(1)
+        const charge = chargeRows?.[0]
+        if (charge) {
+          debtId = Number(charge.debt_id)
+          await supabase
+            .from('debt_entries_backup')
+            .update(debtPatch)
+            .eq('id', charge.id)
+          await recalcDebtAccountTotals(businessId, debtId, true)
+          const { data: debtRow } = await supabase
+            .from('customer_debts_backup')
+            .select('customer_name, total_charged, total_paid')
+            .eq('id', debtId)
+            .maybeSingle()
+          customerName = debtRow?.customer_name || parseDebtCustomer(sale.notes)
+          if (customerName) {
+            const balance =
+              Number(debtRow?.total_charged || 0) - Number(debtRow?.total_paid || 0)
+            await syncCustomerDebtSaleStatuses(businessId, customerName, balance)
+          }
+        }
       } else {
         const entries = readLocalDebtEntries(businessId)
         let changed = false
@@ -589,14 +723,46 @@ async function updateSaleDetails(opts: {
             if (debtPatch.entry_date) e.entry_date = debtPatch.entry_date
             if (debtPatch.amount != null) e.amount = debtPatch.amount
             e.synced_at = syncedAt
+            debtId = Number(e.debt_id)
             changed = true
           }
         }
-        if (changed) writeLocalDebtEntries(businessId, entries)
+        if (changed) {
+          writeLocalDebtEntries(businessId, entries)
+          if (debtId) {
+            await recalcDebtAccountTotals(businessId, debtId, false)
+            const debt = mapDebtRow(
+              readLocalDebts(businessId).find((r) => Number(r.id) === debtId) || null
+            )
+            customerName = debt?.customer_name || parseDebtCustomer(sale.notes)
+            if (customerName) {
+              await syncCustomerDebtSaleStatuses(
+                businessId,
+                customerName,
+                Number(debt?.balance || 0)
+              )
+            }
+          }
+        }
       }
     }
-  } catch {
-    // Sale still updated even if debt sync is unavailable
+  } catch (e) {
+    console.warn('Debt sync after sale edit failed:', e)
+  }
+
+  try {
+    await writeActivityLog({
+      businessId,
+      actorUserId: opts.actorUserId || sale.user_id || null,
+      action: 'SALE_EDITED',
+      entityType: 'sale',
+      entityId: saleId,
+      summary: `Sale #${saleId} edited`,
+      before: { total_amount: beforeTotal, created_at: sale.created_at },
+      after: { total_amount: afterTotal, created_at: createdAt, items: priceUpdates },
+    })
+  } catch (e) {
+    console.warn('Audit log write failed:', e)
   }
 
   return {
@@ -604,6 +770,66 @@ async function updateSaleDetails(opts: {
     ...salePatch,
     created_at: createdAt,
   }
+}
+
+async function recalcDebtAccountTotals(
+  businessId: number,
+  debtId: number,
+  useRemote: boolean
+) {
+  const now = new Date().toISOString()
+  if (useRemote) {
+    const { data: entries, error } = await supabase
+      .from('debt_entries_backup')
+      .select('entry_type, amount')
+      .eq('debt_id', debtId)
+      .eq('business_id', businessId)
+    if (error) throw new Error(error.message)
+    let charged = 0
+    let paid = 0
+    for (const e of entries || []) {
+      const amount = Number(e.amount || 0)
+      if (String(e.entry_type).toUpperCase() === 'PAYMENT') paid += amount
+      else charged += amount
+    }
+    const status = charged - paid <= 0.0001 ? 'SETTLED' : 'OPEN'
+    const { error: updateError } = await supabase
+      .from('customer_debts_backup')
+      .update({
+        total_charged: charged,
+        total_paid: paid,
+        status,
+        updated_at: now,
+        synced_at: now,
+      })
+      .eq('id', debtId)
+      .eq('business_id', businessId)
+    if (updateError) throw new Error(updateError.message)
+    return
+  }
+
+  const entries = readLocalDebtEntries(businessId).filter(
+    (e) => Number(e.debt_id) === debtId
+  )
+  let charged = 0
+  let paid = 0
+  for (const e of entries) {
+    const amount = Number(e.amount || 0)
+    if (String(e.entry_type).toUpperCase() === 'PAYMENT') paid += amount
+    else charged += amount
+  }
+  const rows = readLocalDebts(businessId)
+  const idx = rows.findIndex((r) => Number(r.id) === debtId)
+  if (idx < 0) return
+  rows[idx] = {
+    ...rows[idx],
+    total_charged: charged,
+    total_paid: paid,
+    status: charged - paid <= 0.0001 ? 'SETTLED' : 'OPEN',
+    updated_at: now,
+    synced_at: now,
+  }
+  writeLocalDebts(businessId, rows)
 }
 
 async function processSale(request: Record<string, unknown>) {
@@ -1517,6 +1743,27 @@ async function recordDebtPayment(request: Record<string, unknown>) {
     )
   } catch (e) {
     console.warn('Could not sync debt sale statuses:', e)
+  }
+
+  try {
+    await writeActivityLog({
+      businessId,
+      actorUserId: staffId,
+      action: Number(result.debt.balance) <= 0.0001 ? 'DEBT_MARKED_PAID' : 'DEBT_PAYMENT',
+      entityType: 'debt',
+      entityId: debtId,
+      summary:
+        Number(result.debt.balance) <= 0.0001
+          ? `Marked ${result.debt.customer_name} as paid`
+          : `Payment ₦${amount.toLocaleString()} for ${result.debt.customer_name}`,
+      after: {
+        amount,
+        balance: result.debt.balance,
+        customer_name: result.debt.customer_name,
+      },
+    })
+  } catch (e) {
+    console.warn('Audit log write failed:', e)
   }
 
   return result.debt
@@ -2781,6 +3028,7 @@ export async function invoke<T = unknown>(
         const items = Array.isArray((args as any)?.items)
           ? ((args as any).items as any[])
           : null
+        const actorUserId = argNumber(args, 'actorUserId', 'actor_user_id')
         if (!saleId) throw new Error('saleId is required')
         if (!businessId) throw new Error('businessId is required')
         if (!saleDate && !items?.length) {
@@ -2791,7 +3039,14 @@ export async function invoke<T = unknown>(
           businessId,
           saleDate: saleDate || null,
           items,
+          actorUserId,
         })) as T
+      }
+      case 'get_activity_logs': {
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        if (!businessId) throw new Error('businessId is required')
+        const limit = Number((args as any)?.limit || 100)
+        return (await getActivityLogs(businessId, limit)) as T
       }
       case 'get_debt_sales': {
         const businessId = argNumber(args, 'businessId', 'business_id')

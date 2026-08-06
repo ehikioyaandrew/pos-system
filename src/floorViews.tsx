@@ -1578,26 +1578,31 @@ export function SalesLogDashboard({
         saleId: sale.id,
         businessId,
       })) as any
-      setEditItems(
-        (Array.isArray(receipt?.items) ? receipt.items : []).map((item: any) => {
-          const normal = Number(item.normal_price || 0)
-          const staff = Number(item.staff_price || 0) || normal
-          const unit = Number(item.unit_price || 0)
-          const priceMode: PriceMode =
-            staff > 0 && Math.abs(unit - staff) < 0.001 && Math.abs(unit - normal) > 0.001
-              ? 'staff'
-              : 'normal'
-          return {
-            product_id: Number(item.product_id),
-            name: item.name || `Product #${item.product_id}`,
-            quantity: Number(item.quantity || 0),
-            unit_price: unit,
+      const grouped = new Map<number, any>()
+      for (const item of Array.isArray(receipt?.items) ? receipt.items : []) {
+        const pid = Number(item.product_id)
+        const normal = Number(item.normal_price || 0)
+        const staff = Number(item.staff_price || 0) || normal
+        const unit = Number(item.unit_price || 0)
+        const qty = Number(item.quantity || 0)
+        const isStaff =
+          staff > 0 && Math.abs(unit - staff) < 0.001 && Math.abs(unit - normal) > 0.001
+        const existing = grouped.get(pid)
+        if (existing) {
+          existing.quantity += qty
+          existing.staffQty += isStaff ? qty : 0
+        } else {
+          grouped.set(pid, {
+            product_id: pid,
+            name: item.name || `Product #${pid}`,
+            quantity: qty,
+            staffQty: isStaff ? qty : 0,
             normal_price: normal,
             staff_price: staff,
-            priceMode,
-          }
-        })
-      )
+          })
+        }
+      }
+      setEditItems([...grouped.values()])
     } catch (error) {
       toast.error(`Failed to load sale items: ${error}`)
     } finally {
@@ -1605,10 +1610,14 @@ export function SalesLogDashboard({
     }
   }
 
-  const editItemsTotal = editItems.reduce(
-    (sum, item) => sum + Number(item.unit_price || 0) * Number(item.quantity || 0),
-    0
-  )
+  const editItemsTotal = editItems.reduce((sum, item) => {
+    const qty = Number(item.quantity || 0)
+    const staffQty = Math.min(Math.max(0, Number(item.staffQty || 0)), qty)
+    const normalQty = qty - staffQty
+    const normal = Number(item.normal_price || 0)
+    const staff = Number(item.staff_price || item.normal_price || 0)
+    return sum + staffQty * staff + normalQty * normal
+  }, 0)
 
   const handleSaveSaleDate = async () => {
     if (!editSale?.id || !editDate) return
@@ -1617,10 +1626,34 @@ export function SalesLogDashboard({
       toast.error('Sale date cannot be in the future')
       return
     }
+    const expanded: Array<{ product_id: number; quantity: number; unit_price: number }> = []
     for (const item of editItems) {
-      if (!(Number(item.unit_price) >= 0)) {
+      const qty = Number(item.quantity || 0)
+      const staffQty = Math.min(Math.max(0, Number(item.staffQty || 0)), qty)
+      const normalQty = qty - staffQty
+      const normal = Number(item.normal_price || 0)
+      const staff = Number(item.staff_price || item.normal_price || 0)
+      if (staffQty > 0 && !(staff >= 0)) {
         toast.error(`Enter a valid staff price for ${item.name}`)
         return
+      }
+      if (normalQty > 0 && !(normal >= 0)) {
+        toast.error(`Enter a valid normal price for ${item.name}`)
+        return
+      }
+      if (staffQty > 0) {
+        expanded.push({
+          product_id: item.product_id,
+          quantity: staffQty,
+          unit_price: staff,
+        })
+      }
+      if (normalQty > 0) {
+        expanded.push({
+          product_id: item.product_id,
+          quantity: normalQty,
+          unit_price: normal,
+        })
       }
     }
     try {
@@ -1629,13 +1662,10 @@ export function SalesLogDashboard({
         saleId: editSale.id,
         businessId,
         saleDate: editDate,
-        items: editItems.map((item) => ({
-          product_id: item.product_id,
-          unit_price: Number(item.unit_price),
-          quantity: Number(item.quantity),
-        })),
+        actorUserId: currentUser?.id,
+        items: expanded,
       })
-      toast.success('Sale date and prices updated')
+      toast.success('Sale updated · debt balance synced if linked')
       setEditSale(null)
       setEditItems([])
       await load()
@@ -2128,7 +2158,10 @@ export function SalesLogDashboard({
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
-                Price type per item
+                Split prices by quantity
+              </p>
+              <p className="text-xs text-[#2a3d36]/45 mb-3">
+                Example: sold 3 water — set Staff qty to 2 and keep 1 at Normal.
               </p>
               {loadingEdit ? (
                 <p className="text-sm text-[#2a3d36]/50 py-4 text-center">Loading items…</p>
@@ -2138,64 +2171,94 @@ export function SalesLogDashboard({
                 </p>
               ) : (
                 <div className="space-y-3">
-                  {editItems.map((item, idx) => (
-                    <div
-                      key={`${item.product_id}-${idx}`}
-                      className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3"
-                    >
-                      <div className="flex justify-between gap-2">
-                        <p className="font-semibold text-[#121c19] text-sm">{item.name}</p>
-                        <p className="text-xs text-[#2a3d36]/50">Qty {item.quantity}</p>
-                      </div>
-                      <div className="mt-2 inline-flex rounded-md border border-[#d4dcd8] bg-white p-0.5 w-full">
-                        {([
-                          {
-                            id: 'normal' as const,
-                            label: 'Normal',
-                            amount: Number(item.normal_price || 0),
-                          },
-                          {
-                            id: 'staff' as const,
-                            label: 'Staff',
-                            amount: Number(item.staff_price || item.normal_price || 0),
-                          },
-                        ]).map((opt) => (
+                  {editItems.map((item, idx) => {
+                    const qty = Number(item.quantity || 0)
+                    const staffQty = Math.min(Math.max(0, Number(item.staffQty || 0)), qty)
+                    const normalQty = qty - staffQty
+                    const normal = Number(item.normal_price || 0)
+                    const staff = Number(item.staff_price || item.normal_price || 0)
+                    const lineTotal = staffQty * staff + normalQty * normal
+                    return (
+                      <div
+                        key={`${item.product_id}-${idx}`}
+                        className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3 space-y-3"
+                      >
+                        <div className="flex justify-between gap-2">
+                          <p className="font-semibold text-[#121c19] text-sm">{item.name}</p>
+                          <p className="text-xs text-[#2a3d36]/50">Total qty {qty}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                              Staff qty · {money(staff)}
+                            </label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={qty}
+                              step={1}
+                              value={staffQty}
+                              onChange={(e) => {
+                                const next = Math.min(
+                                  qty,
+                                  Math.max(0, Math.floor(Number(e.target.value) || 0))
+                                )
+                                setEditItems((prev) =>
+                                  prev.map((row, i) =>
+                                    i === idx ? { ...row, staffQty: next } : row
+                                  )
+                                )
+                              }}
+                              className="mt-1 w-full px-3 py-2 rounded-md border border-[#d4dcd8] bg-white text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                              Normal qty · {money(normal)}
+                            </label>
+                            <input
+                              type="number"
+                              readOnly
+                              value={normalQty}
+                              className="mt-1 w-full px-3 py-2 rounded-md border border-[#d4dcd8] bg-white/70 text-sm text-[#2a3d36]/70"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
                           <button
-                            key={opt.id}
                             type="button"
-                            disabled={!(opt.amount > 0)}
                             onClick={() =>
                               setEditItems((prev) =>
                                 prev.map((row, i) =>
-                                  i === idx
-                                    ? {
-                                        ...row,
-                                        priceMode: opt.id,
-                                        unit_price: opt.amount,
-                                      }
-                                    : row
+                                  i === idx ? { ...row, staffQty: 0 } : row
                                 )
                               )
                             }
-                            className={`flex-1 px-2 py-2 rounded text-xs font-semibold disabled:opacity-40 ${
-                              item.priceMode === opt.id
-                                ? 'bg-[#121c19] text-white'
-                                : 'text-[#2a3d36]/70'
-                            }`}
+                            className="text-[11px] font-semibold px-2 py-1 rounded border border-[#d4dcd8] bg-white"
                           >
-                            {opt.label}
-                            <span className="block mt-0.5 font-bold">
-                              {opt.amount > 0 ? money(opt.amount) : '—'}
-                            </span>
+                            All normal
                           </button>
-                        ))}
+                          <button
+                            type="button"
+                            disabled={!(staff > 0)}
+                            onClick={() =>
+                              setEditItems((prev) =>
+                                prev.map((row, i) =>
+                                  i === idx ? { ...row, staffQty: qty } : row
+                                )
+                              )
+                            }
+                            className="text-[11px] font-semibold px-2 py-1 rounded border border-[#d4dcd8] bg-white disabled:opacity-40"
+                          >
+                            All staff
+                          </button>
+                        </div>
+                        <p className="text-xs text-[#2a3d36]/50 text-right">
+                          Line total {money(lineTotal)}
+                        </p>
                       </div>
-                      <p className="mt-2 text-xs text-[#2a3d36]/50 text-right">
-                        Line total{' '}
-                        {money(Number(item.unit_price || 0) * Number(item.quantity || 0))}
-                      </p>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
               <div className="mt-3 flex items-center justify-between border-t border-[#e8ecea] pt-3">
@@ -2325,6 +2388,7 @@ export function DebtManagementDashboard({
           debt_id: payTarget.id,
           amount: Number(amount),
           staff_id: currentUser?.id,
+          note: 'Payment received',
         },
       })) as any
       toast.success(
@@ -2332,6 +2396,40 @@ export function DebtManagementDashboard({
           ? `${payTarget.customer_name} fully settled`
           : `Payment recorded · balance ${money(updated?.balance || 0)}`
       )
+      setPayTarget(null)
+      await load()
+    } catch (error) {
+      toast.error(`Failed: ${error}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleMarkAsPaid = async (debt: any) => {
+    const balance = Number(debt.balance || 0)
+    if (!(balance > 0)) {
+      toast.error('Nothing left to pay')
+      return
+    }
+    if (
+      !confirm(
+        `Mark ${debt.customer_name} as fully paid?\n\nThis clears the full balance of ${money(balance)} in one step.`
+      )
+    ) {
+      return
+    }
+    try {
+      setSaving(true)
+      await invoke('record_debt_payment', {
+        request: {
+          business_id: businessId,
+          debt_id: debt.id,
+          amount: balance,
+          staff_id: currentUser?.id,
+          note: 'Marked as paid (full settlement)',
+        },
+      })
+      toast.success(`${debt.customer_name} marked as paid`)
       setPayTarget(null)
       await load()
     } catch (error) {
@@ -2435,13 +2533,24 @@ export function DebtManagementDashboard({
                       <p className="text-sm font-bold text-[#c4783a]">{money(debt.balance)}</p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setPayTarget(debt)}
-                    className="mt-4 w-full bg-[#121c19] text-white py-2.5 rounded-md text-sm font-semibold"
-                  >
-                    Record payment
-                  </button>
+                  <div className="mt-4 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => setPayTarget(debt)}
+                      className="border border-[#121c19]/15 hover:bg-[#f4f6f5] text-[#121c19] py-2.5 rounded-md text-sm font-semibold disabled:opacity-50"
+                    >
+                      Record payment
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void handleMarkAsPaid(debt)}
+                      className="bg-teal-700 hover:bg-teal-800 text-white py-2.5 rounded-md text-sm font-semibold disabled:opacity-50"
+                    >
+                      Mark as paid
+                    </button>
+                  </div>
                 </article>
               ))}
             </div>
@@ -2475,13 +2584,24 @@ export function DebtManagementDashboard({
                         {formatWhen(debt.debt_date || debt.created_at)}
                       </td>
                       <td className="px-5 py-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => setPayTarget(debt)}
-                          className="bg-[#121c19] hover:bg-[#1a2924] text-white px-3 py-2 rounded-md text-sm font-semibold"
-                        >
-                          Record payment
-                        </button>
+                        <div className="inline-flex flex-wrap gap-2 justify-end">
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => setPayTarget(debt)}
+                            className="border border-[#121c19]/15 hover:bg-[#f4f6f5] text-[#121c19] px-3 py-2 rounded-md text-sm font-semibold disabled:opacity-50"
+                          >
+                            Record payment
+                          </button>
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => void handleMarkAsPaid(debt)}
+                            className="bg-teal-700 hover:bg-teal-800 text-white px-3 py-2 rounded-md text-sm font-semibold disabled:opacity-50"
+                          >
+                            Mark as paid
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -2667,6 +2787,131 @@ function RecordDebtPaymentModal({
             {saving ? 'Saving…' : 'Save payment'}
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+export function AuditLogDashboard({
+  currentUser,
+  businessInfo,
+}: {
+  currentUser: any
+  businessInfo: any
+}) {
+  const [rows, setRows] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState('')
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  useEffect(() => {
+    if (businessId) void load()
+    else setLoading(false)
+  }, [businessId])
+
+  const load = async () => {
+    try {
+      setLoading(true)
+      const data = (await invoke('get_activity_logs', {
+        businessId,
+        limit: 150,
+      })) as any[]
+      setRows(Array.isArray(data) ? data : [])
+    } catch (error) {
+      toast.error(`Failed to load audit log: ${error}`)
+      setRows([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const filtered = rows.filter((r) => {
+    const q = query.trim().toLowerCase()
+    if (!q) return true
+    return (
+      String(r.action || '').toLowerCase().includes(q) ||
+      String(r.summary || '').toLowerCase().includes(q) ||
+      String(r.actor_name || '').toLowerCase().includes(q) ||
+      String(r.entity_type || '').toLowerCase().includes(q) ||
+      String(r.entity_id || '').includes(q)
+    )
+  })
+
+  if (loading) {
+    return (
+      <div className="min-h-full bg-[#f4f6f5] flex items-center justify-center py-24">
+        <p className="font-display text-lg font-semibold text-[#121c19]">Loading audit log…</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1600px]">
+        <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Security
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#121c19]">
+              Audit log
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70">
+              Sale edits, debt payments, and other admin actions for this business.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
+          >
+            Refresh
+          </button>
+        </header>
+
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search action, actor, summary…"
+          className="w-full mb-4 px-4 py-2.5 rounded-lg border border-[#d4dcd8] bg-white text-sm"
+        />
+
+        {filtered.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
+            <p className="font-display text-xl font-bold text-[#121c19]">No activity yet</p>
+            <p className="mt-2 text-sm text-[#2a3d36]/55">
+              Edit a sale or record a debt payment to see entries here.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+            <div className="divide-y divide-[#e8ecea]">
+              {filtered.map((row) => (
+                <article key={row.id} className="px-5 py-4">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-[#121c19]">
+                        {row.summary || row.action}
+                      </p>
+                      <p className="text-sm text-[#2a3d36]/55 mt-1">
+                        {row.actor_name || 'System'}
+                        {row.entity_type ? ` · ${row.entity_type}` : ''}
+                        {row.entity_id ? ` #${row.entity_id}` : ''}
+                      </p>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-[#c4783a] mt-2">
+                        {String(row.action || '').replace(/_/g, ' ')}
+                      </p>
+                    </div>
+                    <p className="text-xs text-[#2a3d36]/45 whitespace-nowrap">
+                      {formatWhen(row.created_at)}
+                    </p>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
