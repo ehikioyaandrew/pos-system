@@ -9,7 +9,7 @@ import {
 } from './api'
 import { checkForUpdates, installUpdate } from './updateApi'
 import { runtimeLabel } from './lib/platform'
-import { isTauriApp, syncFromCloudDesktop, syncToCloudDesktop } from './tauriBridge'
+import { isTauriApp, syncFromCloudDesktop, syncToCloudDesktop, tauriErrorMessage } from './tauriBridge'
 import {
   StaffPOSInterface,
   StaffInventoryCheck,
@@ -1399,8 +1399,8 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                   await syncFromCloudDesktop()
                   await syncToCloudDesktop()
                   toast.success('Sync complete', { id: 'desktop-sync' })
-                } catch (e: any) {
-                  toast.error(e?.message || 'Sync failed (offline?)', { id: 'desktop-sync' })
+                } catch (e: unknown) {
+                  toast.error(tauriErrorMessage(e, 'Sync failed (offline?)'), { id: 'desktop-sync' })
                 }
               }}
               className="w-full mb-2 border border-[#e0a06a]/40 hover:bg-[#e0a06a]/10 text-[#e0a06a] py-2 px-4 rounded-md text-sm font-medium transition-colors"

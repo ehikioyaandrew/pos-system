@@ -11,6 +11,7 @@
 #       PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.tauri\pos-system.key"))
 #   VITE_SUPABASE_URL
 #   VITE_SUPABASE_ANON_KEY
+#   SUPABASE_SERVICE_ROLE_KEY — required for Sync now (upserts to *_backup); baked into MSI
 #
 # Do NOT set TAURI_SIGNING_PRIVATE_KEY_PASSWORD unless the key was created with a password.
 
@@ -47,9 +48,23 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          # option_env! embeds these — cache must miss when secrets change
+          env-vars: VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Verify Supabase secrets for desktop sync
+        shell: pwsh
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if (-not $env:VITE_SUPABASE_URL) { throw "Missing secret VITE_SUPABASE_URL" }
+          if (-not $env:VITE_SUPABASE_ANON_KEY) { throw "Missing secret VITE_SUPABASE_ANON_KEY" }
+          if (-not $env:SUPABASE_SERVICE_ROLE_KEY) { throw "Missing secret SUPABASE_SERVICE_ROLE_KEY (needed for Sync now)" }
+          Write-Host "Supabase secrets present (URL length $($env:VITE_SUPABASE_URL.Length))"
 
       - name: Write updater signing key
         shell: pwsh
@@ -96,8 +111,12 @@ jobs:
           # tauri build only reads TAURI_SIGNING_PRIVATE_KEY (file path or key text).
           # Do not set TAURI_SIGNING_PRIVATE_KEY_PASSWORD for unencrypted keys.
           TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PATH }}
+          # Baked into the Rust binary via option_env! so installed MSI can sync
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         with:
           tagName: v__VERSION__
           releaseName: 'POS System v__VERSION__'

@@ -165,13 +165,24 @@ use std::fs;
 use base64::{Engine as _, engine::general_purpose};
 use tauri::State;
 
-// Cloud sync configuration - loaded from environment variables
-// Set these in a .env file in the src-tauri directory or as environment variables
+// Cloud sync configuration:
+// 1) Runtime env / .env (dev)
+// 2) Values compiled into the binary from CI env (release MSI)
 fn load_env_files() {
     // Prefer src-tauri/.env, then project root .env (Vite keys)
     let _ = dotenv::from_filename(".env");
     let _ = dotenv::from_filename("../.env");
     let _ = dotenv::dotenv();
+
+    // Installed MSI: optional .env next to the exe or in app data
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = dotenv::from_path(dir.join(".env"));
+        }
+    }
+    if let Some(data) = dirs::data_dir() {
+        let _ = dotenv::from_path(data.join("pos-system").join(".env"));
+    }
 
     if std::env::var("SUPABASE_URL").is_err() {
         if let Ok(v) = std::env::var("VITE_SUPABASE_URL") {
@@ -187,18 +198,35 @@ fn load_env_files() {
 
 fn get_supabase_url() -> String {
     std::env::var("SUPABASE_URL")
-        .unwrap_or_else(|_| "https://your-project.supabase.co".to_string())
+        .or_else(|_| std::env::var("VITE_SUPABASE_URL"))
+        .ok()
+        .or_else(|| option_env!("VITE_SUPABASE_URL").map(str::to_string))
+        .or_else(|| option_env!("SUPABASE_URL").map(str::to_string))
+        .unwrap_or_else(|| "https://your-project.supabase.co".to_string())
 }
 
 fn get_supabase_anon_key() -> String {
     std::env::var("SUPABASE_ANON_KEY")
-        .unwrap_or_else(|_| String::new())
+        .or_else(|_| std::env::var("VITE_SUPABASE_ANON_KEY"))
+        .ok()
+        .or_else(|| option_env!("VITE_SUPABASE_ANON_KEY").map(str::to_string))
+        .or_else(|| option_env!("SUPABASE_ANON_KEY").map(str::to_string))
+        .unwrap_or_default()
 }
 
 fn get_supabase_service_role_key() -> String {
     std::env::var("SUPABASE_SERVICE_ROLE_KEY")
-        .or_else(|_| std::env::var("SUPABASE_ANON_KEY"))
-        .unwrap_or_else(|_| String::new())
+        .ok()
+        .or_else(|| option_env!("SUPABASE_SERVICE_ROLE_KEY").map(str::to_string))
+        .or_else(|| {
+            let anon = get_supabase_anon_key();
+            if anon.is_empty() {
+                None
+            } else {
+                Some(anon)
+            }
+        })
+        .unwrap_or_default()
 }
 
 pub struct AppState {

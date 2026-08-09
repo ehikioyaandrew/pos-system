@@ -34,12 +34,15 @@ Create secret:
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - old `TAURI_SIGNING_PRIVATE_KEY` (optional; base64 secret replaces it)
 
-### App env (baked into MSI)
+### App env (baked into MSI at build time)
 
 | Name | Value |
 |------|--------|
 | `VITE_SUPABASE_URL` | Same as local `.env` |
 | `VITE_SUPABASE_ANON_KEY` | Same as local `.env` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase **service_role** key (Dashboard → Settings → API). Needed for **Sync now** upserts. |
+
+Without these, the installed app can use a local DB but cloud sync will fail.
 
 ---
 

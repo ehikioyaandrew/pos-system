@@ -21,6 +21,7 @@ After sales / stock / debt writes, the app best-effort runs **`sync_to_cloud`**.
 ```env
 VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 VITE_SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 ```
 
 Optional `src-tauri/.env` (or same keys without `VITE_`):
@@ -31,7 +32,7 @@ SUPABASE_ANON_KEY=your_anon_key
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 ```
 
-Service role helps upserts during sync; anon key is used as fallback.
+Release builds bake these into the binary from GitHub Actions secrets (see [UPDATES.md](./UPDATES.md)). Service role is used for sync upserts; anon alone often cannot write `*_backup` tables.
 
 ## Develop / build
 

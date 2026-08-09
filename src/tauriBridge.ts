@@ -116,6 +116,24 @@ export function normalizeTauriArgs(
   return normalized
 }
 
+/** Tauri often rejects with a plain string, not an Error. */
+export function tauriErrorMessage(err: unknown, fallback = 'Something went wrong'): string {
+  if (typeof err === 'string' && err.trim()) return err
+  if (err instanceof Error && err.message) return err.message
+  if (err && typeof err === 'object') {
+    const anyErr = err as { message?: unknown; error?: unknown }
+    if (typeof anyErr.message === 'string' && anyErr.message.trim()) return anyErr.message
+    if (typeof anyErr.error === 'string' && anyErr.error.trim()) return anyErr.error
+  }
+  try {
+    const s = String(err ?? '')
+    if (s && s !== '[object Object]') return s
+  } catch {
+    /* ignore */
+  }
+  return fallback
+}
+
 export async function invokeTauri<T = unknown>(
   command: string,
   args?: Record<string, unknown> | number
@@ -153,10 +171,7 @@ export async function authenticateDesktopUser(
         })
         return { user }
       } catch {
-        const msg =
-          firstErr instanceof Error
-            ? firstErr.message
-            : String(firstErr || 'Invalid username or password')
+        const msg = tauriErrorMessage(firstErr, 'Invalid username or password')
         if (/not configured|network|fetch|Failed to fetch/i.test(msg)) {
           return {
             error:
