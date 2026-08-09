@@ -3,14 +3,16 @@
 #
 # Triggers:
 #   - Push a version tag:  git tag v1.0.1 && git push origin v1.0.1
-#   - Push to the `release` branch (uses version from src-tauri/tauri.conf.json)
+#   - Push to the `release` branch
 #   - Manual run from Actions → Publish Desktop → Run workflow
 #
-# Required GitHub secrets (Settings → Secrets and variables → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY          — full contents of %USERPROFILE%\.tauri\pos-system.key
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — leave empty if the key has no password
-#   VITE_SUPABASE_URL                  — same as local .env (baked into the MSI)
-#   VITE_SUPABASE_ANON_KEY             — same as local .env
+# Required GitHub secrets:
+#   TAURI_SIGNING_PRIVATE_KEY_BASE64 — base64 of %USERPROFILE%\.tauri\pos-system.key
+#       PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.tauri\pos-system.key"))
+#   VITE_SUPABASE_URL
+#   VITE_SUPABASE_ANON_KEY
+#
+# Do NOT set TAURI_SIGNING_PRIVATE_KEY_PASSWORD unless the key was created with a password.
 
 name: Publish Desktop
 
@@ -49,16 +51,53 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Write updater signing key
+        shell: pwsh
+        env:
+          KEY_B64: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_BASE64 }}
+          KEY_RAW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "tauri-signing.key"
+          if ($env:KEY_B64) {
+            $bytes = [Convert]::FromBase64String($env:KEY_B64.Trim())
+            [IO.File]::WriteAllBytes($out, $bytes)
+          } elseif ($env:KEY_RAW) {
+            # Normalize escaped newlines from GitHub secret paste
+            $text = $env:KEY_RAW -replace "`r`n", "`n" -replace "`r", "`n"
+            if ($text -notmatch "untrusted comment:" -and $text -notmatch "`n") {
+              # Likely a single-line base64 blob of the minisign key — decode if possible
+              try {
+                $bytes = [Convert]::FromBase64String($text.Trim())
+                $decoded = [Text.Encoding]::UTF8.GetString($bytes)
+                if ($decoded -match "untrusted comment:") {
+                  [IO.File]::WriteAllText($out, $decoded)
+                } else {
+                  [IO.File]::WriteAllBytes($out, $bytes)
+                }
+              } catch {
+                [IO.File]::WriteAllText($out, $text)
+              }
+            } else {
+              [IO.File]::WriteAllText($out, $text)
+            }
+          } else {
+            throw "Missing secret TAURI_SIGNING_PRIVATE_KEY_BASE64 (preferred) or TAURI_SIGNING_PRIVATE_KEY"
+          }
+          # Sanity: key must contain minisign comment (or be binary)
+          $probe = [IO.File]::ReadAllText($out)
+          if ($probe.Length -lt 32) { throw "Signing key file looks empty" }
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$out" >> $env:GITHUB_ENV
+          Write-Host "Signing key written ($((Get-Item $out).Length) bytes)"
+
       - name: Build and publish Tauri (Windows MSI + updater JSON)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Path only — do not pass an empty PASSWORD (that breaks unencrypted keys)
+          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PATH }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         with:
-          # __VERSION__ is replaced with src-tauri/tauri.conf.json version
           tagName: v__VERSION__
           releaseName: 'POS System v__VERSION__'
           releaseBody: |
@@ -69,5 +108,4 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           updaterJsonPreferNsis: false
-          # Make this the latest release so .../releases/latest/download/latest.json works
           releaseCommitish: ${{ github.sha }}
