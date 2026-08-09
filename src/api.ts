@@ -1,4 +1,10 @@
 import { supabase, isSupabaseConfigured, type BackupUser } from './lib/supabase'
+import {
+  authenticateDesktopUser,
+  invokeTauri,
+  isTauriApp,
+  syncToCloudDesktop,
+} from './tauriBridge'
 
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD_HASH = btoa('Pawpaw4life@')
@@ -65,6 +71,15 @@ export async function authenticateWebUser(
   usernameRaw: string,
   password: string
 ): Promise<{ user: BackupUser } | { error: string }> {
+  // Desktop: local SQLite first (works offline after one sync)
+  if (isTauriApp()) {
+    const desktop = await authenticateDesktopUser(usernameRaw, password)
+    if ('user' in desktop) {
+      return { user: mapUser(desktop.user as BackupUser) }
+    }
+    return desktop
+  }
+
   if (!isSupabaseConfigured) {
     return {
       error:
@@ -174,11 +189,25 @@ export async function changeWebPassword(
   userId: number,
   newPassword: string
 ): Promise<{ error?: string }> {
+  const passwordHash = btoa(newPassword)
+
+  if (isTauriApp()) {
+    try {
+      await invokeTauri('change_password', {
+        user_id: userId,
+        new_password_hash: passwordHash,
+      })
+      void syncToCloudDesktop().catch(() => {})
+      return {}
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Failed to change password' }
+    }
+  }
+
   if (!isSupabaseConfigured) {
     return { error: 'Login service is not configured.' }
   }
 
-  const passwordHash = btoa(newPassword)
   const { error } = await supabase
     .from('users_backup')
     .update({
@@ -2898,12 +2927,44 @@ async function deleteProductCategory(request: Record<string, unknown>) {
   throw new Error('Could not delete category')
 }
 
-/** Web API bridge — routes former Tauri commands to Supabase. */
+/**
+ * App API bridge.
+ * - Web: Supabase
+ * - Desktop (Tauri): local SQLite via Rust (offline-first). Syncs to cloud when online.
+ */
 export async function invoke<T = unknown>(
   cmd: string,
   args?: Record<string, unknown> | number
 ): Promise<T> {
   const command = String(cmd || '').trim()
+
+  if (isTauriApp()) {
+    try {
+      const result = await invokeTauri<T>(command, args)
+      // Best-effort push after local writes
+      if (
+        command === 'process_sale' ||
+        command === 'update_stock_type' ||
+        command === 'transfer_stock' ||
+        command === 'create_product' ||
+        command === 'update_product' ||
+        command === 'record_debt_payment' ||
+        command === 'add_manual_debt' ||
+        command === 'mark_debt_paid' ||
+        command === 'mark_sale_as_completed' ||
+        command === 'update_sale_details' ||
+        command === 'update_sale_date'
+      ) {
+        void syncToCloudDesktop().catch(() => {
+          /* offline — local data kept */
+        })
+      }
+      return result
+    } catch (error) {
+      console.error(`Desktop command '${command}' failed:`, error)
+      throw error
+    }
+  }
 
   // Local-first settings: work even if Supabase tables are missing
   if (

@@ -1,0 +1,73 @@
+# Builds the Windows MSI, signs updater artifacts, creates/updates a GitHub Release,
+# and uploads MSI + latest.json so installed apps can "Check for updates".
+#
+# Triggers:
+#   - Push a version tag:  git tag v1.0.1 && git push origin v1.0.1
+#   - Push to the `release` branch (uses version from src-tauri/tauri.conf.json)
+#   - Manual run from Actions → Publish Desktop → Run workflow
+#
+# Required GitHub secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY          — full contents of %USERPROFILE%\.tauri\pos-system.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — leave empty if the key has no password
+#   VITE_SUPABASE_URL                  — same as local .env (baked into the MSI)
+#   VITE_SUPABASE_ANON_KEY             — same as local .env
+
+name: Publish Desktop
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - release
+  workflow_dispatch:
+
+jobs:
+  publish-windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish Tauri (Windows MSI + updater JSON)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        with:
+          # __VERSION__ is replaced with src-tauri/tauri.conf.json version
+          tagName: v__VERSION__
+          releaseName: 'POS System v__VERSION__'
+          releaseBody: |
+            Desktop release for offline POS.
+
+            Install the MSI on new PCs, or use **Check for updates** in an existing install.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: false
+          # Make this the latest release so .../releases/latest/download/latest.json works
+          releaseCommitish: ${{ github.sha }}

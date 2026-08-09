@@ -31,6 +31,8 @@ pub struct Product {
     pub description: Option<String>,
     pub category: String, // BAR, KITCHEN, ROOM
     pub price: f64,
+    #[serde(default)]
+    pub staff_price: f64,
     pub cost_price: f64,
     pub stock_quantity: i32, // Keep for backward compatibility
     pub min_stock_level: i32,
@@ -40,6 +42,8 @@ pub struct Product {
     pub barcode: Option<String>,
     pub serial_number: Option<String>,
     pub image_path: Option<String>,
+    #[serde(default)]
+    pub packaging: Option<String>,
     pub is_active: bool,
     pub created_at: String,
 }
@@ -403,8 +407,8 @@ impl Database {
             }
         }
 
-        // Reset business_id for all users since businesses table was recreated
-        self.conn.execute("UPDATE users SET business_id = NULL", [])?;
+        // Offline POS schema (debt, staff_price, categories, activity logs)
+        self.migrate_offline_schema()?;
 
         // Re-enable foreign key checks
         self.conn.execute("PRAGMA foreign_keys = ON", [])?;
@@ -426,14 +430,15 @@ impl Database {
         // SQLite stores booleans as integers: 1 for true, 0 for false
         let is_active_int = if product.is_active { 1 } else { 0 };
         self.conn.execute(
-            "INSERT INTO products (business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO products (business_id, name, description, category, price, staff_price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, packaging, is_active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             [
                 &product.business_id.to_string(),
                 &product.name,
                 product.description.as_deref().unwrap_or(""),
                 &product.category,
                 &product.price.to_string(),
+                &product.staff_price.to_string(),
                 &product.cost_price.to_string(),
                 &product.stock_quantity.to_string(),
                 &product.min_stock_level.to_string(),
@@ -443,6 +448,7 @@ impl Database {
                 &product.barcode.as_deref().unwrap_or(""),
                 &product.serial_number.as_deref().unwrap_or(""),
                 &product.image_path.as_deref().unwrap_or(""),
+                &product.packaging.as_deref().unwrap_or(""),
                 &is_active_int.to_string(),
             ],
         )?;
@@ -452,8 +458,33 @@ impl Database {
     }
 
     pub fn get_all_users(&self) -> Result<Vec<serde_json::Value>> {
-        let mut stmt = self.conn.prepare("SELECT id, username, password_hash, name, email, role, business_id, temporary_password, created_at, is_active FROM users ORDER BY id")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, username, password_hash, name, email, role, business_id, temporary_password, created_at, is_active, COALESCE(is_hidden, 0)
+             FROM users ORDER BY id",
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
         let user_iter = stmt.query_map([], |row| {
+            // business_id may be INTEGER, NULL, or legacy TEXT "" from older sync imports
+            let business_id = match row.get_ref(6)? {
+                rusqlite::types::ValueRef::Null => None,
+                rusqlite::types::ValueRef::Integer(i) => Some(i),
+                rusqlite::types::ValueRef::Text(t) => {
+                    let s = String::from_utf8_lossy(t);
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        trimmed.parse::<i64>().ok()
+                    }
+                }
+                rusqlite::types::ValueRef::Real(f) => Some(f as i64),
+                _ => None,
+            };
+            let created_at: String = match row.get_ref(8)? {
+                rusqlite::types::ValueRef::Null => String::new(),
+                rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => row.get::<_, String>(8).unwrap_or_default(),
+            };
             Ok(serde_json::json!({
                 "id": row.get::<_, i64>(0)?,
                 "username": row.get::<_, String>(1)?,
@@ -461,10 +492,12 @@ impl Database {
                 "name": row.get::<_, Option<String>>(3)?,
                 "email": row.get::<_, Option<String>>(4)?,
                 "role": row.get::<_, String>(5)?,
-                "business_id": row.get::<_, Option<i64>>(6)?,
+                "business_id": business_id,
                 "temporary_password": row.get::<_, Option<String>>(7)?,
-                "created_at": row.get::<_, String>(8)?,
-                "is_active": row.get::<_, i64>(9)? != 0
+                "created_at": created_at,
+                "is_active": row.get::<_, i64>(9).unwrap_or(1) != 0,
+                "is_hidden": row.get::<_, i64>(10).unwrap_or(0) != 0,
+                "synced_at": now,
             }))
         })?;
         user_iter.collect()
@@ -472,11 +505,25 @@ impl Database {
 
     pub fn get_all_sales(&self) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status, s.created_at, s.notes
+            "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status, s.created_at, s.notes, s.business_id
              FROM sales s
              ORDER BY s.created_at DESC"
         )?;
+        let now = chrono::Utc::now().to_rfc3339();
         let sale_iter = stmt.query_map([], |row| {
+            let bid = match row.get_ref(7)? {
+                rusqlite::types::ValueRef::Null => None,
+                rusqlite::types::ValueRef::Integer(i) => Some(i),
+                rusqlite::types::ValueRef::Text(t) => {
+                    let s = String::from_utf8_lossy(t);
+                    if s.trim().is_empty() {
+                        None
+                    } else {
+                        s.trim().parse::<i64>().ok()
+                    }
+                }
+                _ => None,
+            };
             Ok(serde_json::json!({
                 "id": row.get::<_, i64>(0)?,
                 "user_id": row.get::<_, i64>(1)?,
@@ -484,7 +531,9 @@ impl Database {
                 "payment_method": row.get::<_, String>(3)?,
                 "payment_status": row.get::<_, String>(4)?,
                 "created_at": row.get::<_, String>(5)?,
-                "notes": row.get::<_, Option<String>>(6)?
+                "notes": row.get::<_, Option<String>>(6)?,
+                "business_id": bid,
+                "synced_at": now,
             }))
         })?;
         sale_iter.collect()
@@ -511,7 +560,7 @@ impl Database {
 
     pub fn get_all_products(&self) -> Result<Vec<Product>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at 
+            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 
              FROM products WHERE is_active = 1 ORDER BY name"
         )?;
         let product_iter = stmt.query_map([], |row| {
@@ -526,6 +575,7 @@ impl Database {
                 description: row.get(3)?,
                 category: row.get(4)?,
                 price: row.get(5)?,
+                staff_price: row.get::<_, f64>(17).unwrap_or(0.0),
                 cost_price: row.get(6)?,
                 stock_quantity: row.get(7)?,
                 min_stock_level: row.get(8)?,
@@ -535,6 +585,7 @@ impl Database {
                 barcode: row.get(12)?,
                 serial_number: row.get(13)?,
                 image_path: row.get::<_, Option<String>>(14)?,
+                packaging: row.get::<_, Option<String>>(18).unwrap_or(None),
                 is_active,
                 created_at: row.get(16)?,
             })
@@ -569,7 +620,7 @@ impl Database {
         
         // Query with is_active filter - use explicit column names to ensure correct order
         let mut stmt = self.conn.prepare(
-            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at 
+            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 
              FROM products WHERE business_id = ?1 AND is_active = 1 ORDER BY name"
         )?;
         let product_iter = stmt.query_map([business_id], |row| {
@@ -584,6 +635,7 @@ impl Database {
                 description: row.get(3)?,
                 category: row.get(4)?,
                 price: row.get(5)?,
+                staff_price: row.get::<_, f64>(17).unwrap_or(0.0),
                 cost_price: row.get(6)?,
                 stock_quantity: row.get(7)?,
                 min_stock_level: row.get(8)?,
@@ -593,6 +645,7 @@ impl Database {
                 barcode: row.get(12)?,
                 serial_number: row.get(13)?,
                 image_path: row.get::<_, Option<String>>(14)?,
+                packaging: row.get::<_, Option<String>>(18).unwrap_or(None),
                 is_active,
                 created_at: row.get(16)?,
             })
@@ -640,6 +693,7 @@ impl Database {
             "fridge" => "fridge_stock",
             "show" => "show_stock",
             "store" => "store_stock",
+            "sports" => "sports_stock",
             _ => return Err(rusqlite::Error::InvalidColumnName(stock_type.to_string())),
         };
 
@@ -720,7 +774,7 @@ impl Database {
 
     pub fn get_low_stock_products(&self) -> Result<Vec<Product>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at 
+            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 
              FROM products WHERE fridge_stock <= 5 AND is_active = 1"
         )?;
         let product_iter = stmt.query_map([], |row| {
@@ -735,6 +789,7 @@ impl Database {
                 description: row.get(3)?,
                 category: row.get(4)?,
                 price: row.get(5)?,
+                staff_price: row.get::<_, f64>(17).unwrap_or(0.0),
                 cost_price: row.get(6)?,
                 stock_quantity: row.get(7)?,
                 min_stock_level: row.get(8)?,
@@ -744,6 +799,7 @@ impl Database {
                 barcode: row.get(12)?,
                 serial_number: row.get(13)?,
                 image_path: row.get::<_, Option<String>>(14)?,
+                packaging: row.get::<_, Option<String>>(18).unwrap_or(None),
                 is_active,
                 created_at: row.get(16)?,
             })
@@ -754,7 +810,7 @@ impl Database {
     // Find product by barcode or serial_number
     pub fn find_product_by_code(&self, code: &str, business_id: i64) -> Result<Option<Product>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at 
+            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 
              FROM products WHERE (barcode = ?1 OR serial_number = ?1) AND business_id = ?2 AND is_active = 1 LIMIT 1"
         )?;
         
@@ -769,6 +825,7 @@ impl Database {
                 description: row.get(3)?,
                 category: row.get(4)?,
                 price: row.get(5)?,
+                staff_price: row.get::<_, f64>(17).unwrap_or(0.0),
                 cost_price: row.get(6)?,
                 stock_quantity: row.get(7)?,
                 min_stock_level: row.get(8)?,
@@ -778,6 +835,7 @@ impl Database {
                 barcode: row.get(12)?,
                 serial_number: row.get(13)?,
                 image_path: row.get::<_, Option<String>>(14)?,
+                packaging: row.get::<_, Option<String>>(18).unwrap_or(None),
                 is_active,
                 created_at: row.get(16)?,
             })
@@ -818,13 +876,28 @@ impl Database {
             "SELECT id, username, role, name, email, business_id, password_hash FROM users WHERE TRIM(username) = ?1"
         )?;
         let (id, db_username, role, name, email, business_id, stored_hash) = stmt.query_row([username_trimmed], |row| {
+            let bid = match row.get_ref(5)? {
+                rusqlite::types::ValueRef::Null => None,
+                rusqlite::types::ValueRef::Integer(i) => Some(i),
+                rusqlite::types::ValueRef::Text(t) => {
+                    let s = String::from_utf8_lossy(t);
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        trimmed.parse::<i64>().ok()
+                    }
+                }
+                rusqlite::types::ValueRef::Real(f) => Some(f as i64),
+                _ => None,
+            };
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
+                bid,
                 row.get::<_, String>(6)?,
             ))
         })?;
@@ -848,11 +921,20 @@ impl Database {
             },
         ).unwrap_or(false);
 
-        // Return user data including temporary_password flag
+        // Role is stored as plain text or JSON string — always expose a string to the UI
+        let role_string = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&role) {
+            match v {
+                serde_json::Value::String(s) => s,
+                other => other.as_str().unwrap_or(&role).trim_matches('"').to_string(),
+            }
+        } else {
+            role.trim_matches('"').to_string()
+        };
+
         Ok(serde_json::json!({
             "id": id,
             "username": db_username,
-            "role": serde_json::from_str::<serde_json::Value>(&role).unwrap_or(serde_json::Value::Null),
+            "role": role_string,
             "name": name,
             "email": email,
             "business_id": business_id,
@@ -1556,7 +1638,7 @@ impl Database {
     // Get low stock products for a business
     pub fn get_low_stock_products_for_business(&self, business_id: i64) -> Result<Vec<Product>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at 
+            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 
              FROM products 
              WHERE business_id = ?1 
              AND is_active = 1 
@@ -1576,6 +1658,7 @@ impl Database {
                 description: row.get(3)?,
                 category: row.get(4)?,
                 price: row.get(5)?,
+                staff_price: row.get::<_, f64>(17).unwrap_or(0.0),
                 cost_price: row.get(6)?,
                 stock_quantity: row.get(7)?,
                 min_stock_level: row.get(8)?,
@@ -1585,6 +1668,7 @@ impl Database {
                 barcode: row.get(12)?,
                 serial_number: row.get(13)?,
                 image_path: row.get::<_, Option<String>>(14)?,
+                packaging: row.get::<_, Option<String>>(18).unwrap_or(None),
                 is_active,
                 created_at: row.get(16)?,
             })
@@ -1595,7 +1679,7 @@ impl Database {
     // Get out of stock products for a business
     pub fn get_out_of_stock_products_for_business(&self, business_id: i64) -> Result<Vec<Product>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at 
+            "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 
              FROM products 
              WHERE business_id = ?1 
              AND is_active = 1 
@@ -1614,6 +1698,7 @@ impl Database {
                 description: row.get(3)?,
                 category: row.get(4)?,
                 price: row.get(5)?,
+                staff_price: row.get::<_, f64>(17).unwrap_or(0.0),
                 cost_price: row.get(6)?,
                 stock_quantity: row.get(7)?,
                 min_stock_level: row.get(8)?,
@@ -1623,6 +1708,7 @@ impl Database {
                 barcode: row.get(12)?,
                 serial_number: row.get(13)?,
                 image_path: row.get::<_, Option<String>>(14)?,
+                packaging: row.get::<_, Option<String>>(18).unwrap_or(None),
                 is_active,
                 created_at: row.get(16)?,
             })

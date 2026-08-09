@@ -8,6 +8,8 @@ import {
   verifyPasswordResetIdentity,
 } from './api'
 import { checkForUpdates, installUpdate } from './updateApi'
+import { runtimeLabel } from './lib/platform'
+import { isTauriApp, syncFromCloudDesktop, syncToCloudDesktop } from './tauriBridge'
 import {
   StaffPOSInterface,
   StaffInventoryCheck,
@@ -1383,7 +1385,59 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
           <div className="px-2 mb-3">
             <p className="text-xs text-white/40 truncate">{currentUser?.name || currentUser?.username}</p>
             <p className="text-[11px] text-white/25">{roleLabel}</p>
+            <p className="mt-1 text-[10px] font-semibold tracking-wide uppercase text-[#e0a06a]">
+              {runtimeLabel()}{isTauriApp() ? ' · Offline' : ''}
+            </p>
           </div>
+          {isTauriApp() ? (
+            <>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  toast.loading('Syncing…', { id: 'desktop-sync' })
+                  await syncFromCloudDesktop()
+                  await syncToCloudDesktop()
+                  toast.success('Sync complete', { id: 'desktop-sync' })
+                } catch (e: any) {
+                  toast.error(e?.message || 'Sync failed (offline?)', { id: 'desktop-sync' })
+                }
+              }}
+              className="w-full mb-2 border border-[#e0a06a]/40 hover:bg-[#e0a06a]/10 text-[#e0a06a] py-2 px-4 rounded-md text-sm font-medium transition-colors"
+            >
+              Sync now
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  toast.loading('Checking for updates…', { id: 'desktop-update' })
+                  const info = await checkForUpdates()
+                  if (info.available) {
+                    toast.success(`Update v${info.version} available`, { id: 'desktop-update' })
+                    if (window.confirm(`Install update v${info.version}? The app will restart.`)) {
+                      toast.loading('Downloading update…', { id: 'desktop-update' })
+                      const result = await installUpdate()
+                      if (result.success) toast.success(result.message, { id: 'desktop-update' })
+                      else toast.error(result.message, { id: 'desktop-update' })
+                    } else {
+                      toast.dismiss('desktop-update')
+                    }
+                  } else {
+                    toast.success(`You are on the latest version (v${info.current_version})`, {
+                      id: 'desktop-update',
+                    })
+                  }
+                } catch (e: any) {
+                  toast.error(e?.message || 'Update check failed', { id: 'desktop-update' })
+                }
+              }}
+              className="w-full mb-2 border border-white/15 hover:bg-white/10 text-white/80 py-2 px-4 rounded-md text-sm font-medium transition-colors"
+            >
+              Check for updates
+            </button>
+            </>
+          ) : null}
           <button
             type="button"
             onClick={onLogout}
@@ -1599,8 +1653,8 @@ function SuperAdminDashboard({ onNavigateToSection }: { onNavigateToSection: (se
       } else {
         toast.success('You are running the latest version')
       }
-    } catch (error) {
-      toast.error('Failed to check for updates')
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to check for updates')
     } finally {
       setCheckingUpdate(false)
     }

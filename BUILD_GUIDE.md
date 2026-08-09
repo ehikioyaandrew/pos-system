@@ -1,5 +1,7 @@
 # Tauri Build Guide
 
+> Full desktop workflow: see [DESKTOP.md](./DESKTOP.md). The desktop app loads the same React + Supabase UI as the web app.
+
 ## Build Process
 
 The Tauri build process automatically handles the frontend build:

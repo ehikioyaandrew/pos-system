@@ -1,4 +1,5 @@
 mod database;
+mod offline_api;
 mod supabase;
 mod email;
 
@@ -166,6 +167,24 @@ use tauri::State;
 
 // Cloud sync configuration - loaded from environment variables
 // Set these in a .env file in the src-tauri directory or as environment variables
+fn load_env_files() {
+    // Prefer src-tauri/.env, then project root .env (Vite keys)
+    let _ = dotenv::from_filename(".env");
+    let _ = dotenv::from_filename("../.env");
+    let _ = dotenv::dotenv();
+
+    if std::env::var("SUPABASE_URL").is_err() {
+        if let Ok(v) = std::env::var("VITE_SUPABASE_URL") {
+            std::env::set_var("SUPABASE_URL", v);
+        }
+    }
+    if std::env::var("SUPABASE_ANON_KEY").is_err() {
+        if let Ok(v) = std::env::var("VITE_SUPABASE_ANON_KEY") {
+            std::env::set_var("SUPABASE_ANON_KEY", v);
+        }
+    }
+}
+
 fn get_supabase_url() -> String {
     std::env::var("SUPABASE_URL")
         .unwrap_or_else(|_| "https://your-project.supabase.co".to_string())
@@ -178,6 +197,7 @@ fn get_supabase_anon_key() -> String {
 
 fn get_supabase_service_role_key() -> String {
     std::env::var("SUPABASE_SERVICE_ROLE_KEY")
+        .or_else(|_| std::env::var("SUPABASE_ANON_KEY"))
         .unwrap_or_else(|_| String::new())
 }
 
@@ -187,9 +207,7 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load environment variables from .env file if it exists
-    // This allows configuration via .env file in src-tauri directory
-    let _ = dotenv::dotenv();
+    load_env_files();
     
     let app_data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::env::temp_dir())
@@ -214,6 +232,7 @@ pub fn run() {
             db: Arc::new(Mutex::new(db)),
         })
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Ensure main window is visible and focused
             if let Some(window) = app.get_webview_window("main") {
@@ -301,6 +320,22 @@ pub fn run() {
             get_inventory_transfers,
             get_inventory_adjustments,
             get_inventory_summary,
+            get_sales_log,
+            get_sale_receipt,
+            get_debtors,
+            get_debt_sales,
+            add_manual_debt,
+            record_debt_payment,
+            mark_debt_paid,
+            get_activity_logs,
+            get_product_categories,
+            create_product_category,
+            delete_product_category,
+            get_users_for_business,
+            get_staff_for_business,
+            get_dashboard_metrics,
+            update_sale_details,
+            update_sale_date,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {
@@ -322,8 +357,78 @@ async fn authenticate_user(state: State<'_, AppState>, request: serde_json::Valu
     let username: String = serde_json::from_value(request["username"].clone()).map_err(|e| format!("Invalid username: {}", e))?;
     let password_hash: String = serde_json::from_value(request["password_hash"].clone()).map_err(|e| format!("Invalid password: {}", e))?;
 
-    db.authenticate_user(&username, &password_hash)
-        .map_err(|e| format!("Authentication failed: {}", e))
+    let mut user = db
+        .authenticate_user(&username, &password_hash)
+        .map_err(|_| "Invalid username or password".to_string())?;
+
+    // Normalize role to a plain string for the React UI
+    if let Some(role) = user.get("role") {
+        let role_str = if role.is_string() {
+            role.as_str().unwrap_or("Staff").to_string()
+        } else if role.is_object() {
+            role.to_string().trim_matches('"').to_string()
+        } else {
+            role.to_string().trim_matches('"').to_string()
+        };
+        user["role"] = serde_json::Value::String(role_str);
+    }
+
+    // Reject inactive users
+    let active: i64 = db
+        .conn
+        .query_row(
+            "SELECT COALESCE(is_active, 1) FROM users WHERE id = ?1",
+            [user.get("id").and_then(|v| v.as_i64()).unwrap_or(0)],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    if active == 0 {
+        return Err("This account is inactive".into());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let uid = user.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let _ = db
+        .conn
+        .execute("UPDATE users SET last_login = ?1 WHERE id = ?2", rusqlite::params![now, uid]);
+    user["last_login"] = serde_json::Value::String(now.clone());
+    user["is_active"] = serde_json::Value::Bool(true);
+
+    if let Some(bid) = user.get("business_id").and_then(|v| v.as_i64()) {
+        let hidden: i64 = db
+            .conn
+            .query_row(
+                "SELECT COALESCE(is_hidden, 0) FROM users WHERE id = ?1",
+                [uid],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if hidden == 0 {
+            let after = serde_json::json!({
+                "username": user.get("username"),
+                "role": user.get("role"),
+                "name": user.get("name"),
+            });
+            let _ = db.log_activity_full(
+                bid,
+                Some(uid),
+                "LOGIN",
+                "user",
+                &uid.to_string(),
+                &format!(
+                    "{} signed in",
+                    user.get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                        .unwrap_or("User")
+                ),
+                None,
+                Some(&after.to_string()),
+            );
+        }
+    }
+
+    Ok(user)
 }
 
 #[tauri::command]
@@ -504,6 +609,12 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
         .map(|s| s.to_string());
 
     // Create product struct without id (it will be auto-generated)
+    let staff_price: f64 = request["staff_price"]
+        .as_f64()
+        .or_else(|| request["staffPrice"].as_f64())
+        .unwrap_or(0.0);
+    let packaging: Option<String> = request["packaging"].as_str().map(|s| s.to_string());
+
     let product = Product {
         id: 0, // This will be ignored and auto-generated
         business_id,
@@ -511,6 +622,7 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
         description,
         category,
         price,
+        staff_price,
         cost_price,
         stock_quantity,
         min_stock_level,
@@ -520,6 +632,7 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
         barcode,
         serial_number,
         image_path,
+        packaging,
         is_active: true,
         created_at: "".to_string(), // This will be set by the database
     };
@@ -623,7 +736,10 @@ struct ProcessSaleRequest {
     payment_method: String,
     staff_id: i64,
     business_id: i64,
-    location: Option<String>, // "fridge" or "show" - defaults to "fridge" for POS
+    location: Option<String>, // fridge | show | sports
+    customer_name: Option<String>,
+    sale_date: Option<String>,
+    notes: Option<String>,
 }
 
 #[tauri::command]
@@ -631,59 +747,138 @@ async fn process_sale(
     state: State<'_, AppState>,
     request: ProcessSaleRequest
 ) -> Result<serde_json::Value, String> {
-    // Calculate total amount
+    if request.items.is_empty() {
+        return Err("Cart is empty".into());
+    }
+
+    let payment_method = request.payment_method.to_uppercase();
+    let location = request
+        .location
+        .as_deref()
+        .unwrap_or("fridge")
+        .to_lowercase();
+    let mut customer_name = request
+        .customer_name
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if payment_method == "DEBT" {
+        if customer_name.is_empty() {
+            return Err("Customer name is required for debt sales".into());
+        }
+        if customer_name.eq_ignore_ascii_case("Walk-in Customer") {
+            return Err("Walk-in customer cannot hold debt. Enter a real customer name.".into());
+        }
+    } else if customer_name.is_empty() {
+        customer_name = "Walk-in Customer".into();
+    }
+
+    let notes = request
+        .notes
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| {
+            if payment_method == "DEBT" {
+                format!("DEBT:{}", customer_name)
+            } else {
+                customer_name.clone()
+            }
+        });
+
+    let created_at = request
+        .sale_date
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let payment_status = if payment_method == "DEBT" {
+        "PENDING"
+    } else {
+        "COMPLETED"
+    };
+
     let mut total_amount = 0.0;
-    let items_count = request.items.len();
     for item in &request.items {
         total_amount += item.unit_price * item.quantity as f64;
     }
+    let items_count = request.items.len();
+    let sale_id = chrono::Utc::now().timestamp_millis();
 
-    // Collect items for later processing (after releasing db lock)
     let mut items_to_check: Vec<(i64, i64)> = Vec::new();
-    
-    // Do all database operations in a block scope
-    let (_sale_id, business_id, sale_id_val, total_amount_val, items_count_val, payment_method) = {
+
+    {
         let db = state.db.lock().unwrap();
 
-        // Create sale
-        let sale_id = db.create_sale(request.staff_id, total_amount, &request.payment_method)
-            .map_err(|e| format!("Failed to create sale: {}", e))?;
-        
-        // Add sale items and update inventory
-        for item in request.items {
-            // Get product details to check category
+        // Validate stock (skip sports services)
+        if location != "sports" {
+            for item in &request.items {
+                let (name, available) = db
+                    .get_stock_for_location(item.product_id, &location)
+                    .map_err(|e| format!("Product {}: {}", item.product_id, e))?;
+                if available < item.quantity {
+                    return Err(format!(
+                        "Not enough {} in {} (have {}, need {})",
+                        name, location, available, item.quantity
+                    ));
+                }
+            }
+        }
+
+        db.create_sale_full(
+            sale_id,
+            request.staff_id,
+            request.business_id,
+            total_amount,
+            &payment_method,
+            payment_status,
+            Some(&notes),
+            &created_at,
+        )
+        .map_err(|e| format!("Failed to create sale: {}", e))?;
+
+        for (idx, item) in request.items.iter().enumerate() {
             let product_result = db.conn.query_row(
                 "SELECT category, name FROM products WHERE id = ?1",
                 [item.product_id],
                 |row: &rusqlite::Row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             );
 
-            // Insert sale item
-            db.conn.execute(
-                "INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total_price)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                [
-                    &sale_id.to_string(),
-                    &item.product_id.to_string(),
-                    &item.quantity.to_string(),
-                    &item.unit_price.to_string(),
-                    &(item.unit_price * item.quantity as f64).to_string(),
-                ],
-            ).map_err(|e| format!("Failed to add sale item: {}", e))?;
-            
-            let sale_item_id = db.conn.last_insert_rowid();
+            let line_total = item.unit_price * item.quantity as f64;
+            let item_id = sale_id + idx as i64 + 1;
+            db.conn
+                .execute(
+                    "INSERT INTO sale_items (id, sale_id, product_id, quantity, unit_price, total_price)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        item_id,
+                        sale_id,
+                        item.product_id,
+                        item.quantity,
+                        item.unit_price,
+                        line_total
+                    ],
+                )
+                .map_err(|e| format!("Failed to add sale item: {}", e))?;
 
-            // Update stock based on location (fridge or show)
-            let location = request.location.as_deref().unwrap_or("fridge");
-            db.update_stock_type(item.product_id, location, -(item.quantity as i32), request.staff_id, Some("Sale transaction"))
+            if location != "sports" {
+                db.update_stock_type(
+                    item.product_id,
+                    &location,
+                    -(item.quantity as i32),
+                    request.staff_id,
+                    Some("Sale transaction"),
+                )
                 .map_err(|e| format!("Failed to update stock: {}", e))?;
+            }
 
-            // Create kitchen order if product is KITCHEN category
             if let Ok((category, product_name)) = product_result {
                 if category == "KITCHEN" {
                     let _ = db.create_kitchen_order(
                         sale_id,
-                        sale_item_id,
+                        item_id,
                         item.product_id,
                         &product_name,
                         item.quantity,
@@ -691,30 +886,56 @@ async fn process_sale(
                     );
                 }
             }
-            
-            // Store for low stock check after releasing lock
+
             items_to_check.push((item.product_id, request.business_id));
         }
-        
-        // Return values needed after lock is released
-        (sale_id, request.business_id, sale_id, total_amount, items_count as i64, request.payment_method.clone())
-    };
-    
-    // Send pending sales notification email (after lock is dropped)
-    send_pending_sales_notification(state.db.clone(), business_id, sale_id_val, total_amount_val, items_count_val).await;
-    
-    // Check for low stock after releasing the database lock
+
+        if payment_method == "DEBT" {
+            db.charge_sale_to_debt(
+                request.business_id,
+                &customer_name,
+                total_amount,
+                sale_id,
+                request.staff_id,
+                &created_at,
+            )
+            .map_err(|e| format!("Sale saved but debt ledger update failed: {}", e))?;
+        }
+
+        let _ = db.log_activity(
+            request.business_id,
+            Some(request.staff_id),
+            "SALE",
+            "sale",
+            &sale_id.to_string(),
+            &format!("Sale #{} · {}", sale_id, payment_method),
+            None,
+        );
+    }
+
+    if payment_method == "DEBT" {
+        send_pending_sales_notification(
+            state.db.clone(),
+            request.business_id,
+            sale_id,
+            total_amount,
+            items_count as i64,
+        )
+        .await;
+    }
+
     for (product_id, bid) in items_to_check {
         check_and_send_low_stock_email(state.db.clone(), product_id, bid).await;
     }
 
-    // Return sale information
     Ok(serde_json::json!({
-        "sale_id": sale_id_val,
-        "total_amount": total_amount_val,
+        "sale_id": sale_id,
+        "total_amount": total_amount,
         "payment_method": payment_method,
+        "customer_name": customer_name,
+        "created_at": created_at,
         "items": items_count,
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": created_at
     }))
 }
 
@@ -750,68 +971,130 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
     }
 
     // Get all data for sync in a block scope
-    let (users, businesses, products_json, sales, sale_items, users_count, businesses_count, products_count, sales_count, sale_items_count) = {
+    let (
+        users,
+        businesses,
+        products_json,
+        sales,
+        sale_items,
+        activity_logs,
+        customer_debts,
+        debt_entries,
+        users_count,
+        businesses_count,
+        products_count,
+        sales_count,
+        sale_items_count,
+        activity_count,
+        debts_count,
+        debt_entries_count,
+    ) = {
         let db = state.db.lock().unwrap();
 
-        // Get all data for sync
         let users = db.get_all_users().map_err(|e| format!("Failed to get users: {}", e))?;
         let businesses = db.get_businesses().map_err(|e| format!("Failed to get businesses: {}", e))?;
         let products = db.get_all_products().map_err(|e| format!("Failed to get products: {}", e))?;
         let sales = db.get_all_sales().map_err(|e| format!("Failed to get sales: {}", e))?;
         let sale_items = db.get_all_sale_items().map_err(|e| format!("Failed to get sale items: {}", e))?;
+        let activity_logs = db
+            .get_all_activity_logs()
+            .map_err(|e| format!("Failed to get activity logs: {}", e))?;
+        let customer_debts = db
+            .get_all_customer_debts()
+            .map_err(|e| format!("Failed to get debts: {}", e))?;
+        let debt_entries = db
+            .get_all_debt_entries()
+            .map_err(|e| format!("Failed to get debt entries: {}", e))?;
 
-        // Convert products to JSON format with all stock fields
-        let products_json: Vec<serde_json::Value> = products.iter().map(|p| {
-            serde_json::json!({
-                "id": p.id,
-                "business_id": p.business_id,
-                "name": p.name,
-                "description": p.description,
-                "category": p.category,
-                "price": p.price,
-                "cost_price": p.cost_price,
-                "stock_quantity": p.stock_quantity,
-                "min_stock_level": p.min_stock_level,
-                "fridge_stock": p.fridge_stock,
-                "show_stock": p.show_stock,
-                "store_stock": p.store_stock,
-                "barcode": p.barcode,
-                "serial_number": p.serial_number,
-                "image_path": p.image_path,
-                "is_active": p.is_active,
-                "created_at": p.created_at
+        let products_json: Vec<serde_json::Value> = products
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "business_id": p.business_id,
+                    "name": p.name,
+                    "description": p.description,
+                    "category": p.category,
+                    "price": p.price,
+                    "staff_price": p.staff_price,
+                    "cost_price": p.cost_price,
+                    "stock_quantity": p.stock_quantity,
+                    "min_stock_level": p.min_stock_level,
+                    "fridge_stock": p.fridge_stock,
+                    "show_stock": p.show_stock,
+                    "store_stock": p.store_stock,
+                    "barcode": p.barcode,
+                    "serial_number": p.serial_number,
+                    "image_path": p.image_path,
+                    "packaging": p.packaging,
+                    "is_active": p.is_active,
+                    "created_at": p.created_at,
+                    "synced_at": chrono::Utc::now().to_rfc3339(),
+                })
             })
-        }).collect();
+            .collect();
 
-        // Get counts before moving the vectors
         let users_count = users.len();
         let businesses_count = businesses.len();
         let products_count = products.len();
         let sales_count = sales.len();
         let sale_items_count = sale_items.len();
+        let activity_count = activity_logs.len();
+        let debts_count = customer_debts.len();
+        let debt_entries_count = debt_entries.len();
 
-        // Return all data (lock is released when block ends)
-        (users, businesses, products_json, sales, sale_items, users_count, businesses_count, products_count, sales_count, sale_items_count)
+        (
+            users,
+            businesses,
+            products_json,
+            sales,
+            sale_items,
+            activity_logs,
+            customer_debts,
+            debt_entries,
+            users_count,
+            businesses_count,
+            products_count,
+            sales_count,
+            sale_items_count,
+            activity_count,
+            debts_count,
+            debt_entries_count,
+        )
     };
 
-    // Create Supabase client
     let client = SupabaseClient::new(&supabase_url, &service_key);
 
-    // Sync to Supabase (lock is already released)
-    client.upsert_users(users).await
+    client
+        .upsert_users(users)
+        .await
         .map_err(|e| format!("Failed to sync users: {}", e))?;
-    
-    client.upsert_businesses(businesses).await
+    client
+        .upsert_businesses(businesses)
+        .await
         .map_err(|e| format!("Failed to sync businesses: {}", e))?;
-    
-    client.upsert_products(products_json).await
+    client
+        .upsert_products(products_json)
+        .await
         .map_err(|e| format!("Failed to sync products: {}", e))?;
-    
-    client.upsert_sales(sales).await
+    client
+        .upsert_sales(sales)
+        .await
         .map_err(|e| format!("Failed to sync sales: {}", e))?;
-    
-    client.upsert_sale_items(sale_items).await
+    client
+        .upsert_sale_items(sale_items)
+        .await
         .map_err(|e| format!("Failed to sync sale items: {}", e))?;
+    // Soft-fail optional tables so core POS sync still succeeds
+    if let Err(e) = client.upsert_activity_logs(activity_logs).await {
+        eprintln!("Warning: activity log sync skipped: {}", e);
+    }
+    if let Err(e) = client.upsert_customer_debts(customer_debts).await {
+        eprintln!("Warning: customer debts sync skipped: {}", e);
+    }
+    if let Err(e) = client.upsert_debt_entries(debt_entries).await {
+        eprintln!("Warning: debt entries sync skipped: {}", e);
+    }
 
     let sync_data = serde_json::json!({
         "users_count": users_count,
@@ -819,13 +1102,18 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
         "products_count": products_count,
         "sales_count": sales_count,
         "sale_items_count": sale_items_count,
+        "activity_logs_count": activity_count,
+        "customer_debts_count": debts_count,
+        "debt_entries_count": debt_entries_count,
         "status": "success",
         "message": "Data successfully synced to cloud",
         "last_sync": chrono::Utc::now().to_rfc3339()
     });
 
-    println!("Successfully synced to cloud: {} users, {} businesses, {} products, {} sales, {} sale items",
-             users_count, businesses_count, products_count, sales_count, sale_items_count);
+    println!(
+        "Synced to cloud: {} users, {} products, {} sales, {} audit logs, {} debts",
+        users_count, products_count, sales_count, activity_count, debts_count
+    );
 
     Ok(sync_data)
 }
@@ -853,6 +1141,9 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         .map_err(|e| format!("Failed to fetch sales: {}", e))?;
     let cloud_sale_items = client.fetch_sale_items().await
         .map_err(|e| format!("Failed to fetch sale items: {}", e))?;
+    let cloud_activity = client.fetch_activity_logs().await.unwrap_or_default();
+    let cloud_debts = client.fetch_customer_debts().await.unwrap_or_default();
+    let cloud_debt_entries = client.fetch_debt_entries().await.unwrap_or_default();
 
     let db = state.db.lock().unwrap();
 
@@ -868,6 +1159,7 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         let business_id = user.get("business_id").and_then(|v| v.as_i64());
         let temp_pass = user.get("temporary_password").and_then(|v| v.as_str());
         let is_active = user.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+        let is_hidden = user.get("is_hidden").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // Check if user exists
         let exists = db.conn.query_row(
@@ -877,17 +1169,42 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         ).unwrap_or(0) > 0;
 
         if exists {
-            // Update existing user
-            db.conn.execute(
-                "UPDATE users SET username = ?1, password_hash = ?2, role = ?3, name = ?4, email = ?5, business_id = ?6, temporary_password = ?7, is_active = ?8 WHERE id = ?9",
-                [username, password_hash, role, name.unwrap_or(""), email.unwrap_or(""), &business_id.map(|v| v.to_string()).unwrap_or_default(), temp_pass.unwrap_or(""), &(is_active as i64).to_string(), &id.to_string()]
-            ).ok();
+            // Update existing user (NULL business_id for platform admins — never empty string)
+            db.conn
+                .execute(
+                    "UPDATE users SET username = ?1, password_hash = ?2, role = ?3, name = ?4, email = ?5, business_id = ?6, temporary_password = ?7, is_active = ?8, is_hidden = ?9 WHERE id = ?10",
+                    rusqlite::params![
+                        username,
+                        password_hash,
+                        role,
+                        name.unwrap_or(""),
+                        email.unwrap_or(""),
+                        business_id,
+                        temp_pass.unwrap_or(""),
+                        is_active as i64,
+                        is_hidden as i64,
+                        id
+                    ],
+                )
+                .ok();
         } else {
-            // Insert new user
-            db.conn.execute(
-                "INSERT INTO users (id, username, password_hash, role, name, email, business_id, temporary_password, is_active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                [&id.to_string(), username, password_hash, role, name.unwrap_or(""), email.unwrap_or(""), &business_id.map(|v| v.to_string()).unwrap_or_default(), temp_pass.unwrap_or(""), &(is_active as i64).to_string()]
-            ).ok();
+            db.conn
+                .execute(
+                    "INSERT INTO users (id, username, password_hash, role, name, email, business_id, temporary_password, is_active, is_hidden) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        id,
+                        username,
+                        password_hash,
+                        role,
+                        name.unwrap_or(""),
+                        email.unwrap_or(""),
+                        business_id,
+                        temp_pass.unwrap_or(""),
+                        is_active as i64,
+                        is_hidden as i64
+                    ],
+                )
+                .ok();
         }
         users_count += 1;
     }
@@ -939,6 +1256,8 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         let description = product.get("description").and_then(|v| v.as_str());
         let category = product.get("category").and_then(|v| v.as_str()).unwrap_or("BAR");
         let price = product.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let staff_price = product.get("staff_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let packaging = product.get("packaging").and_then(|v| v.as_str()).unwrap_or("");
         let cost_price = product.get("cost_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let stock_quantity = product.get("stock_quantity").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let min_stock_level = product.get("min_stock_level").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -959,13 +1278,13 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
 
         if exists {
             db.conn.execute(
-                "UPDATE products SET business_id = ?1, name = ?2, description = ?3, category = ?4, price = ?5, cost_price = ?6, stock_quantity = ?7, min_stock_level = ?8, fridge_stock = ?9, show_stock = ?10, store_stock = ?11, barcode = ?12, serial_number = ?13, image_path = ?14, is_active = ?15, created_at = ?16 WHERE id = ?17",
-                [&business_id.to_string(), name, description.unwrap_or(""), category, &price.to_string(), &cost_price.to_string(), &stock_quantity.to_string(), &min_stock_level.to_string(), &fridge_stock.to_string(), &show_stock.to_string(), &store_stock.to_string(), barcode.unwrap_or(""), serial_number.unwrap_or(""), image_path.unwrap_or(""), &(is_active as i64).to_string(), created_at, &id.to_string()]
+                "UPDATE products SET business_id = ?1, name = ?2, description = ?3, category = ?4, price = ?5, staff_price = ?6, cost_price = ?7, stock_quantity = ?8, min_stock_level = ?9, fridge_stock = ?10, show_stock = ?11, store_stock = ?12, barcode = ?13, serial_number = ?14, image_path = ?15, packaging = ?16, is_active = ?17, created_at = ?18 WHERE id = ?19",
+                [&business_id.to_string(), name, description.unwrap_or(""), category, &price.to_string(), &staff_price.to_string(), &cost_price.to_string(), &stock_quantity.to_string(), &min_stock_level.to_string(), &fridge_stock.to_string(), &show_stock.to_string(), &store_stock.to_string(), barcode.unwrap_or(""), serial_number.unwrap_or(""), image_path.unwrap_or(""), packaging, &(is_active as i64).to_string(), created_at, &id.to_string()]
             ).ok();
         } else {
             db.conn.execute(
-                "INSERT INTO products (id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-                [&id.to_string(), &business_id.to_string(), name, description.unwrap_or(""), category, &price.to_string(), &cost_price.to_string(), &stock_quantity.to_string(), &min_stock_level.to_string(), &fridge_stock.to_string(), &show_stock.to_string(), &store_stock.to_string(), barcode.unwrap_or(""), serial_number.unwrap_or(""), image_path.unwrap_or(""), &(is_active as i64).to_string(), created_at]
+                "INSERT INTO products (id, business_id, name, description, category, price, staff_price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, packaging, is_active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                [&id.to_string(), &business_id.to_string(), name, description.unwrap_or(""), category, &price.to_string(), &staff_price.to_string(), &cost_price.to_string(), &stock_quantity.to_string(), &min_stock_level.to_string(), &fridge_stock.to_string(), &show_stock.to_string(), &store_stock.to_string(), barcode.unwrap_or(""), serial_number.unwrap_or(""), image_path.unwrap_or(""), packaging, &(is_active as i64).to_string(), created_at]
             ).ok();
         }
         products_count += 1;
@@ -976,6 +1295,7 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
     for sale in cloud_sales {
         let id = sale.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         let user_id = sale.get("user_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let business_id = sale.get("business_id").and_then(|v| v.as_i64());
         let total_amount = sale.get("total_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let payment_method = sale.get("payment_method").and_then(|v| v.as_str()).unwrap_or("CASH");
         let payment_status = sale.get("payment_status").and_then(|v| v.as_str()).unwrap_or("PENDING");
@@ -988,15 +1308,16 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
             |row: &rusqlite::Row| row.get::<_, i64>(0)
         ).unwrap_or(0) > 0;
 
+        let bid = business_id.map(|v| v.to_string()).unwrap_or_default();
         if exists {
             db.conn.execute(
-                "UPDATE sales SET user_id = ?1, total_amount = ?2, payment_method = ?3, payment_status = ?4, notes = ?5, created_at = ?6 WHERE id = ?7",
-                [&user_id.to_string(), &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, &id.to_string()]
+                "UPDATE sales SET user_id = ?1, business_id = ?2, total_amount = ?3, payment_method = ?4, payment_status = ?5, notes = ?6, created_at = ?7 WHERE id = ?8",
+                [&user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, &id.to_string()]
             ).ok();
         } else {
             db.conn.execute(
-                "INSERT INTO sales (id, user_id, total_amount, payment_method, payment_status, notes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                [&id.to_string(), &user_id.to_string(), &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at]
+                "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                [&id.to_string(), &user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at]
             ).ok();
         }
         sales_count += 1;
@@ -1032,6 +1353,25 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         sale_items_count += 1;
     }
 
+    let mut activity_count = 0;
+    for row in &cloud_activity {
+        if db.upsert_activity_log_row(row).is_ok() {
+            activity_count += 1;
+        }
+    }
+    let mut debts_count = 0;
+    for row in &cloud_debts {
+        if db.upsert_customer_debt_row(row).is_ok() {
+            debts_count += 1;
+        }
+    }
+    let mut debt_entries_count = 0;
+    for row in &cloud_debt_entries {
+        if db.upsert_debt_entry_row(row).is_ok() {
+            debt_entries_count += 1;
+        }
+    }
+
     let sync_result = serde_json::json!({
         "status": "success",
         "message": "Data successfully synced from cloud",
@@ -1040,13 +1380,18 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
             "businesses": businesses_count,
             "products": products_count,
             "sales": sales_count,
-            "sale_items": sale_items_count
+            "sale_items": sale_items_count,
+            "activity_logs": activity_count,
+            "customer_debts": debts_count,
+            "debt_entries": debt_entries_count
         },
         "last_sync": chrono::Utc::now().to_rfc3339()
     });
 
-    println!("Successfully synced from cloud: {} users, {} businesses, {} products, {} sales, {} sale items",
-             users_count, businesses_count, products_count, sales_count, sale_items_count);
+    println!(
+        "Synced from cloud: {} users, {} products, {} sales, {} audit logs, {} debts",
+        users_count, products_count, sales_count, activity_count, debts_count
+    );
 
     Ok(sync_result)
 }
@@ -2136,4 +2481,254 @@ async fn get_system_revenue_summary(
         .map_err(|e| format!("Failed to get system revenue summary: {}", e))
 }
 
+#[tauri::command]
+async fn get_sales_log(
+    state: State<'_, AppState>,
+    business_id: i64,
+    staff_id: Option<i64>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.lock().unwrap();
+    db.get_sales_log(
+        business_id,
+        staff_id,
+        date_from.as_deref(),
+        date_to.as_deref(),
+    )
+    .map_err(|e| format!("Failed to get sales log: {}", e))
+}
 
+#[tauri::command]
+async fn get_sale_receipt(
+    state: State<'_, AppState>,
+    sale_id: i64,
+    business_id: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().unwrap();
+    db.get_sale_receipt(sale_id, business_id)
+        .map_err(|e| format!("Failed to get sale receipt: {}", e))
+}
+
+#[tauri::command]
+async fn get_debtors(
+    state: State<'_, AppState>,
+    business_id: i64,
+    open_only: Option<bool>,
+    staff_id: Option<i64>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let _ = staff_id;
+    let db = state.db.lock().unwrap();
+    db.get_debtors(business_id, open_only.unwrap_or(true))
+        .map_err(|e| format!("Failed to get debtors: {}", e))
+}
+
+#[tauri::command]
+async fn get_debt_sales(
+    state: State<'_, AppState>,
+    business_id: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.lock().unwrap();
+    db.get_debt_sales(business_id)
+        .map_err(|e| format!("Failed to get debt sales: {}", e))
+}
+
+#[tauri::command]
+async fn add_manual_debt(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let business_id = request
+        .get("business_id")
+        .or_else(|| request.get("businessId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("business_id required")?;
+    let customer_name = request
+        .get("customer_name")
+        .or_else(|| request.get("customerName"))
+        .and_then(|v| v.as_str())
+        .ok_or("customer_name required")?;
+    let amount = request
+        .get("amount")
+        .and_then(|v| v.as_f64())
+        .ok_or("amount required")?;
+    let staff_id = request
+        .get("staff_id")
+        .or_else(|| request.get("staffId"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let note = request.get("note").and_then(|v| v.as_str());
+    let db = state.db.lock().unwrap();
+    db.add_manual_debt(business_id, customer_name, amount, staff_id, note)
+        .map_err(|e| format!("Failed to add debt: {}", e))
+}
+
+#[tauri::command]
+async fn record_debt_payment(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let business_id = request
+        .get("business_id")
+        .or_else(|| request.get("businessId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("business_id required")?;
+    let debt_id = request
+        .get("debt_id")
+        .or_else(|| request.get("debtId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("debt_id required")?;
+    let amount = request
+        .get("amount")
+        .and_then(|v| v.as_f64())
+        .ok_or("amount required")?;
+    let staff_id = request
+        .get("staff_id")
+        .or_else(|| request.get("staffId"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let note = request.get("note").and_then(|v| v.as_str());
+    let db = state.db.lock().unwrap();
+    db.record_debt_payment(business_id, debt_id, amount, staff_id, note)
+        .map_err(|e| format!("Failed to record payment: {}", e))
+}
+
+#[tauri::command]
+async fn mark_debt_paid(
+    state: State<'_, AppState>,
+    sale_id: i64,
+) -> Result<(), String> {
+    let db = state.db.lock().unwrap();
+    db.mark_debt_paid_by_sale(sale_id)
+        .map_err(|e| format!("Failed to mark debt paid: {}", e))
+}
+
+#[tauri::command]
+async fn get_activity_logs(
+    state: State<'_, AppState>,
+    business_id: i64,
+    limit: Option<i64>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.lock().unwrap();
+    db.get_activity_logs(business_id, limit.unwrap_or(100))
+        .map_err(|e| format!("Failed to get activity logs: {}", e))
+}
+
+#[tauri::command]
+async fn get_product_categories(
+    state: State<'_, AppState>,
+    business_id: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.lock().unwrap();
+    db.get_product_categories(business_id)
+        .map_err(|e| format!("Failed to get categories: {}", e))
+}
+
+#[tauri::command]
+async fn create_product_category(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let business_id = request
+        .get("business_id")
+        .or_else(|| request.get("businessId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("business_id required")?;
+    let name = request
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("name required")?;
+    let db = state.db.lock().unwrap();
+    db.create_product_category(business_id, name)
+        .map_err(|e| format!("Failed to create category: {}", e))
+}
+
+#[tauri::command]
+async fn delete_product_category(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<bool, String> {
+    let business_id = request
+        .get("business_id")
+        .or_else(|| request.get("businessId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("business_id required")?;
+    let category_id = request
+        .get("category_id")
+        .or_else(|| request.get("categoryId"))
+        .or_else(|| request.get("id"))
+        .and_then(|v| v.as_i64())
+        .ok_or("category_id required")?;
+    let db = state.db.lock().unwrap();
+    db.delete_product_category(business_id, category_id)
+        .map_err(|e| format!("Failed to delete category: {}", e))
+}
+
+#[tauri::command]
+async fn get_users_for_business(
+    state: State<'_, AppState>,
+    business_id: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.lock().unwrap();
+    db.get_users_for_business(business_id)
+        .map_err(|e| format!("Failed to get users: {}", e))
+}
+
+#[tauri::command]
+async fn get_staff_for_business(
+    state: State<'_, AppState>,
+    business_id: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    get_users_for_business(state, business_id).await
+}
+
+#[tauri::command]
+async fn get_dashboard_metrics(
+    state: State<'_, AppState>,
+    business_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().unwrap();
+    db.get_dashboard_metrics(business_id)
+        .map_err(|e| format!("Failed to get dashboard metrics: {}", e))
+}
+
+#[tauri::command]
+async fn update_sale_details(
+    state: State<'_, AppState>,
+    sale_id: i64,
+    business_id: i64,
+    sale_date: Option<String>,
+    items: Option<Vec<serde_json::Value>>,
+    actor_user_id: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().unwrap();
+    db.update_sale_details(
+        sale_id,
+        business_id,
+        sale_date.as_deref(),
+        items.as_deref(),
+        actor_user_id,
+    )
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("InvalidQuery") || matches!(e, rusqlite::Error::InvalidQuery) {
+            "Sale edit rejected — keep product quantities the same (price split only).".to_string()
+        } else if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            "Sale not found or does not belong to this business".to_string()
+        } else {
+            format!("Failed to update sale: {}", e)
+        }
+    })
+}
+
+#[tauri::command]
+async fn update_sale_date(
+    state: State<'_, AppState>,
+    sale_id: i64,
+    business_id: i64,
+    sale_date: Option<String>,
+    items: Option<Vec<serde_json::Value>>,
+    actor_user_id: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    update_sale_details(state, sale_id, business_id, sale_date, items, actor_user_id).await
+}
