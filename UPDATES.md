@@ -59,6 +59,10 @@ Watch **Actions → Publish Desktop**. When it finishes green, shop PCs can **Ch
 
 ---
 
+## If CI fails with “public key has been found, but no private key”
+
+The workflow must pass `TAURI_SIGNING_PRIVATE_KEY` (path or key text). Ensure secret `TAURI_SIGNING_PRIVATE_KEY_BASE64` exists, then re-run / release again.
+
 ## If CI fails with “Missing comment in secret key”
 
 1. Re-run `powershell -File scripts/print-signing-secret.ps1`
