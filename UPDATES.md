@@ -58,7 +58,9 @@ Or exact version:
 node scripts/release-desktop.mjs 1.0.3
 ```
 
-Watch **Actions → Publish Desktop**. When it finishes green, shop PCs can **Check for updates**.
+Watch **Actions → Publish Desktop**. When it finishes green, the release has the **x64 setup.exe** (plus `latest.json` for auto-update). Shop PCs can install or **Check for updates**.
+
+GitHub always lists “Source code” zip/tar.gz on every tag release — that cannot be turned off. Clients should ignore those and download only the **`-setup.exe`**.
 
 ---
 

@@ -46,12 +46,30 @@ Installer: `src-tauri/target/release/bundle/msi/` (or `dist-desktop/` if copied)
 
 ## Client rollout
 
-1. Build MSI and install on the shop PC  
-2. Connect to internet **once**, log in (pulls catalog + users)  
-3. Disconnect — sales, stock, debt, sales log continue locally  
-4. When online again, sync pushes local changes to the cloud  
+1. Download **`POS System_*_x64-setup.exe`** from [GitHub Releases](https://github.com/ehikioyaandrew/pos-system/releases/latest)  
+   (x64 only — covers normal Windows shop laptops)  
+2. Right‑click → **Run as administrator**  
+3. If Windows says “Windows protected your PC” / unknown publisher: **More info → Run anyway**  
+   (The updater signing key is **not** a Windows install certificate — this warning is normal until you buy Authenticode code signing.)  
+4. Connect to internet **once**, log in (pulls catalog + users)  
+5. Disconnect — sales, stock, debt, sales log continue locally  
+6. When online again, sync pushes local changes to the cloud  
 
 Sidebar shows **Desktop** when running in the shell.
+
+### Install failed on a new PC?
+
+| What you see | What to do |
+|--------------|------------|
+| SmartScreen / unknown publisher | More info → Run anyway (not related to Tauri updater key) |
+| Needs admin / access denied | Run as administrator |
+| WebView2 / blank window later | Installer embeds WebView2 bootstrapper; PC still needs internet once for that bootstrap, or install [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) manually |
+| 32-bit Windows only | Not supported yet — need a 64-bit Windows PC |
+| MSI from an older release | Prefer the new `-setup.exe` from the latest release |
+
+Note the **exact error text or a screenshot** — that tells us which row applies.
+
+GitHub always shows “Source code” zip/tar.gz on releases (platform default — cannot remove). Clients should only download the **`-setup.exe`**.
 
 ## What syncs with the cloud
 

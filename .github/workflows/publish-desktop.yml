@@ -1,5 +1,12 @@
-# Builds the Windows MSI, signs updater artifacts, creates/updates a GitHub Release,
-# and uploads MSI + latest.json so installed apps can "Check for updates".
+# Builds the Windows x64 setup.exe, signs updater artifacts, creates/updates a GitHub Release,
+# and uploads the installer + latest.json so installed apps can "Check for updates".
+#
+# Uploaded assets (only):
+#   - POS System_*_x64-setup.exe (+ .sig for updater)
+#   - latest.json
+#
+# Note: GitHub always shows auto "Source code (zip/tar.gz)" links on tag releases —
+# those cannot be disabled. We do not upload MSI or other extras.
 #
 # Triggers:
 #   - Push a version tag:  git tag v1.0.1 && git push origin v1.0.1
@@ -11,7 +18,7 @@
 #       PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.tauri\pos-system.key"))
 #   VITE_SUPABASE_URL
 #   VITE_SUPABASE_ANON_KEY
-#   SUPABASE_SERVICE_ROLE_KEY — required for Sync now (upserts to *_backup); baked into MSI
+#   SUPABASE_SERVICE_ROLE_KEY — required for Sync now (upserts to *_backup); baked into the build
 #
 # Do NOT set TAURI_SIGNING_PRIVATE_KEY_PASSWORD unless the key was created with a password.
 
@@ -104,14 +111,14 @@ jobs:
           echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$out" >> $env:GITHUB_ENV
           Write-Host "Signing key written ($((Get-Item $out).Length) bytes)"
 
-      - name: Build and publish Tauri (Windows MSI + updater JSON)
+      - name: Build and publish Tauri (Windows x64 setup.exe + updater JSON)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # tauri build only reads TAURI_SIGNING_PRIVATE_KEY (file path or key text).
           # Do not set TAURI_SIGNING_PRIVATE_KEY_PASSWORD for unencrypted keys.
           TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PATH }}
-          # Baked into the Rust binary via option_env! so installed MSI can sync
+          # Baked into the Rust binary via option_env! so installed app can sync
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
@@ -121,11 +128,38 @@ jobs:
           tagName: v__VERSION__
           releaseName: 'POS System v__VERSION__'
           releaseBody: |
-            Desktop release for offline POS.
+            Windows **x64** desktop installer for offline POS.
 
-            Install the MSI on new PCs, or use **Check for updates** in an existing install.
+            Download **`POS System_*_x64-setup.exe`**, right-click → Run as administrator.
+            If SmartScreen appears: More info → Run anyway.
+
+            Existing installs: use **Check for updates** in the app.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
-          updaterJsonPreferNsis: false
+          updaterJsonPreferNsis: true
           releaseCommitish: ${{ github.sha }}
+
+      - name: Keep only installer + updater assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Remove any accidental non-installer uploads (e.g. old MSI). GitHub's auto
+          # "Source code" zip/tar.gz links cannot be deleted — they are not release assets.
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else {
+            $ver = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+            "v$ver"
+          }
+          Write-Host "Cleaning release assets for $tag"
+          $assets = gh release view $tag --json assets | ConvertFrom-Json | Select-Object -ExpandProperty assets
+          foreach ($a in $assets) {
+            $name = $a.name
+            $keep = ($name -match '\-setup\.exe(\.sig)?$') -or ($name -eq 'latest.json')
+            if (-not $keep) {
+              Write-Host "Deleting asset: $name"
+              gh api -X DELETE "repos/$($env:GITHUB_REPOSITORY)/releases/assets/$($a.id)"
+            } else {
+              Write-Host "Keeping asset: $name"
+            }
+          }
