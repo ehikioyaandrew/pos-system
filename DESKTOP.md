@@ -13,6 +13,10 @@ On first login (or when the local DB has no matching user), the app runs **`sync
 
 After sales / stock / debt writes, the app best-effort runs **`sync_to_cloud`**. If offline, data stays local and syncs when the connection returns (run Sync again from the app or restart/login).
 
+**Sync now** pulls from the cloud first, then pushes. For any sale that already exists in the cloud, extra local line items that were deleted in Supabase are dropped on pull so they are not uploaded again. New sales that exist only on the till are kept.
+
+**v1.0.7 (this build):** on first open it automatically removes duplicate local sale lines (same product + same price on one sale) and then pulls/pushes once when the PC is online. It does **not** wipe the whole database, so unsynced sales from today are kept.
+
 ## Prerequisites (Windows)
 
 1. Node.js 18+, Rust (rustup), MSVC Build Tools, WebView2  

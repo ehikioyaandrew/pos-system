@@ -1224,4 +1224,34 @@ impl Database {
             )
             .ok()
     }
+
+    /// One-time: keep first line when the same product+price appears twice on a sale.
+    /// Does not wipe the DB (would lose unsynced sales).
+    pub fn repair_dup_sale_lines_once(&self) -> Result<bool> {
+        const KEY: &str = "repair_dup_sale_lines_v107";
+        if self.get_sync_meta(KEY).as_deref() == Some("1") {
+            return Ok(false);
+        }
+
+        self.conn.execute(
+            "DELETE FROM sale_items
+             WHERE id NOT IN (
+               SELECT MIN(id) FROM sale_items GROUP BY sale_id, product_id, unit_price
+             )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "UPDATE sales
+             SET total_amount = COALESCE((
+               SELECT SUM(COALESCE(si.total_price, si.unit_price * si.quantity, 0))
+               FROM sale_items si
+               WHERE si.sale_id = sales.id
+             ), 0)",
+            [],
+        )?;
+
+        self.set_sync_meta(KEY, "1")?;
+        Ok(true)
+    }
 }

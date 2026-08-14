@@ -3,6 +3,7 @@ mod offline_api;
 mod supabase;
 mod email;
 
+use std::collections::HashMap;
 use std::sync::{Mutex, Arc};
 use database::*;
 use supabase::SupabaseClient;
@@ -255,6 +256,12 @@ pub fn run() {
         }
     };
 
+    match db.repair_dup_sale_lines_once() {
+        Ok(true) => eprintln!("Applied one-time duplicate sale-line repair"),
+        Ok(false) => {}
+        Err(e) => eprintln!("Duplicate sale-line repair skipped: {}", e),
+    }
+
     tauri::Builder::default()
         .manage(AppState {
             db: Arc::new(Mutex::new(db)),
@@ -267,6 +274,36 @@ pub fn run() {
                 let _: Result<(), _> = window.show();
                 let _: Result<(), _> = window.set_focus();
             }
+
+            // First launch of this build: pull corrected cloud data, then push
+            // remaining local-only sales. Retries on later launches until it succeeds.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                const KEY: &str = "post_repair_cloud_sync_v107";
+                {
+                    let state = handle.state::<AppState>();
+                    let db = state.db.lock().unwrap();
+                    if db.get_sync_meta(KEY).as_deref() == Some("1") {
+                        return;
+                    }
+                }
+                let state = handle.state::<AppState>();
+                match sync_from_cloud(state).await {
+                    Ok(_) => {
+                        let state = handle.state::<AppState>();
+                        if let Err(e) = sync_to_cloud(state).await {
+                            eprintln!("post-repair push skipped: {}", e);
+                            return;
+                        }
+                        let state = handle.state::<AppState>();
+                        if let Ok(db) = state.db.lock() {
+                            let _ = db.set_sync_meta(KEY, "1");
+                        }
+                        eprintln!("post-repair cloud sync complete");
+                    }
+                    Err(e) => eprintln!("post-repair pull skipped (will retry next launch): {}", e),
+                }
+            });
             
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -1318,6 +1355,17 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         products_count += 1;
     }
 
+    // Cloud-known sales: extra local line items (deleted in SQL) must not survive pull,
+    // or the following sync_to_cloud would upsert them back.
+    let mut cloud_item_ids_by_sale: HashMap<i64, Vec<i64>> = HashMap::new();
+    for item in &cloud_sale_items {
+        let id = item.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let sale_id = item.get("sale_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        if id != 0 && sale_id != 0 {
+            cloud_item_ids_by_sale.entry(sale_id).or_default().push(id);
+        }
+    }
+
     // Import sales (upsert logic)
     let mut sales_count = 0;
     for sale in cloud_sales {
@@ -1379,6 +1427,25 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
             ).ok();
         }
         sale_items_count += 1;
+    }
+
+    // Drop local items that the cloud no longer has for the same sale
+    // (e.g. duplicate Normal/Staff lines removed in Supabase).
+    for (sale_id, item_ids) in &cloud_item_ids_by_sale {
+        if item_ids.is_empty() {
+            let _ = db.conn.execute("DELETE FROM sale_items WHERE sale_id = ?1", [sale_id]);
+            continue;
+        }
+        let placeholders = (2..=item_ids.len() + 1)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "DELETE FROM sale_items WHERE sale_id = ?1 AND id NOT IN ({placeholders})"
+        );
+        let mut vals: Vec<i64> = vec![*sale_id];
+        vals.extend(item_ids.iter().copied());
+        let _ = db.conn.execute(&sql, rusqlite::params_from_iter(vals));
     }
 
     let mut activity_count = 0;
