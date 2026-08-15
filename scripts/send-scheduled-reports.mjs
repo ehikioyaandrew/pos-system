@@ -81,6 +81,15 @@ function inRange(createdAt, start, end) {
   return Number.isFinite(t) && t >= start && t < end
 }
 
+function remainingOf(p) {
+  return (
+    Number(p?.fridge_stock || 0) +
+    Number(p?.show_stock || 0) +
+    Number(p?.store_stock || 0) +
+    Number(p?.sports_stock || 0)
+  )
+}
+
 function rollupLines(items) {
   const map = new Map()
   for (const it of items) {
@@ -159,7 +168,10 @@ async function main() {
     'users_backup',
     'select=id,business_id,email,role,is_active,is_hidden'
   )
-  const products = await fetchAll('products_backup', 'select=id,business_id,name,price,staff_price')
+  const products = await fetchAll(
+    'products_backup',
+    'select=id,business_id,name,price,staff_price,fridge_stock,show_stock,store_stock,sports_stock,min_stock_level,is_active'
+  )
   const sales = await fetchAll('sales_backup', 'select=id,user_id,total_amount,created_at,payment_method')
   const items = await fetchAll(
     'sale_items_backup',
@@ -241,6 +253,38 @@ async function main() {
         total: staffItems.reduce((s, i) => s + i.total_price, 0),
         lines: rollupLines(staffItems),
       },
+      sold: (() => {
+        const byId = new Map()
+        for (const it of bizItems) {
+          const id = Number(it.product_id)
+          const cur = byId.get(id) || { qty: 0 }
+          cur.qty += Number(it.quantity || 0)
+          byId.set(id, cur)
+        }
+        return [...byId.entries()]
+          .map(([id, v]) => {
+            const p = productById.get(id)
+            return {
+              name: p?.name || `Product ${id}`,
+              sold: v.qty,
+              left: remainingOf(p),
+            }
+          })
+          .sort((a, b) => b.sold - a.sold)
+      })(),
+      outOfStock: products
+        .filter((p) => Number(p.business_id) === bid && p.is_active !== false && remainingOf(p) <= 0)
+        .map((p) => ({ name: p.name }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      lowStock: products
+        .filter((p) => {
+          if (Number(p.business_id) !== bid || p.is_active === false) return false
+          const left = remainingOf(p)
+          const min = Number(p.min_stock_level || 0)
+          return left > 0 && left <= min
+        })
+        .map((p) => ({ name: p.name, left: remainingOf(p), min: Number(p.min_stock_level || 0) }))
+        .sort((a, b) => a.left - b.left),
     }
 
     const html = buildSalesReportHtml(payload)

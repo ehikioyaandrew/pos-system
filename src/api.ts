@@ -2314,6 +2314,7 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
     map.set(name, cur)
   }
 
+  const soldById = new Map<number, number>()
   if (saleIds.length) {
     const { data } = await supabase
       .from('sale_items_backup')
@@ -2331,8 +2332,37 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
       } else {
         bump(normalMap, name, qty, amount)
       }
+      const pid = Number((row as any).product_id)
+      soldById.set(pid, (soldById.get(pid) || 0) + qty)
     }
   }
+
+  const remainingOf = (p: any) =>
+    Number(p?.fridge_stock || 0) +
+    Number(p?.show_stock || 0) +
+    Number(p?.store_stock || 0) +
+    Number(p?.sports_stock || 0)
+
+  const sold = [...soldById.entries()]
+    .map(([id, qty]) => {
+      const p = productById.get(id) as any
+      return { name: p?.name || `Product ${id}`, sold: qty, left: remainingOf(p) }
+    })
+    .sort((a, b) => b.sold - a.sold)
+
+  const active = products.filter((p: any) => p.is_active !== false)
+  const outOfStock = active
+    .filter((p: any) => remainingOf(p) <= 0)
+    .map((p: any) => ({ name: p.name }))
+    .sort((a: any, b: any) => a.name.localeCompare(b.name))
+  const lowStock = active
+    .filter((p: any) => {
+      const left = remainingOf(p)
+      const min = Number(p.min_stock_level || 0)
+      return left > 0 && left <= min
+    })
+    .map((p: any) => ({ name: p.name, left: remainingOf(p), min: Number(p.min_stock_level || 0) }))
+    .sort((a: any, b: any) => a.left - b.left)
 
   const normalLines = [...normalMap.values()].sort((a, b) => b.amount - a.amount)
   const staffLines = [...staffMap.values()].sort((a, b) => b.amount - a.amount)
@@ -2349,6 +2379,9 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
       total: staffLines.reduce((s, l) => s + l.amount, 0),
       lines: staffLines,
     },
+    sold,
+    outOfStock,
+    lowStock,
   }
 }
 

@@ -13,36 +13,72 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;')
 }
 
-function linesTable(title, lines, total, accent) {
+function brandColor(raw) {
+  if (raw && /^#?[0-9a-fA-F]{3,8}$/.test(raw)) {
+    return raw.startsWith('#') ? raw : `#${raw}`
+  }
+  return '#1a3a34'
+}
+
+function linesTable(title, lines, total) {
   const rows =
     !lines.length
-      ? `<tr><td colspan="3" style="padding:10px 12px;color:#6b7280;border-bottom:1px solid #e8ecea;">No ${escapeHtml(title.toLowerCase())} in this period.</td></tr>`
+      ? `<tr><td colspan="3" class="muted" style="padding:16px 0;">None in this period</td></tr>`
       : lines
           .map(
             (l) => `<tr>
-              <td style="padding:10px 12px;border-bottom:1px solid #e8ecea;">${escapeHtml(l.name)}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #e8ecea;text-align:right;">${l.qty}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #e8ecea;text-align:right;font-weight:600;">${naira(l.amount)}</td>
+              <td class="cell-name" style="padding:14px 12px 14px 0;border-bottom:1px solid #e7e2d9;">${escapeHtml(l.name)}</td>
+              <td class="cell-qty" style="padding:14px 12px;border-bottom:1px solid #e7e2d9;text-align:right;white-space:nowrap;">${l.qty}</td>
+              <td class="cell-amt" style="padding:14px 0 14px 12px;border-bottom:1px solid #e7e2d9;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${naira(l.amount)}</td>
             </tr>`
           )
           .join('')
   return `
-    <h3 style="margin:24px 0 8px;font-size:14px;letter-spacing:0.12em;text-transform:uppercase;color:${accent};">${escapeHtml(title)}</h3>
-    <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8ecea;border-radius:8px;overflow:hidden;">
+    <p class="section-label" style="margin:36px 0 12px;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#6f7c76;">${escapeHtml(title)}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
       <thead>
-        <tr style="background:#f4f6f5;">
-          <th style="padding:10px 12px;text-align:left;font-size:12px;color:#2a3d36;">Product</th>
-          <th style="padding:10px 12px;text-align:right;font-size:12px;color:#2a3d36;">Qty</th>
-          <th style="padding:10px 12px;text-align:right;font-size:12px;color:#2a3d36;">Amount</th>
+        <tr>
+          <th align="left" style="padding:0 12px 10px 0;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;border-bottom:2px solid #1a3a34;">Product</th>
+          <th align="right" style="padding:0 12px 10px;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;border-bottom:2px solid #1a3a34;">Qty</th>
+          <th align="right" style="padding:0 0 10px 12px;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;border-bottom:2px solid #1a3a34;">Amount</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
       <tfoot>
         <tr>
-          <td style="padding:12px;font-weight:700;" colspan="2">${escapeHtml(title)} total</td>
-          <td style="padding:12px;text-align:right;font-weight:700;">${naira(total)}</td>
+          <td colspan="2" style="padding:16px 12px 0 0;font-weight:700;color:#1c1917;">${escapeHtml(title)} total</td>
+          <td style="padding:16px 0 0 12px;text-align:right;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;color:#1c1917;">${naira(total)}</td>
         </tr>
       </tfoot>
+    </table>`
+}
+
+function simpleTable(title, headers, rows) {
+  const head = headers
+    .map(
+      (h, i) =>
+        `<th align="${i === 0 ? 'left' : 'right'}" style="padding:0 ${i === headers.length - 1 ? '0' : '12px'} 10px ${i === 0 ? '0' : '12px'};font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;border-bottom:2px solid #1a3a34;">${escapeHtml(h)}</th>`
+    )
+    .join('')
+  const body =
+    rows.length === 0
+      ? `<tr><td colspan="${headers.length}" class="muted" style="padding:16px 0;">None</td></tr>`
+      : rows
+          .map(
+            (cols) =>
+              `<tr>${cols
+                .map(
+                  (c, i) =>
+                    `<td class="cell-name" style="padding:14px ${i === cols.length - 1 ? '0' : '12px'} 14px ${i === 0 ? '0' : '12px'};border-bottom:1px solid #e7e2d9;${i ? 'text-align:right;white-space:nowrap;' : ''}">${c}</td>`
+                )
+                .join('')}</tr>`
+          )
+          .join('')
+  return `
+    <p class="section-label" style="margin:36px 0 12px;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#6f7c76;">${escapeHtml(title)}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+      <thead><tr>${head}</tr></thead>
+      <tbody>${body}</tbody>
     </table>`
 }
 
@@ -56,57 +92,105 @@ export function isStaffPricedLine(unitPrice, normalPrice, staffPrice) {
 }
 
 export function buildSalesReportHtml(p) {
-  const color =
-    p.primaryColor && /^#?[0-9a-fA-F]{3,8}$/.test(p.primaryColor)
-      ? p.primaryColor.startsWith('#')
-        ? p.primaryColor
-        : `#${p.primaryColor}`
-      : '#121c19'
+  const color = brandColor(p.primaryColor)
   const grand = p.normal.total + p.staff.total
+  const kindLabel = p.kind === 'weekly' ? 'Weekly sales' : 'Yesterday’s sales'
   const reminder = p.reminder
-    ? `<div style="background:#fff7ed;border:1px solid #fed7aa;padding:14px 16px;border-radius:8px;margin:0 0 20px;">
-        <p style="margin:0;font-size:14px;color:#9a3412;font-weight:700;">Sync the desktop till</p>
-        <p style="margin:6px 0 0;font-size:13px;color:#9a3412;">Open POS on the shop PC → <strong>Sync now</strong> so yesterday’s offline sales are in this report.</p>
-      </div>`
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+        <tr>
+          <td class="reminder" style="padding:16px 0 16px 16px;border-left:3px solid ${color};">
+            <p style="margin:0;font-size:13px;line-height:1.55;color:#3f4a46;">
+              <strong style="color:#1c1917;">Sync the till before you rely on these numbers.</strong><br>
+              On the shop PC open POS → <strong>Sync now</strong> so yesterday’s offline sales are included.
+            </p>
+          </td>
+        </tr>
+      </table>`
     : ''
 
   return `<!DOCTYPE html>
-<html>
-<body style="margin:0;padding:0;background:#f4f6f5;font-family:Georgia,Times,serif;">
-  <div style="max-width:640px;margin:0 auto;padding:24px 16px;">
-    <div style="background:${color};color:#fff;padding:22px 24px;border-radius:12px 12px 0 0;">
-      <p style="margin:0;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.75;">POS report</p>
-      <h1 style="margin:8px 0 0;font-size:22px;">${escapeHtml(p.businessName)}</h1>
-      ${p.businessAddress ? `<p style="margin:6px 0 0;font-size:13px;opacity:0.85;">${escapeHtml(p.businessAddress)}</p>` : ''}
-    </div>
-    <div style="background:#fff;padding:24px;border:1px solid #e8ecea;border-top:0;border-radius:0 0 12px 12px;">
-      ${reminder}
-      <p style="margin:0 0 4px;font-size:12px;letter-spacing:0.14em;text-transform:uppercase;color:#c4783a;">${p.kind === 'weekly' ? 'Weekly sales' : 'Yesterday’s sales'}</p>
-      <p style="margin:0 0 20px;font-size:16px;color:#121c19;">${escapeHtml(p.periodLabel)}</p>
-      <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin-bottom:8px;">
-        <tr>
-          <td style="background:#f4f6f5;padding:14px;border-radius:8px;width:25%;">
-            <p style="margin:0;font-size:11px;color:#6b7280;">Sales</p>
-            <p style="margin:4px 0 0;font-size:18px;font-weight:700;color:#121c19;">${p.salesCount}</p>
-          </td>
-          <td style="background:#f4f6f5;padding:14px;border-radius:8px;width:25%;">
-            <p style="margin:0;font-size:11px;color:#6b7280;">Normal</p>
-            <p style="margin:4px 0 0;font-size:16px;font-weight:700;color:#121c19;">${naira(p.normal.total)}</p>
-          </td>
-          <td style="background:#fff7ed;padding:14px;border-radius:8px;width:25%;">
-            <p style="margin:0;font-size:11px;color:#c4783a;">Staff price</p>
-            <p style="margin:4px 0 0;font-size:16px;font-weight:700;color:#9a3412;">${naira(p.staff.total)}</p>
-          </td>
-          <td style="background:${color};padding:14px;border-radius:8px;width:25%;color:#fff;">
-            <p style="margin:0;font-size:11px;opacity:0.8;">Grand total</p>
-            <p style="margin:4px 0 0;font-size:16px;font-weight:700;">${naira(grand)}</p>
-          </td>
-        </tr>
-      </table>
-      ${linesTable('Normal price', p.normal.lines, p.normal.total, color)}
-      ${linesTable('Staff price', p.staff.lines, p.staff.total, '#c4783a')}
-      <p style="margin:28px 0 0;font-size:11px;color:#9aa5a0;">Automated from your POS. Staff price is a separate line so it does not mix with walk-in totals.</p>
-    </div>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <style>
+    :root { color-scheme: light dark; }
+    @media (prefers-color-scheme: dark) {
+      .page { background: #0e1412 !important; }
+      .card { background: #161d1b !important; border-color: #2a3531 !important; }
+      .ink, .kpi-val, .foot-note, tfoot td { color: #f3eee8 !important; }
+      .muted, .section-label, th { color: #9aa8a2 !important; }
+      .reminder p, .reminder strong { color: #d7ddd9 !important; }
+      .cell-name, .cell-qty, .cell-amt { color: #ece7e1 !important; border-bottom-color: #2a3531 !important; }
+    }
+  </style>
+</head>
+<body class="page" style="margin:0;padding:0;background:#efece6;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="card" style="background:#fffcf8;border:1px solid #e4ddd3;border-radius:4px;">
+      <tr>
+        <td style="background:${color};padding:28px 28px 24px;">
+          <p style="margin:0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#ffffff;opacity:0.7;">POS report</p>
+          <h1 style="margin:10px 0 0;font-size:26px;line-height:1.25;font-weight:600;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">${escapeHtml(p.businessName)}</h1>
+          ${p.businessAddress ? `<p style="margin:10px 0 0;font-size:13px;line-height:1.5;color:#ffffff;opacity:0.78;">${escapeHtml(p.businessAddress)}</p>` : ''}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:28px 28px 32px;">
+          ${reminder}
+          <p class="section-label" style="margin:0;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#6f7c76;">${kindLabel}</p>
+          <p class="ink" style="margin:8px 0 0;font-size:20px;color:#1c1917;">${escapeHtml(p.periodLabel)}</p>
+
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:28px 0 8px;border-collapse:collapse;">
+            <tr>
+              <td class="muted" style="padding:14px 16px 14px 0;border-bottom:1px solid #e7e2d9;font-size:14px;color:#5c6662;">Sales</td>
+              <td class="kpi-val" style="padding:14px 0;border-bottom:1px solid #e7e2d9;text-align:right;font-size:18px;font-weight:650;color:#1c1917;white-space:nowrap;font-variant-numeric:tabular-nums;">${p.salesCount}</td>
+            </tr>
+            <tr>
+              <td class="muted" style="padding:14px 16px 14px 0;border-bottom:1px solid #e7e2d9;font-size:14px;color:#5c6662;">Normal price</td>
+              <td class="kpi-val" style="padding:14px 0;border-bottom:1px solid #e7e2d9;text-align:right;font-size:18px;font-weight:650;color:#1c1917;white-space:nowrap;font-variant-numeric:tabular-nums;">${naira(p.normal.total)}</td>
+            </tr>
+            <tr>
+              <td class="muted" style="padding:14px 16px 14px 0;border-bottom:1px solid #e7e2d9;font-size:14px;color:#5c6662;">Staff price</td>
+              <td class="kpi-val" style="padding:14px 0;border-bottom:1px solid #e7e2d9;text-align:right;font-size:18px;font-weight:650;color:#1c1917;white-space:nowrap;font-variant-numeric:tabular-nums;">${naira(p.staff.total)}</td>
+            </tr>
+            <tr>
+              <td class="ink" style="padding:18px 16px 6px 0;font-size:15px;font-weight:700;color:#1c1917;">Grand total</td>
+              <td class="kpi-val" style="padding:18px 0 6px;text-align:right;font-size:26px;font-weight:700;color:#1c1917;white-space:nowrap;font-variant-numeric:tabular-nums;">${naira(grand)}</td>
+            </tr>
+          </table>
+
+          ${linesTable('Normal price', p.normal.lines, p.normal.total)}
+          ${linesTable('Staff price', p.staff.lines, p.staff.total)}
+          ${simpleTable(
+            'Items sold',
+            ['Product', 'Sold', 'Left'],
+            (p.sold || []).map((r) => [
+              escapeHtml(r.name),
+              String(r.sold ?? 0),
+              String(r.left ?? 0),
+            ])
+          )}
+          ${simpleTable(
+            'Out of stock',
+            ['Product'],
+            (p.outOfStock || []).map((r) => [escapeHtml(r.name)])
+          )}
+          ${simpleTable(
+            'Low stock',
+            ['Product', 'Left', 'Min'],
+            (p.lowStock || []).map((r) => [
+              escapeHtml(r.name),
+              String(r.left ?? 0),
+              String(r.min ?? 0),
+            ])
+          )}
+
+          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Staff price is listed separately so it does not mix with walk-in totals. Left / low / out of stock is current fridge+show+store. Automated POS report.</p>
+        </td>
+      </tr>
+    </table>
   </div>
 </body>
 </html>`

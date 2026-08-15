@@ -7035,6 +7035,9 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
             salesCount: Number(preview?.salesCount || 0),
             normal: preview?.normal || { total: 0, lines: [] },
             staff: preview?.staff || { total: 0, lines: [] },
+            sold: preview?.sold || [],
+            outOfStock: preview?.outOfStock || [],
+            lowStock: preview?.lowStock || [],
           })
         )
       } catch {
@@ -7210,7 +7213,7 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
               title="Sales email preview"
               srcDoc={emailHtml}
               className="w-full bg-[#f4f6f5]"
-              style={{ minHeight: 720, border: 0 }}
+              style={{ minHeight: 880, border: 0 }}
             />
           </div>
         ) : null}
