@@ -13,7 +13,7 @@
  *   RESEND_FROM   e.g. POS Reports <onboarding@resend.dev>
  */
 import { Resend } from 'resend'
-import { buildSalesReportHtml, isStaffPricedLine } from './lib/report-email.mjs'
+import { buildSalesReportHtml, buildStockAlertHtml, isStaffPricedLine } from './lib/report-email.mjs'
 
 const MODE = (process.argv[2] || 'daily').toLowerCase()
 const TZ = 'Africa/Lagos'
@@ -268,6 +268,7 @@ async function main() {
               name: p?.name || `Product ${id}`,
               sold: v.qty,
               left: remainingOf(p),
+              before: remainingOf(p) + v.qty,
             }
           })
           .sort((a, b) => b.sold - a.sold)
@@ -295,7 +296,25 @@ async function main() {
 
     const delivered = await sendResend({ to: recipients, subject, html })
     sent += 1
-    console.log(`Sent ${MODE} report for ${payload.businessName} → ${delivered.join(', ')}`)
+    console.log(`Sent ${MODE} sales for ${payload.businessName} → ${delivered.join(', ')}`)
+
+    if (MODE === 'daily') {
+      const stockHtml = buildStockAlertHtml({
+        businessName: payload.businessName,
+        businessAddress: payload.businessAddress,
+        primaryColor: payload.primaryColor,
+        periodLabel: yesterday,
+        outOfStock: payload.outOfStock,
+        lowStock: payload.lowStock,
+      })
+      const stockTo = await sendResend({
+        to: recipients,
+        subject: `${payload.businessName} — out of stock (${yesterday})`,
+        html: stockHtml,
+      })
+      sent += 1
+      console.log(`Sent stock alert for ${payload.businessName} → ${stockTo.join(', ')}`)
+    }
     void bizUserIds
   }
 

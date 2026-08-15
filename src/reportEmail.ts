@@ -10,6 +10,7 @@ export type StockLine = {
   name: string
   sold?: number
   left?: number
+  before?: number
   min?: number
 }
 
@@ -188,29 +189,16 @@ export function buildSalesReportHtml(p: SalesEmailPayload): string {
           ${linesTable('Staff price', p.staff.lines, p.staff.total)}
           ${simpleTable(
             'Items sold',
-            ['Product', 'Sold', 'Left'],
-            (p.sold || []).map((r) => [
-              escapeHtml(r.name),
-              String(r.sold ?? 0),
-              String(r.left ?? 0),
-            ])
-          )}
-          ${simpleTable(
-            'Out of stock',
-            ['Product'],
-            (p.outOfStock || []).map((r) => [escapeHtml(r.name)])
-          )}
-          ${simpleTable(
-            'Low stock',
-            ['Product', 'Left', 'Min'],
-            (p.lowStock || []).map((r) => [
-              escapeHtml(r.name),
-              String(r.left ?? 0),
-              String(r.min ?? 0),
-            ])
+            ['Product', 'Before', 'Sold', 'Left'],
+            (p.sold || []).map((r) => {
+              const sold = Number(r.sold ?? 0)
+              const left = Number(r.left ?? 0)
+              const before = Number(r.before ?? left + sold)
+              return [escapeHtml(r.name), String(before), String(sold), String(left)]
+            })
           )}
 
-          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Staff price is listed separately so it does not mix with walk-in totals. Left / low / out of stock is current fridge+show+store. Automated POS report.</p>
+          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Before = stock at start of the day (left now + sold). Staff price is listed separately. Automated POS report.</p>
         </td>
       </tr>
     </table>
@@ -230,4 +218,66 @@ export function isStaffPricedLine(
   if (!(staff > 0)) return false
   if (Math.abs(staff - normal) < 0.009) return false
   return Math.abs(unit - staff) <= 0.05
+}
+
+export function buildStockAlertHtml(p: {
+  businessName: string
+  businessAddress?: string | null
+  primaryColor?: string | null
+  periodLabel: string
+  outOfStock?: StockLine[]
+  lowStock?: StockLine[]
+}): string {
+  const color = brandColor(p.primaryColor)
+  const out = p.outOfStock || []
+  const low = p.lowStock || []
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <style>
+    :root { color-scheme: light dark; }
+    @media (prefers-color-scheme: dark) {
+      .page { background: #0e1412 !important; }
+      .card { background: #161d1b !important; border-color: #2a3531 !important; }
+      .ink, tfoot td { color: #f3eee8 !important; }
+      .muted, .section-label, th { color: #9aa8a2 !important; }
+      .cell-name { color: #ece7e1 !important; border-bottom-color: #2a3531 !important; }
+    }
+  </style>
+</head>
+<body class="page" style="margin:0;padding:0;background:#efece6;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="card" style="background:#fffcf8;border:1px solid #e4ddd3;border-radius:4px;">
+      <tr>
+        <td style="background:${color};padding:28px 28px 24px;">
+          <p style="margin:0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#ffffff;opacity:0.7;">Stock alert</p>
+          <h1 style="margin:10px 0 0;font-size:26px;line-height:1.25;font-weight:600;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">${escapeHtml(p.businessName)}</h1>
+          ${p.businessAddress ? `<p style="margin:10px 0 0;font-size:13px;line-height:1.5;color:#ffffff;opacity:0.78;">${escapeHtml(p.businessAddress)}</p>` : ''}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:28px 28px 32px;">
+          <p class="section-label" style="margin:0;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#6f7c76;">Out of stock today</p>
+          <p class="ink" style="margin:8px 0 0;font-size:20px;color:#1c1917;">${escapeHtml(p.periodLabel)}</p>
+          <p class="muted" style="margin:12px 0 0;font-size:14px;color:#5c6662;">${out.length} product${out.length === 1 ? '' : 's'} with zero fridge + show + store.</p>
+          ${simpleTable(
+            'Out of stock',
+            ['Product'],
+            out.map((r) => [escapeHtml(r.name)])
+          )}
+          ${simpleTable(
+            'Low stock (still some left)',
+            ['Product', 'Left', 'Min'],
+            low.map((r) => [escapeHtml(r.name), String(r.left ?? 0), String(r.min ?? 0)])
+          )}
+          <p class="muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Restock these before the next shift. Automated POS alert.</p>
+        </td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>`
 }

@@ -8,8 +8,8 @@ We use **[Resend](https://resend.com)** (free: 100 emails/day, 3,000/month) from
 
 | When | What |
 |------|------|
-| Every day **8:00am Africa/Lagos** | Yesterday’s sales + reminder to **Sync now** on the desktop till |
-| Every **Monday 8:00am** | Last 7 days as well |
+| Every day **8:00am Africa/Lagos** | **Two emails:** (1) yesterday’s sales with before / sold / left (2) out of stock + low stock |
+| Every **Monday 8:00am** | Weekly sales email as well |
 
 Each business gets its **own** email (name, address, brand colour).
 

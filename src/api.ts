@@ -2346,7 +2346,7 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
   const sold = [...soldById.entries()]
     .map(([id, qty]) => {
       const p = productById.get(id) as any
-      return { name: p?.name || `Product ${id}`, sold: qty, left: remainingOf(p) }
+      return { name: p?.name || `Product ${id}`, sold: qty, left: remainingOf(p), before: remainingOf(p) + qty }
     })
     .sort((a, b) => b.sold - a.sold)
 

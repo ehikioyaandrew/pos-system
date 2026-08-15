@@ -18,7 +18,7 @@ import {
   AuditLogDashboard,
 } from './floorViews'
 import * as XLSX from 'xlsx'
-import { buildSalesReportHtml } from './reportEmail'
+import { buildSalesReportHtml, buildStockAlertHtml } from './reportEmail'
 
 const SESSION_KEY = 'pos_web_user'
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes idle
@@ -6963,6 +6963,7 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
   const [reportDate, setReportDate] = useState(yesterday)
   const [report, setReport] = useState<any>(null)
   const [emailHtml, setEmailHtml] = useState('')
+  const [stockHtml, setStockHtml] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [view, setView] = useState<'all' | 'sold' | 'remaining'>('all')
 
@@ -7036,12 +7037,21 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
             normal: preview?.normal || { total: 0, lines: [] },
             staff: preview?.staff || { total: 0, lines: [] },
             sold: preview?.sold || [],
+          })
+        )
+        setStockHtml(
+          buildStockAlertHtml({
+            businessName: businessInfo?.name || 'Business',
+            businessAddress: businessInfo?.address || '',
+            primaryColor: businessInfo?.primary_color || '#121c19',
+            periodLabel: preview?.periodLabel || reportDate,
             outOfStock: preview?.outOfStock || [],
             lowStock: preview?.lowStock || [],
           })
         )
       } catch {
         setEmailHtml('')
+        setStockHtml('')
       }
     } catch (error) {
       console.error('Failed to load daily stock report:', error)
@@ -7214,6 +7224,25 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
               srcDoc={emailHtml}
               className="w-full bg-[#f4f6f5]"
               style={{ minHeight: 880, border: 0 }}
+            />
+          </div>
+        ) : null}
+
+        {stockHtml ? (
+          <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden mb-6">
+            <div className="px-4 sm:px-5 py-3 border-b border-[#e8ecea]">
+              <p className="text-[11px] font-semibold tracking-[0.16em] uppercase text-[#c4783a]">
+                Stock alert preview
+              </p>
+              <p className="text-sm text-[#2a3d36]/70">
+                Separate 8am email: out of stock and low stock only.
+              </p>
+            </div>
+            <iframe
+              title="Stock alert email preview"
+              srcDoc={stockHtml}
+              className="w-full bg-[#f4f6f5]"
+              style={{ minHeight: 560, border: 0 }}
             />
           </div>
         ) : null}
