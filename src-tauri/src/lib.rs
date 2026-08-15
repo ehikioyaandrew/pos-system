@@ -699,9 +699,9 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
     let product = Product {
         id: 0, // This will be ignored and auto-generated
         business_id,
-        name,
+        name: name.clone(),
         description,
-        category,
+        category: category.clone(),
         price,
         staff_price,
         cost_price,
