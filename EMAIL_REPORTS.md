@@ -31,7 +31,9 @@ Do **not** put the key in code. Dashboard → API Keys → copy `re_...` into Gi
 
 4. Actions → **Scheduled sales emails** → **Run workflow** → `daily` to test
 
-Unverified Resend only delivers to **your own Resend login email**. Verify a domain to send to staff.
+Until a domain is verified, Resend only delivers to **your Resend login email**. The sender detects that and sends all reports there so the test still works.
+
+To mail staff for real: [verify a domain](https://resend.com/domains), then set `RESEND_FROM` to `POS Reports <reports@yourdomain.com>`.
 
 ## Preview
 

@@ -22,6 +22,7 @@ const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL 
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 const RESEND_KEY = process.env.RESEND_API_KEY || ''
 const RESEND_FROM = process.env.RESEND_FROM || 'POS Reports <onboarding@resend.dev>'
+let testOnlyTo = (process.env.RESEND_TEST_TO || '').trim().toLowerCase()
 
 function lagosYmd(date = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -92,17 +93,41 @@ function rollupLines(items) {
   return [...map.values()].sort((a, b) => b.amount - a.amount)
 }
 
+function ownEmailFromResendError(message) {
+  const m = String(message || '').match(/your own email address \(([^)]+)\)/i)
+  return m ? m[1].trim() : ''
+}
+
 async function sendResend({ to, subject, html }) {
   const resend = new Resend(RESEND_KEY)
+  const sendTo = testOnlyTo ? [testOnlyTo] : to
   const { error } = await resend.emails.send({
     from: RESEND_FROM,
-    to,
+    to: sendTo,
     subject,
     html,
   })
-  if (error) {
-    throw new Error(`Resend: ${error.message || JSON.stringify(error)}`)
+  if (!error) return sendTo
+
+  const msg = error.message || JSON.stringify(error)
+  const own = ownEmailFromResendError(msg)
+  if (own) {
+    testOnlyTo = own.toLowerCase()
+    console.warn(
+      `Resend test mode: can only deliver to ${testOnlyTo} until a domain is verified. Sending reports there.`
+    )
+    const retry = await resend.emails.send({
+      from: RESEND_FROM,
+      to: [testOnlyTo],
+      subject,
+      html,
+    })
+    if (retry.error) {
+      throw new Error(`Resend: ${retry.error.message || JSON.stringify(retry.error)}`)
+    }
+    return [testOnlyTo]
   }
+  throw new Error(`Resend: ${msg}`)
 }
 
 async function main() {
@@ -224,9 +249,9 @@ async function main() {
         ? `${payload.businessName} — yesterday’s sales (${yesterday}) · please sync`
         : `${payload.businessName} — weekly sales (${periodLabel})`
 
-    await sendResend({ to: recipients, subject, html })
+    const delivered = await sendResend({ to: recipients, subject, html })
     sent += 1
-    console.log(`Sent ${MODE} report for ${payload.businessName} → ${recipients.join(', ')}`)
+    console.log(`Sent ${MODE} report for ${payload.businessName} → ${delivered.join(', ')}`)
     void bizUserIds
   }
 
