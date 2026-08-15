@@ -7215,7 +7215,7 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
                   Email preview
                 </p>
                 <p className="text-sm text-[#2a3d36]/70">
-                  Same layout as the 8am email: normal vs staff price, this business only.
+                  Same layout as the 9am email: normal vs staff price, this business only.
                 </p>
               </div>
             </div>
@@ -7235,7 +7235,7 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
                 Stock alert preview
               </p>
               <p className="text-sm text-[#2a3d36]/70">
-                Separate 8am email: out of stock and low stock only.
+                Separate 9am email: out of stock and low stock only.
               </p>
             </div>
             <iframe

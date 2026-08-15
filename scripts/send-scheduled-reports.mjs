@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Daily (8:00 Africa/Lagos) and weekly sales emails via Resend (free tier).
+ * Daily (9:00 Africa/Lagos) and weekly sales emails via Resend (free tier).
  *
  * Usage:
  *   node scripts/send-scheduled-reports.mjs daily

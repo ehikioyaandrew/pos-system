@@ -1,4 +1,4 @@
-# Sends per-business daily (08:00 Africa/Lagos) and weekly sales emails.
+# Sends per-business daily (09:00 Africa/Lagos) and weekly sales emails.
 #
 # Secrets:
 #   VITE_SUPABASE_URL
@@ -11,8 +11,8 @@ name: Scheduled sales emails
 
 on:
   schedule:
-    # 07:00 UTC = 08:00 Africa/Lagos (WAT, no DST)
-    - cron: '0 7 * * *'
+    # 08:00 UTC = 09:00 Africa/Lagos (WAT, no DST)
+    - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
       mode:
