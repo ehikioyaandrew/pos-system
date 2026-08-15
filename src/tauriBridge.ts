@@ -113,6 +113,14 @@ export function normalizeTauriArgs(
     }
   }
 
+  if (command === 'void_sale') {
+    return {
+      saleId: normalized.saleId,
+      businessId: normalized.businessId,
+      actorUserId: normalized.actorUserId,
+    }
+  }
+
   return normalized
 }
 

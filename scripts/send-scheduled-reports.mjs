@@ -172,15 +172,31 @@ async function main() {
     'products_backup',
     'select=id,business_id,name,price,staff_price,fridge_stock,show_stock,store_stock,sports_stock,min_stock_level,is_active'
   )
-  const sales = await fetchAll('sales_backup', 'select=id,user_id,total_amount,created_at,payment_method')
+  const sales = await fetchAll(
+    'sales_backup',
+    'select=id,user_id,total_amount,created_at,payment_method,payment_status,location'
+  )
   const items = await fetchAll(
     'sale_items_backup',
     'select=id,sale_id,product_id,quantity,unit_price,total_price'
   )
+  let stockMoves = []
+  try {
+    stockMoves = await fetchAll(
+      'inventory_transactions_backup',
+      'select=product_id,transaction_type,quantity,reason,created_at'
+    )
+  } catch {
+    stockMoves = []
+  }
 
   const productById = new Map(products.map((p) => [Number(p.id), p]))
   const userById = new Map(users.map((u) => [Number(u.id), u]))
-  const salesInRange = sales.filter((s) => inRange(s.created_at, start, end))
+  const salesInRange = sales.filter(
+    (s) =>
+      inRange(s.created_at, start, end) &&
+      String(s.payment_status || '').toUpperCase() !== 'CANCELLED'
+  )
   const saleIds = new Set(salesInRange.map((s) => Number(s.id)))
   const itemsInRange = items.filter((i) => saleIds.has(Number(i.sale_id)))
 
@@ -254,24 +270,87 @@ async function main() {
         lines: rollupLines(staffItems),
       },
       sold: (() => {
-        const byId = new Map()
+        const locBySale = new Map(
+          bizSales.map((s) => [Number(s.id), String(s.location || 'fridge').toLowerCase()])
+        )
+        const fridgeSold = new Map()
+        const showSold = new Map()
         for (const it of bizItems) {
           const id = Number(it.product_id)
-          const cur = byId.get(id) || { qty: 0 }
-          cur.qty += Number(it.quantity || 0)
-          byId.set(id, cur)
+          const qty = Number(it.quantity || 0)
+          const loc = locBySale.get(Number(it.sale_id)) || 'fridge'
+          if (loc === 'show') showSold.set(id, (showSold.get(id) || 0) + qty)
+          else if (loc !== 'sports') fridgeSold.set(id, (fridgeSold.get(id) || 0) + qty)
         }
-        return [...byId.entries()]
-          .map(([id, v]) => {
+        const afterSales = sales.filter((s) => {
+          if (String(s.payment_status || '').toUpperCase() === 'CANCELLED') return false
+          const t = Date.parse(String(s.created_at || ''))
+          if (!(t >= end)) return false
+          const u = userById.get(Number(s.user_id))
+          return u && Number(u.business_id) === bid
+        })
+        const afterIds = new Set(afterSales.map((s) => Number(s.id)))
+        const locAfter = new Map(
+          afterSales.map((s) => [Number(s.id), String(s.location || 'fridge').toLowerCase()])
+        )
+        const fridgeSoldAfter = new Map()
+        for (const it of items) {
+          if (!afterIds.has(Number(it.sale_id))) continue
+          const loc = locAfter.get(Number(it.sale_id)) || 'fridge'
+          if (loc === 'show' || loc === 'sports') continue
+          const id = Number(it.product_id)
+          fridgeSoldAfter.set(id, (fridgeSoldAfter.get(id) || 0) + Number(it.quantity || 0))
+        }
+        const newFridge = new Map()
+        const newAfter = new Map()
+        const storeOutAfter = new Map()
+        for (const m of stockMoves) {
+          const p = productById.get(Number(m.product_id))
+          if (!p || Number(p.business_id) !== bid) continue
+          const type = String(m.transaction_type || '').toUpperCase()
+          const reason = String(m.reason || '')
+          const qty = Number(m.quantity || 0)
+          if (!(qty > 0)) continue
+          const intoFridge =
+            type.includes('TO_FRIDGE') ||
+            (type === 'STOCK_FRIDGE' && !/void/i.test(reason))
+          const outOfStore =
+            type.includes('TRANSFER_STORE') ||
+            type.includes('TO_FRIDGE') ||
+            type.includes('TO_SHOW')
+          const t = Date.parse(String(m.created_at || ''))
+          if (inRange(m.created_at, start, end)) {
+            if (intoFridge) newFridge.set(Number(m.product_id), (newFridge.get(Number(m.product_id)) || 0) + qty)
+          } else if (t >= end) {
+            const id = Number(m.product_id)
+            if (intoFridge) newAfter.set(id, (newAfter.get(id) || 0) + qty)
+            if (outOfStore) storeOutAfter.set(id, (storeOutAfter.get(id) || 0) + qty)
+          }
+        }
+        const ids = new Set([...fridgeSold.keys(), ...showSold.keys()])
+        return [...ids]
+          .map((id) => {
             const p = productById.get(id)
+            const fridgeNow = Number(p?.fridge_stock || 0)
+            const fsold = fridgeSold.get(id) || 0
+            const added = newFridge.get(id) || 0
+            const fridgeLeft = Math.max(0, fridgeNow + (fridgeSoldAfter.get(id) || 0) - (newAfter.get(id) || 0))
+            const fridgeBefore = Math.max(0, fridgeLeft + fsold - added)
+            const storeLeft = Math.max(0, Number(p?.store_stock || 0) + (storeOutAfter.get(id) || 0))
             return {
               name: p?.name || `Product ${id}`,
-              sold: v.qty,
+              sold: fsold,
+              fridge_sold: fsold,
+              fridge_left: fridgeLeft,
+              fridge_before: fridgeBefore,
+              new_stock: added,
+              store: storeLeft,
+              show_sold: showSold.get(id) || 0,
               left: remainingOf(p),
-              before: remainingOf(p) + v.qty,
+              before: fridgeBefore,
             }
           })
-          .sort((a, b) => b.sold - a.sold)
+          .sort((a, b) => b.fridge_sold - a.fridge_sold)
       })(),
       outOfStock: products
         .filter((p) => Number(p.business_id) === bid && p.is_active !== false && remainingOf(p) <= 0)

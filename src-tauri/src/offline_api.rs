@@ -27,6 +27,10 @@ impl Database {
             [],
         );
         let _ = self.conn.execute(
+            "ALTER TABLE sales ADD COLUMN location TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
             "ALTER TABLE sale_items ADD COLUMN synced_at TEXT",
             [],
         );
@@ -136,10 +140,11 @@ impl Database {
         payment_status: &str,
         notes: Option<&str>,
         created_at: &str,
+        location: Option<&str>,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at, location)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 sale_id,
                 user_id,
@@ -148,7 +153,8 @@ impl Database {
                 payment_method,
                 payment_status,
                 notes.unwrap_or(""),
-                created_at
+                created_at,
+                location.unwrap_or("fridge")
             ],
         )?;
         Ok(sale_id)
@@ -186,13 +192,15 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status,
                     s.notes, s.created_at,
-                    COALESCE(u.name, u.username, '') as staff_name
+                    COALESCE(u.name, u.username, '') as staff_name,
+                    COALESCE(s.location, 'fridge') as location
              FROM sales s
              LEFT JOIN users u ON u.id = s.user_id
              WHERE (s.business_id = ?1 OR (s.business_id IS NULL AND u.business_id = ?1))
                AND (?2 < 0 OR s.user_id = ?2)
                AND date(s.created_at) >= date(?3)
                AND date(s.created_at) <= date(?4)
+               AND UPPER(COALESCE(s.payment_status, '')) != 'CANCELLED'
              ORDER BY s.created_at DESC
              LIMIT 500",
         )?;
@@ -207,6 +215,7 @@ impl Database {
                 "notes": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
                 "staff_name": row.get::<_, String>(7)?,
+                "location": row.get::<_, String>(8)?,
             }))
         })?;
 
@@ -221,7 +230,7 @@ impl Database {
         let sale = self.conn.query_row(
             "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status,
                     s.notes, s.created_at, COALESCE(u.name, u.username, '') as staff_name,
-                    s.business_id
+                    s.business_id, COALESCE(s.location, 'fridge')
              FROM sales s
              LEFT JOIN users u ON u.id = s.user_id
              WHERE s.id = ?1",
@@ -237,6 +246,7 @@ impl Database {
                     "created_at": row.get::<_, String>(6)?,
                     "staff_name": row.get::<_, String>(7)?,
                     "business_id": row.get::<_, Option<i64>>(8)?,
+                    "location": row.get::<_, String>(9)?,
                 }))
             },
         )?;
@@ -271,9 +281,415 @@ impl Database {
             })?
             .collect::<Result<Vec<_>>>()?;
 
+        let bid = sale.get("business_id").and_then(|v| v.as_i64());
+        let (biz_name, biz_addr, biz_phone) = if let Some(id) = bid {
+            self.conn
+                .query_row(
+                    "SELECT COALESCE(name, ''), COALESCE(address, ''), COALESCE(phone, '')
+                     FROM businesses WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap_or_default()
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+
+        let notes = sale.get("notes").and_then(|v| v.as_str()).unwrap_or("");
+        let customer = if notes.to_uppercase().starts_with("DEBT:") {
+            notes[5..].trim().to_string()
+        } else if !notes.trim().is_empty() {
+            notes.trim().to_string()
+        } else {
+            "Walk-in customer".into()
+        };
+
         Ok(serde_json::json!({
-            "sale": sale,
+            "id": sale.get("id"),
+            "user_id": sale.get("user_id"),
+            "total_amount": sale.get("total_amount"),
+            "payment_method": sale.get("payment_method"),
+            "payment_status": sale.get("payment_status"),
+            "notes": sale.get("notes"),
+            "created_at": sale.get("created_at"),
+            "staff_name": sale.get("staff_name"),
+            "business_id": sale.get("business_id"),
+            "location": sale.get("location"),
+            "customer_name": customer,
+            "business_name": biz_name,
+            "business_address": biz_addr,
+            "business_phone": biz_phone,
             "items": items,
+        }))
+    }
+
+    pub fn void_sale(&self, sale_id: i64, business_id: i64, actor_user_id: i64) -> Result<Value> {
+        let (status, method, amount, notes, location, sale_bid): (
+            String,
+            String,
+            f64,
+            String,
+            String,
+            i64,
+        ) = self.conn.query_row(
+            "SELECT COALESCE(payment_status, ''), COALESCE(payment_method, ''),
+                    COALESCE(total_amount, 0), COALESCE(notes, ''),
+                    COALESCE(location, 'fridge'), COALESCE(business_id, 0)
+             FROM sales WHERE id = ?1",
+            [sale_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+
+        if sale_bid != 0 && sale_bid != business_id {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if status.to_uppercase() == "CANCELLED" {
+            return Ok(serde_json::json!({ "ok": false, "error": "already_voided" }));
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT product_id, quantity FROM sale_items WHERE sale_id = ?1",
+        )?;
+        let lines: Vec<(i64, i32)> = stmt
+            .query_map([sale_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+
+        let loc = location.to_lowercase();
+        if loc != "sports" {
+            for (product_id, qty) in &lines {
+                self.update_stock_type(
+                    *product_id,
+                    &loc,
+                    *qty,
+                    actor_user_id,
+                    Some("Void sale — stock returned"),
+                )?;
+            }
+        }
+
+        if method.to_uppercase() == "DEBT" && amount > 0.0 {
+            let customer = if notes.to_uppercase().starts_with("DEBT:") {
+                notes[5..].trim().to_string()
+            } else {
+                notes.trim().to_string()
+            };
+            if !customer.is_empty() {
+                let key = Self::normalize_customer_key(&customer);
+                let now = chrono::Utc::now().to_rfc3339();
+                let _ = self.conn.execute(
+                    "UPDATE customer_debts
+                     SET total_charged = MAX(0, total_charged - ?1),
+                         balance = MAX(0, balance - ?1),
+                         updated_at = ?2
+                     WHERE business_id = ?3 AND customer_key = ?4",
+                    params![amount, now, business_id, key],
+                );
+                let _ = self.conn.execute(
+                    "UPDATE customer_debts SET status = CASE WHEN balance <= 0.0001 THEN 'PAID' ELSE 'OPEN' END
+                     WHERE business_id = ?1 AND customer_key = ?2",
+                    params![business_id, key],
+                );
+                if let Ok(debt_id) = self.conn.query_row(
+                    "SELECT id FROM customer_debts WHERE business_id = ?1 AND customer_key = ?2",
+                    params![business_id, key],
+                    |row| row.get::<_, i64>(0),
+                ) {
+                    let entry_id = chrono::Utc::now().timestamp_millis();
+                    let _ = self.conn.execute(
+                        "INSERT INTO debt_entries
+                         (id, debt_id, business_id, entry_type, amount, sale_id, note, created_by, created_at)
+                         VALUES (?1, ?2, ?3, 'VOID', ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            entry_id,
+                            debt_id,
+                            business_id,
+                            amount,
+                            sale_id,
+                            format!("Void sale #{}", sale_id),
+                            actor_user_id,
+                            now
+                        ],
+                    );
+                }
+            }
+        }
+
+        self.conn.execute(
+            "UPDATE sales SET payment_status = 'CANCELLED' WHERE id = ?1",
+            [sale_id],
+        )?;
+
+        let _ = self.log_activity(
+            business_id,
+            Some(actor_user_id),
+            "SALE_VOIDED",
+            "sale",
+            &sale_id.to_string(),
+            &format!("Voided sale #{}", sale_id),
+            None,
+        );
+
+        Ok(serde_json::json!({ "ok": true, "sale_id": sale_id }))
+    }
+
+    pub fn get_sales_email_preview(
+        &self,
+        business_id: i64,
+        report_date: &str,
+    ) -> Result<Value> {
+        let mut sale_stmt = self.conn.prepare(
+            "SELECT s.id, COALESCE(s.location, 'fridge'), s.created_at FROM sales s
+             LEFT JOIN users u ON u.id = s.user_id
+             WHERE (s.business_id = ?1 OR (s.business_id IS NULL AND u.business_id = ?1))
+               AND date(s.created_at) >= date(?2)
+               AND UPPER(COALESCE(s.payment_status, '')) != 'CANCELLED'",
+        )?;
+        let sales: Vec<(i64, String, String)> = sale_stmt
+            .query_map(params![business_id, report_date], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        let sale_ids: Vec<i64> = sales
+            .iter()
+            .filter(|s| s.2.starts_with(report_date))
+            .map(|s| s.0)
+            .collect();
+        let sale_loc: std::collections::HashMap<i64, String> =
+            sales.iter().map(|s| (s.0, s.1.clone())).collect();
+        let sale_on_day: std::collections::HashMap<i64, bool> = sales
+            .iter()
+            .map(|s| (s.0, s.2.starts_with(report_date)))
+            .collect();
+        let all_sale_ids: Vec<i64> = sales.iter().map(|s| s.0).collect();
+
+        type Prod = (String, f64, f64, i32, i32, i32, i32);
+        let mut products: std::collections::HashMap<i64, Prod> =
+            std::collections::HashMap::new();
+        let mut pstmt = self.conn.prepare(
+            "SELECT id, name, COALESCE(price, 0), COALESCE(staff_price, 0),
+                    COALESCE(fridge_stock,0), COALESCE(show_stock,0), COALESCE(store_stock,0),
+                    COALESCE(fridge_stock,0)+COALESCE(show_stock,0)+COALESCE(store_stock,0)+COALESCE(sports_stock,0)
+             FROM products WHERE business_id = ?1",
+        )?;
+        let prows = pstmt.query_map([business_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, i32>(4)?,
+                row.get::<_, i32>(5)?,
+                row.get::<_, i32>(6)?,
+                row.get::<_, i32>(7)?,
+            ))
+        })?;
+        for r in prows {
+            let (id, name, price, staff, fridge, show, store, left) = r?;
+            products.insert(id, (name, price, staff, fridge, show, store, left));
+        }
+
+        let mut new_fridge: std::collections::HashMap<i64, i32> =
+            std::collections::HashMap::new();
+        let mut new_fridge_after: std::collections::HashMap<i64, i32> =
+            std::collections::HashMap::new();
+        let mut store_out_after: std::collections::HashMap<i64, i32> =
+            std::collections::HashMap::new();
+        if let Ok(mut mstmt) = self.conn.prepare(
+            "SELECT it.product_id, it.transaction_type, it.quantity, COALESCE(it.reason, ''), it.created_at
+             FROM inventory_transactions it
+             JOIN products p ON p.id = it.product_id
+             WHERE p.business_id = ?1 AND date(it.created_at) >= date(?2)",
+        ) {
+            if let Ok(mrows) = mstmt.query_map(params![business_id, report_date], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i32>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            }) {
+                for mr in mrows.flatten() {
+                    let (pid, typ, qty, reason, created) = mr;
+                    if qty <= 0 {
+                        continue;
+                    }
+                    let t = typ.to_uppercase();
+                    let on_day = created.starts_with(report_date);
+                    let into = t.contains("TO_FRIDGE")
+                        || (t == "STOCK_FRIDGE" && !reason.to_lowercase().contains("void"));
+                    let out_store = t.contains("TRANSFER_STORE")
+                        || t.contains("TO_FRIDGE")
+                        || t.contains("TO_SHOW");
+                    if on_day {
+                        if into {
+                            *new_fridge.entry(pid).or_insert(0) += qty;
+                        }
+                    } else {
+                        if into {
+                            *new_fridge_after.entry(pid).or_insert(0) += qty;
+                        }
+                        if out_store {
+                            *store_out_after.entry(pid).or_insert(0) += qty;
+                        }
+                    }
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct Line {
+            name: String,
+            qty: i32,
+            amount: f64,
+        }
+        let mut normal: std::collections::HashMap<String, Line> = std::collections::HashMap::new();
+        let mut staff_map: std::collections::HashMap<String, Line> = std::collections::HashMap::new();
+        let mut fridge_sold: std::collections::HashMap<i64, i32> = std::collections::HashMap::new();
+        let mut fridge_sold_after: std::collections::HashMap<i64, i32> =
+            std::collections::HashMap::new();
+        let mut show_sold: std::collections::HashMap<i64, i32> = std::collections::HashMap::new();
+
+        for sid in &all_sale_ids {
+            let loc = sale_loc
+                .get(sid)
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| "fridge".into());
+            let on_day = *sale_on_day.get(sid).unwrap_or(&false);
+            let mut istmt = self.conn.prepare(
+                "SELECT product_id, quantity, unit_price, total_price FROM sale_items WHERE sale_id = ?1",
+            )?;
+            let irows = istmt.query_map([sid], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })?;
+            for ir in irows {
+                let (pid, qty, unit, total) = ir?;
+                let (name, normal_p, staff_p, _, _, _, _) = products
+                    .get(&pid)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("Product {}", pid), 0.0, 0.0, 0, 0, 0, 0));
+                let amount = if total > 0.0 { total } else { unit * qty as f64 };
+                if on_day {
+                    let is_staff = staff_p > 0.0
+                        && (unit - staff_p).abs() < 0.001
+                        && (unit - normal_p).abs() > 0.001;
+                    let map = if is_staff { &mut staff_map } else { &mut normal };
+                    let entry = map.entry(name.clone()).or_insert(Line {
+                        name: name.clone(),
+                        qty: 0,
+                        amount: 0.0,
+                    });
+                    entry.qty += qty;
+                    entry.amount += amount;
+                }
+                if loc == "show" {
+                    if on_day {
+                        *show_sold.entry(pid).or_insert(0) += qty;
+                    }
+                } else if loc != "sports" {
+                    if on_day {
+                        *fridge_sold.entry(pid).or_insert(0) += qty;
+                    } else {
+                        *fridge_sold_after.entry(pid).or_insert(0) += qty;
+                    }
+                }
+            }
+        }
+
+        let to_lines = |m: std::collections::HashMap<String, Line>| {
+            let mut v: Vec<Value> = m
+                .into_values()
+                .map(|l| {
+                    serde_json::json!({ "name": l.name, "qty": l.qty, "amount": l.amount })
+                })
+                .collect();
+            v.sort_by(|a, b| {
+                let ba = b.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let aa = a.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                ba.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            v
+        };
+        let normal_lines = to_lines(normal);
+        let staff_lines = to_lines(staff_map);
+        let normal_total: f64 = normal_lines
+            .iter()
+            .map(|l| l.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .sum();
+        let staff_total: f64 = staff_lines
+            .iter()
+            .map(|l| l.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .sum();
+
+        let mut sold_ids: Vec<i64> = fridge_sold.keys().copied().collect();
+        for id in show_sold.keys() {
+            if !sold_ids.contains(id) {
+                sold_ids.push(*id);
+            }
+        }
+        let mut sold: Vec<Value> = sold_ids
+            .into_iter()
+            .map(|id| {
+                let (name, _, _, fridge, _, store, left) = products
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("Product {}", id), 0.0, 0.0, 0, 0, 0, 0));
+                let fsold = *fridge_sold.get(&id).unwrap_or(&0);
+                let ssold = *show_sold.get(&id).unwrap_or(&0);
+                let added = *new_fridge.get(&id).unwrap_or(&0);
+                let fridge_left = (fridge + *fridge_sold_after.get(&id).unwrap_or(&0)
+                    - *new_fridge_after.get(&id).unwrap_or(&0))
+                .max(0);
+                let fridge_before = (fridge_left + fsold - added).max(0);
+                let store_left = (store + *store_out_after.get(&id).unwrap_or(&0)).max(0);
+                serde_json::json!({
+                    "name": name,
+                    "sold": fsold,
+                    "fridge_sold": fsold,
+                    "fridge_left": fridge_left,
+                    "fridge_before": fridge_before,
+                    "new_stock": added,
+                    "store": store_left,
+                    "show_sold": ssold,
+                    "left": left,
+                    "before": fridge_before
+                })
+            })
+            .collect();
+        sold.sort_by(|a, b| {
+            let ba = b.get("fridge_sold").and_then(|x| x.as_i64()).unwrap_or(0);
+            let aa = a.get("fridge_sold").and_then(|x| x.as_i64()).unwrap_or(0);
+            ba.cmp(&aa)
+        });
+
+        Ok(serde_json::json!({
+            "periodLabel": report_date,
+            "kind": "daily",
+            "reminder": true,
+            "salesCount": sale_ids.len(),
+            "normal": { "total": normal_total, "lines": normal_lines },
+            "staff": { "total": staff_total, "lines": staff_lines },
+            "sold": sold,
         }))
     }
 
@@ -530,6 +946,7 @@ impl Database {
                 note.map(|n| format!(" | {}", n)).unwrap_or_default()
             )),
             &now,
+            None,
         )?;
         self.charge_sale_to_debt(business_id, customer_name, amount, sale_id, staff_id, &now)?;
         Ok(serde_json::json!({ "sale_id": sale_id, "amount": amount }))

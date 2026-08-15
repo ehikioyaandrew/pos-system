@@ -457,6 +457,63 @@ impl Database {
         Ok(product_id)
     }
 
+    pub fn update_product(
+        &self,
+        id: i64,
+        business_id: i64,
+        name: &str,
+        description: Option<&str>,
+        category: &str,
+        packaging: Option<&str>,
+        image_path: Option<&str>,
+        min_stock_level: i32,
+        update_prices: bool,
+        price: Option<f64>,
+        staff_price: Option<f64>,
+        cost_price: Option<f64>,
+        update_stock: bool,
+        fridge_stock: Option<i32>,
+        show_stock: Option<i32>,
+        store_stock: Option<i32>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE products SET name = ?1, description = ?2, category = ?3, packaging = ?4, image_path = ?5, min_stock_level = ?6 WHERE id = ?7 AND business_id = ?8",
+            rusqlite::params![
+                name,
+                description.unwrap_or(""),
+                category,
+                packaging.unwrap_or(""),
+                image_path.unwrap_or(""),
+                min_stock_level,
+                id,
+                business_id,
+            ],
+        )?;
+        if update_prices {
+            if let (Some(p), Some(sp), Some(cp)) = (price, staff_price, cost_price) {
+                self.conn.execute(
+                    "UPDATE products SET price = ?1, staff_price = ?2, cost_price = ?3 WHERE id = ?4 AND business_id = ?5",
+                    rusqlite::params![p, sp, cp, id, business_id],
+                )?;
+            } else if let Some(p) = price {
+                self.conn.execute(
+                    "UPDATE products SET price = ?1 WHERE id = ?2 AND business_id = ?3",
+                    rusqlite::params![p, id, business_id],
+                )?;
+            }
+        }
+        if update_stock {
+            let fridge = fridge_stock.unwrap_or(0);
+            let show = show_stock.unwrap_or(0);
+            let store = store_stock.unwrap_or(0);
+            self.conn.execute(
+                "UPDATE products SET fridge_stock = ?1, show_stock = ?2, store_stock = ?3, stock_quantity = ?4 WHERE id = ?5 AND business_id = ?6",
+                rusqlite::params![fridge, show, store, fridge + show + store, id, business_id],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn get_all_users(&self) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, username, password_hash, name, email, role, business_id, temporary_password, created_at, is_active, COALESCE(is_hidden, 0)
@@ -505,7 +562,8 @@ impl Database {
 
     pub fn get_all_sales(&self) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status, s.created_at, s.notes, s.business_id
+            "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status, s.created_at, s.notes, s.business_id,
+                    COALESCE(s.location, 'fridge')
              FROM sales s
              ORDER BY s.created_at DESC"
         )?;
@@ -533,6 +591,7 @@ impl Database {
                 "created_at": row.get::<_, String>(5)?,
                 "notes": row.get::<_, Option<String>>(6)?,
                 "business_id": bid,
+                "location": row.get::<_, String>(8).unwrap_or_else(|_| "fridge".into()),
                 "synced_at": now,
             }))
         })?;

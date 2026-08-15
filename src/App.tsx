@@ -949,6 +949,13 @@ function NavIcon({ name }: { name: string }) {
           <path d="M16 15v-6" />
         </svg>
       )
+    case 'email':
+      return (
+        <svg {...common}>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="M3 7l9 7 9-7" />
+        </svg>
+      )
     case 'products':
       return (
         <svg {...common}>
@@ -1048,14 +1055,14 @@ function NavButton({
     <button
       type="button"
       onClick={onClick}
-      className={`group w-full flex items-center gap-3 py-2.5 px-3 rounded-lg text-left transition-colors ${
+      className={`group w-full flex items-center gap-2.5 py-1.5 px-2.5 rounded-lg text-left transition-colors ${
         active
           ? 'bg-white/10 text-white shadow-[inset_3px_0_0_0_#e0a06a]'
           : 'text-white/55 hover:bg-white/5 hover:text-white'
       }`}
     >
       <span
-        className={`h-9 w-9 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+        className={`h-8 w-8 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
           active
             ? 'bg-[#e0a06a]/15 border-[#e0a06a]/35 text-[#e0a06a]'
             : 'bg-white/5 border-white/10 text-white/45 group-hover:text-white/70'
@@ -1275,7 +1282,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
           mobileNavOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
-        <div className="px-5 pt-6 pb-5">
+        <div className="px-5 pt-5 pb-3">
           <div className="flex items-start justify-between gap-3 mb-5">
             <p className="font-display text-[11px] font-semibold tracking-[0.22em] uppercase text-[#e0a06a]">
               POS System
@@ -1300,7 +1307,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
           </div>
         </div>
 
-        <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto pb-4">
+        <nav className="sidebar-nav-scroll flex-1 px-3 space-y-0.5 pb-3">
           <p className="px-3 pt-2 pb-2 text-[10px] font-semibold tracking-[0.18em] uppercase text-white/30">
             {isSuperSuperAdmin ? 'Platform' : 'Menu'}
           </p>
@@ -1345,6 +1352,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
+              <NavButton active={currentSection === 'email-preview'} onClick={() => goToSection('email-preview')} icon="email" label="Email Preview" />
               <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} icon="settings" label="Settings" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
@@ -1357,6 +1365,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
+              <NavButton active={currentSection === 'email-preview'} onClick={() => goToSection('email-preview')} icon="email" label="Email Preview" />
               <NavButton active={currentSection === 'settings'} onClick={() => goToSection('settings')} icon="settings" label="Settings" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
@@ -1369,6 +1378,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
+              <NavButton active={currentSection === 'email-preview'} onClick={() => goToSection('email-preview')} icon="email" label="Email Preview" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
           ) : (
@@ -1382,7 +1392,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
           )}
         </nav>
 
-        <div className="p-4 border-t border-white/5">
+        <div className="p-3 border-t border-white/5">
           <div className="px-2 mb-3">
             <p className="text-xs text-white/40 truncate">{currentUser?.name || currentUser?.username}</p>
             <p className="text-[11px] text-white/25">{roleLabel}</p>
@@ -1407,6 +1417,37 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               className="w-full mb-2 border border-[#e0a06a]/40 hover:bg-[#e0a06a]/10 text-[#e0a06a] py-2 px-4 rounded-md text-sm font-medium transition-colors"
             >
               Sync now
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const today = new Date()
+                  const y = today.getFullYear()
+                  const m = String(today.getMonth() + 1).padStart(2, '0')
+                  const d = String(today.getDate()).padStart(2, '0')
+                  const dateStr = `${y}-${m}-${d}`
+                  const preview = (await invoke('get_sales_email_preview', {
+                    businessId: currentUser?.business_id || businessInfo?.id,
+                    reportDate: dateStr,
+                  })) as any
+                  const n = Number(preview?.normal?.total || 0)
+                  const s = Number(preview?.staff?.total || 0)
+                  const ok = window.confirm(
+                    `Close day ${dateStr}?\n\n${preview?.salesCount || 0} sales\nNormal ${n.toLocaleString()}\nStaff ${s.toLocaleString()}\nTotal ${(n + s).toLocaleString()}\n\nThis will sync to the cloud.`
+                  )
+                  if (!ok) return
+                  toast.loading('Closing day…', { id: 'desktop-eod' })
+                  await syncFromCloudDesktop()
+                  await syncToCloudDesktop()
+                  toast.success('Day closed · synced', { id: 'desktop-eod' })
+                } catch (e: unknown) {
+                  toast.error(tauriErrorMessage(e, 'Close day failed (offline?)'), { id: 'desktop-eod' })
+                }
+              }}
+              className="w-full mb-2 border border-white/15 hover:bg-white/10 text-white/80 py-2 px-4 rounded-md text-sm font-medium transition-colors"
+            >
+              Close day → Sync
             </button>
             <button
               type="button"
@@ -1536,6 +1577,11 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         // Managers and above can see reports
         if (isSuperAdmin || isManager || isSecretary) {
           return <ReportsDashboard currentUser={currentUser} businessInfo={businessInfo} />
+        }
+        return <AccessDenied />
+      case 'email-preview':
+        if (isSuperAdmin || isManager || isSecretary) {
+          return <EmailPreviewDashboard currentUser={currentUser} businessInfo={businessInfo} />
         }
         return <AccessDenied />
       case 'settings':
@@ -3736,6 +3782,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         return
       }
 
+      const isAdmin = currentUser?.role === 'SuperAdmin'
       await invoke('create_product', {
         request: {
           business_id: id,
@@ -3746,12 +3793,14 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           price: productData.price || 0,
           staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
           cost_price: productData.costPrice || productData.cost_price || 0,
-          stock_quantity: productData.stockQuantity || productData.stock_quantity || 0,
+          stock_quantity: isAdmin
+            ? (productData.fridgeStock || 0) + (productData.showStock || 0) + (productData.storeStock || 0)
+            : 0,
           min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
-          fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
-          show_stock: productData.showStock || productData.show_stock || 0,
-          store_stock: productData.storeStock || productData.store_stock || 0,
-          sports_stock: productData.sportsStock || productData.sports_stock || 0,
+          fridge_stock: isAdmin ? Number(productData.fridgeStock || 0) : 0,
+          show_stock: isAdmin ? Number(productData.showStock || 0) : 0,
+          store_stock: isAdmin ? Number(productData.storeStock || 0) : 0,
+          sports_stock: 0,
           duration_value: productData.durationValue ?? productData.duration_value ?? null,
           duration_unit: productData.durationUnit || productData.duration_unit || null,
           image_path: productData.image_path || productData.imagePath || null,
@@ -3773,6 +3822,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         toast.error('Missing product or business id')
         return
       }
+      const isAdmin = currentUser?.role === 'SuperAdmin'
       await invoke('update_product', {
         request: {
           id: productData.id,
@@ -3781,17 +3831,22 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           description: productData.description || '',
           category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
           packaging: productData.packaging || null,
-          price: productData.price || 0,
-          staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
-          cost_price: productData.costPrice || productData.cost_price || 0,
           min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
-          fridge_stock: productData.fridgeStock || productData.fridge_stock || 0,
-          show_stock: productData.showStock || productData.show_stock || 0,
-          store_stock: productData.storeStock || productData.store_stock || 0,
-          sports_stock: productData.sportsStock || productData.sports_stock || 0,
-          duration_value: productData.durationValue ?? productData.duration_value ?? null,
-          duration_unit: productData.durationUnit || productData.duration_unit || null,
           image_path: productData.image_path || productData.imagePath || null,
+          update_prices: isAdmin,
+          update_stock: isAdmin,
+          ...(isAdmin
+            ? {
+                price: productData.price || 0,
+                staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
+                cost_price: productData.costPrice || productData.cost_price || 0,
+                duration_value: productData.durationValue ?? productData.duration_value ?? null,
+                duration_unit: productData.durationUnit || productData.duration_unit || null,
+                fridge_stock: Number(productData.fridgeStock ?? productData.fridge_stock ?? 0),
+                show_stock: Number(productData.showStock ?? productData.show_stock ?? 0),
+                store_stock: Number(productData.storeStock ?? productData.store_stock ?? 0),
+              }
+            : {}),
         },
       })
       toast.success('Product updated')
@@ -4114,6 +4169,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         {showAddModal && (
           <ProductFormModal
             mode="add"
+            isAdmin={currentUser?.role === 'SuperAdmin'}
             onClose={() => setShowAddModal(false)}
             onSave={addProduct}
             businessId={businessId}
@@ -4128,6 +4184,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         {editingProduct && (
           <ProductFormModal
             mode="edit"
+            isAdmin={currentUser?.role === 'SuperAdmin'}
             product={editingProduct}
             onClose={() => setEditingProduct(null)}
             onSave={saveProductEdit}
@@ -4307,6 +4364,7 @@ function ProductFormModal({
   businessId,
   packagingTypes,
   onManagePackaging,
+  isAdmin = false,
 }: {
   mode: 'add' | 'edit'
   product?: any
@@ -4315,6 +4373,7 @@ function ProductFormModal({
   businessId: number
   packagingTypes: string[]
   onManagePackaging: () => void
+  isAdmin?: boolean
 }) {
   const [formData, setFormData] = useState({
     name: product?.name || '',
@@ -4410,6 +4469,9 @@ function ProductFormModal({
 
   const fieldClass =
     'w-full px-4 py-3 text-base bg-white border border-[#d4dcd8] rounded-md text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20 transition-colors'
+  const canEditPrices = isAdmin || mode === 'add'
+  const canEditStock = isAdmin
+  const lockedClass = `${fieldClass} bg-[#f4f6f5] text-[#2a3d36]/70 cursor-not-allowed`
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -4459,20 +4521,40 @@ function ProductFormModal({
         id: product?.id,
         category: isSports ? 'SPORTS' : 'BAR',
         packaging: formData.packaging || null,
-        price: normalPrice || (isShishaAmenity ? 1500 : 0),
-        staffPrice: isSports
+        price: canEditPrices
           ? normalPrice || (isShishaAmenity ? 1500 : 0)
-          : staffPrice,
-        costPrice: isSports ? parseFloat(formData.costPrice) || 0 : parseFloat(formData.costPrice),
+          : Number(product?.price || 0),
+        staffPrice: canEditPrices
+          ? isSports
+            ? normalPrice || (isShishaAmenity ? 1500 : 0)
+            : staffPrice
+          : Number(product?.staff_price ?? product?.price ?? 0),
+        costPrice: canEditPrices
+          ? parseFloat(formData.costPrice) || 0
+          : Number(product?.cost_price || 0),
         minStockLevel: isSports ? 0 : parseInt(formData.minStockLevel) || 0,
-        fridgeStock: isSports ? 0 : parseInt(formData.fridgeStock) || 0,
-        showStock: isSports ? 0 : parseInt(formData.showStock) || 0,
-        storeStock: isSports ? 0 : parseInt(formData.storeStock) || 0,
-        sportsStock: 0,
+        fridgeStock: isSports
+          ? 0
+          : canEditStock
+            ? parseInt(formData.fridgeStock) || 0
+            : Number(product?.fridge_stock || 0),
+        showStock: isSports
+          ? 0
+          : canEditStock
+            ? parseInt(formData.showStock) || 0
+            : Number(product?.show_stock || 0),
+        storeStock: isSports
+          ? 0
+          : canEditStock
+            ? parseInt(formData.storeStock) || 0
+            : Number(product?.store_stock || 0),
+        sportsStock: isSports ? 0 : Number(product?.sports_stock || 0),
         durationValue: isSports ? durationValue : null,
         durationUnit: isSports ? sportsDurationUnit : null,
         business_id: businessId,
         image_path: formData.imagePath,
+        update_prices: canEditPrices,
+        update_stock: canEditStock,
       })
     } finally {
       setSaving(false)
@@ -4636,6 +4718,11 @@ function ProductFormModal({
             <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
               Pricing
             </h3>
+            {!canEditPrices && (
+              <p className="text-sm text-[#2a3d36]/60">
+                Only Super Admin can change prices after a product is created.
+              </p>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {!(formData.category === 'SPORTS' && isShishaAmenity) && (
                 <div>
@@ -4647,9 +4734,11 @@ function ProductFormModal({
                     step="any"
                     min="0"
                     required
+                    disabled={!canEditPrices}
+                    readOnly={!canEditPrices}
                     value={formData.price}
                     onChange={(e) => updateFormData('price', e.target.value)}
-                    className={fieldClass}
+                    className={canEditPrices ? fieldClass : lockedClass}
                     placeholder="0.00"
                   />
                   <p className="mt-1 text-xs text-[#2a3d36]/50">
@@ -4668,9 +4757,11 @@ function ProductFormModal({
                       step="any"
                       min="0"
                       required
+                      disabled={!canEditPrices}
+                      readOnly={!canEditPrices}
                       value={formData.price}
                       onChange={(e) => updateFormData('price', e.target.value)}
-                      className={fieldClass}
+                      className={canEditPrices ? fieldClass : lockedClass}
                       placeholder="1500"
                     />
                     <p className="mt-1 text-xs text-[#2a3d36]/50">
@@ -4687,9 +4778,11 @@ function ProductFormModal({
                       step={isSwimmingAmenity ? 'any' : '1'}
                       min={isSwimmingAmenity ? '0.25' : '1'}
                       required
+                      disabled={!canEditPrices}
+                      readOnly={!canEditPrices}
                       value={formData.durationValue}
                       onChange={(e) => updateFormData('durationValue', e.target.value)}
-                      className={fieldClass}
+                      className={canEditPrices ? fieldClass : lockedClass}
                       placeholder={isSwimmingAmenity ? '2' : '1'}
                     />
                     <p className="mt-1 text-xs text-[#2a3d36]/50">
@@ -4710,9 +4803,11 @@ function ProductFormModal({
                       step="any"
                       min="0"
                       required
+                      disabled={!canEditPrices}
+                      readOnly={!canEditPrices}
                       value={formData.staffPrice}
                       onChange={(e) => updateFormData('staffPrice', e.target.value)}
-                      className={fieldClass}
+                      className={canEditPrices ? fieldClass : lockedClass}
                       placeholder="0.00"
                     />
                     <p className="mt-1 text-xs text-[#2a3d36]/50">
@@ -4730,9 +4825,11 @@ function ProductFormModal({
                       type="number"
                       step="0.01"
                       required
+                      disabled={!canEditPrices}
+                      readOnly={!canEditPrices}
                       value={formData.costPrice}
                       onChange={(e) => updateFormData('costPrice', e.target.value)}
-                      className={fieldClass}
+                      className={canEditPrices ? fieldClass : lockedClass}
                       placeholder="0.00"
                     />
                   </div>
@@ -4746,36 +4843,46 @@ function ProductFormModal({
             <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/50">
               Stock
             </h3>
+            <p className="text-sm text-[#2a3d36]/60">
+              {canEditStock
+                ? 'Super Admin can set counts here. Others should receive into store and use Inventory → Move to fridge.'
+                : 'Only Super Admin can type stock counts. Receive into store and use Inventory → Move to fridge.'}
+            </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-semibold text-[#121c19] mb-2">Fridge stock *</label>
+                <label className="block text-sm font-semibold text-[#121c19] mb-2">Fridge stock</label>
                 <input
                   type="number"
-                  required
-                  value={formData.fridgeStock}
+                  min="0"
+                  readOnly={!canEditStock}
+                  disabled={!canEditStock}
+                  value={formData.fridgeStock || '0'}
                   onChange={(e) => updateFormData('fridgeStock', e.target.value)}
-                  className={fieldClass}
-                  placeholder="0"
+                  className={canEditStock ? fieldClass : lockedClass}
                 />
               </div>
               <div>
                 <label className="block text-sm font-semibold text-[#121c19] mb-2">Show stock</label>
                 <input
                   type="number"
-                  value={formData.showStock}
+                  min="0"
+                  readOnly={!canEditStock}
+                  disabled={!canEditStock}
+                  value={formData.showStock || '0'}
                   onChange={(e) => updateFormData('showStock', e.target.value)}
-                  className={fieldClass}
-                  placeholder="0"
+                  className={canEditStock ? fieldClass : lockedClass}
                 />
               </div>
               <div>
                 <label className="block text-sm font-semibold text-[#121c19] mb-2">Store stock</label>
                 <input
                   type="number"
-                  value={formData.storeStock}
+                  min="0"
+                  readOnly={!canEditStock}
+                  disabled={!canEditStock}
+                  value={formData.storeStock || '0'}
                   onChange={(e) => updateFormData('storeStock', e.target.value)}
-                  className={fieldClass}
-                  placeholder="0"
+                  className={canEditStock ? fieldClass : lockedClass}
                 />
               </div>
               <div>
@@ -6956,14 +7063,200 @@ function EmailSettings({ currentUser, businessInfo }: { currentUser: any, busine
   )
 }
 
+function EmailPreviewDashboard({ currentUser, businessInfo }: { currentUser: any; businessInfo: any }) {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const [loading, setLoading] = useState(true)
+  const businessId = currentUser?.business_id || businessInfo?.id
+  const userRole = currentUser?.role || ''
+  const roleAllows =
+    userRole === 'SuperAdmin' || userRole === 'Manager' || userRole === 'Secretary'
+  const [hasAccess, setHasAccess] = useState(roleAllows)
+  const [reportDate, setReportDate] = useState(yesterday)
+  const [emailHtml, setEmailHtml] = useState('')
+  const [stockHtml, setStockHtml] = useState('')
+
+  const formatDateLabel = (iso: string) => {
+    const d = new Date(`${iso}T12:00:00`)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleDateString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    })
+  }
+
+  useEffect(() => {
+    if (!businessId) {
+      setLoading(false)
+      return
+    }
+    void checkAccess()
+  }, [businessId, userRole])
+
+  useEffect(() => {
+    if (hasAccess && businessId) void loadPreview()
+  }, [hasAccess, businessId, reportDate])
+
+  const checkAccess = async () => {
+    try {
+      const canView = (await invoke('can_user_view_reports', {
+        businessId,
+        userRole,
+      })) as boolean | null
+      // Email preview is always open to Super Admin, Manager, and Secretary.
+      setHasAccess(roleAllows || canView === true)
+    } catch {
+      setHasAccess(roleAllows)
+    }
+  }
+
+  const loadPreview = async () => {
+    try {
+      setLoading(true)
+      const preview = (await invoke('get_sales_email_preview', {
+        businessId,
+        reportDate,
+      })) as any
+      setEmailHtml(
+        buildSalesReportHtml({
+          businessName: businessInfo?.name || 'Business',
+          businessAddress: businessInfo?.address || '',
+          primaryColor: businessInfo?.primary_color || '#121c19',
+          periodLabel: preview?.periodLabel || reportDate,
+          kind: 'daily',
+          reminder: true,
+          salesCount: Number(preview?.salesCount || 0),
+          normal: preview?.normal || { total: 0, lines: [] },
+          staff: preview?.staff || { total: 0, lines: [] },
+          sold: preview?.sold || [],
+        })
+      )
+      setStockHtml(
+        buildStockAlertHtml({
+          businessName: businessInfo?.name || 'Business',
+          businessAddress: businessInfo?.address || '',
+          primaryColor: businessInfo?.primary_color || '#121c19',
+          periodLabel: preview?.periodLabel || reportDate,
+          outOfStock: preview?.outOfStock || [],
+          lowStock: preview?.lowStock || [],
+        })
+      )
+    } catch (error) {
+      console.error('Failed to load email preview:', error)
+      toast.error('Failed to load email preview')
+      setEmailHtml('')
+      setStockHtml('')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (!hasAccess) {
+    return (
+      <div className="min-h-full bg-[#f4f6f5] flex items-center justify-center px-4">
+        <div className="max-w-md w-full rounded-xl border border-[#d4dcd8] bg-white p-8 text-center">
+          <p className="font-display text-2xl font-bold text-[#121c19]">Access denied</p>
+          <p className="mt-2 text-[#2a3d36]/65">
+            You don&apos;t have permission to view email previews.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1100px]">
+        <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Mail
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#121c19]">
+              Email preview
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70">
+              Same layout as the 9am emails for {formatDateLabel(reportDate)} — this business only.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 rounded-md border border-[#d4dcd8] bg-white px-3 py-2 text-sm">
+              <span className="text-[#2a3d36]/55 font-medium">Date</span>
+              <input
+                type="date"
+                value={reportDate}
+                max={new Date().toISOString().slice(0, 10)}
+                onChange={(e) => setReportDate(e.target.value)}
+                className="border-0 bg-transparent text-[#121c19] font-semibold focus:outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void loadPreview()}
+              disabled={loading}
+              className="border border-[#121c19]/15 hover:bg-white disabled:opacity-50 text-[#121c19] px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              {loading ? 'Loading…' : 'Refresh'}
+            </button>
+          </div>
+        </header>
+
+        {loading && !emailHtml ? (
+          <PageLoader label="Loading email preview…" />
+        ) : (
+          <>
+            {emailHtml ? (
+              <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden mb-6">
+                <div className="px-4 sm:px-5 py-3 border-b border-[#e8ecea]">
+                  <p className="text-[11px] font-semibold tracking-[0.16em] uppercase text-[#c4783a]">
+                    Sales email
+                  </p>
+                  <p className="text-sm text-[#2a3d36]/70">
+                    Normal vs staff price, same as the daily sales email.
+                  </p>
+                </div>
+                <iframe
+                  title="Sales email preview"
+                  srcDoc={emailHtml}
+                  className="w-full bg-[#f4f6f5]"
+                  style={{ minHeight: 880, border: 0 }}
+                />
+              </div>
+            ) : (
+              <p className="mb-6 text-sm text-[#2a3d36]/60">No sales email for this date.</p>
+            )}
+            {stockHtml ? (
+              <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
+                <div className="px-4 sm:px-5 py-3 border-b border-[#e8ecea]">
+                  <p className="text-[11px] font-semibold tracking-[0.16em] uppercase text-[#c4783a]">
+                    Stock alert email
+                  </p>
+                  <p className="text-sm text-[#2a3d36]/70">
+                    Out of stock and low stock only.
+                  </p>
+                </div>
+                <iframe
+                  title="Stock alert email preview"
+                  srcDoc={stockHtml}
+                  className="w-full bg-[#f4f6f5]"
+                  style={{ minHeight: 420, border: 0 }}
+                />
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, businessInfo: any }) {
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   const [loading, setLoading] = useState(true)
   const [hasAccess, setHasAccess] = useState(false)
   const [reportDate, setReportDate] = useState(yesterday)
   const [report, setReport] = useState<any>(null)
-  const [emailHtml, setEmailHtml] = useState('')
-  const [stockHtml, setStockHtml] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [view, setView] = useState<'all' | 'sold' | 'remaining'>('all')
 
@@ -7020,39 +7313,6 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
         reportDate,
       }) as any
       setReport(data)
-      try {
-        const preview = (await invoke('get_sales_email_preview', {
-          businessId,
-          reportDate,
-        })) as any
-        setEmailHtml(
-          buildSalesReportHtml({
-            businessName: businessInfo?.name || 'Business',
-            businessAddress: businessInfo?.address || '',
-            primaryColor: businessInfo?.primary_color || '#121c19',
-            periodLabel: preview?.periodLabel || reportDate,
-            kind: 'daily',
-            reminder: true,
-            salesCount: Number(preview?.salesCount || 0),
-            normal: preview?.normal || { total: 0, lines: [] },
-            staff: preview?.staff || { total: 0, lines: [] },
-            sold: preview?.sold || [],
-          })
-        )
-        setStockHtml(
-          buildStockAlertHtml({
-            businessName: businessInfo?.name || 'Business',
-            businessAddress: businessInfo?.address || '',
-            primaryColor: businessInfo?.primary_color || '#121c19',
-            periodLabel: preview?.periodLabel || reportDate,
-            outOfStock: preview?.outOfStock || [],
-            lowStock: preview?.lowStock || [],
-          })
-        )
-      } catch {
-        setEmailHtml('')
-        setStockHtml('')
-      }
     } catch (error) {
       console.error('Failed to load daily stock report:', error)
       toast.error('Failed to load daily stock report')
@@ -7206,46 +7466,6 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
             accent="rose"
           />
         </div>
-
-        {emailHtml ? (
-          <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden mb-6">
-            <div className="px-4 sm:px-5 py-3 border-b border-[#e8ecea] flex items-center justify-between gap-3">
-              <div>
-                <p className="text-[11px] font-semibold tracking-[0.16em] uppercase text-[#c4783a]">
-                  Email preview
-                </p>
-                <p className="text-sm text-[#2a3d36]/70">
-                  Same layout as the 9am email: normal vs staff price, this business only.
-                </p>
-              </div>
-            </div>
-            <iframe
-              title="Sales email preview"
-              srcDoc={emailHtml}
-              className="w-full bg-[#f4f6f5]"
-              style={{ minHeight: 880, border: 0 }}
-            />
-          </div>
-        ) : null}
-
-        {stockHtml ? (
-          <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden mb-6">
-            <div className="px-4 sm:px-5 py-3 border-b border-[#e8ecea]">
-              <p className="text-[11px] font-semibold tracking-[0.16em] uppercase text-[#c4783a]">
-                Stock alert preview
-              </p>
-              <p className="text-sm text-[#2a3d36]/70">
-                Separate 9am email: out of stock and low stock only.
-              </p>
-            </div>
-            <iframe
-              title="Stock alert email preview"
-              srcDoc={stockHtml}
-              className="w-full bg-[#f4f6f5]"
-              style={{ minHeight: 420, border: 0 }}
-            />
-          </div>
-        ) : null}
 
         <div className="rounded-xl border border-[#d4dcd8] bg-white p-4 sm:p-5 mb-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

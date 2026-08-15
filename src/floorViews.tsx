@@ -368,6 +368,65 @@ export function StaffPOSInterface({
       )
       return
     }
+    const otherMode = cart.find(
+      (i) =>
+        i.product.id === product.id &&
+        (i.location || 'fridge') === location &&
+        (i.priceMode || 'normal') !== priceMode
+    )
+    const sameMode = cart.find(
+      (i) =>
+        i.product.id === product.id &&
+        (i.location || 'fridge') === location &&
+        (i.priceMode || 'normal') === priceMode
+    )
+    if (otherMode && !sameMode) {
+      const otherLabel = (otherMode.priceMode || 'normal') === 'staff' ? 'Staff' : 'Normal'
+      const thisLabel = priceMode === 'staff' ? 'Staff' : 'Normal'
+      toast(
+        (t) => (
+          <div className="min-w-[240px]">
+            <p className="text-sm font-semibold text-white">
+              {product.name} is already in the cart at {otherLabel} price
+            </p>
+            <p className="mt-1 text-xs text-white/70">
+              Add a separate {thisLabel} line, or leave the cart as it is.
+            </p>
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                className="flex-1 rounded-md bg-white text-[#121c19] text-xs font-semibold py-1.5"
+                onClick={() => {
+                  toast.dismiss(t.id)
+                  addToCartLine(product, location, stock, sellPrice)
+                }}
+              >
+                Add {thisLabel} line
+              </button>
+              <button
+                type="button"
+                className="flex-1 rounded-md border border-white/25 text-white text-xs font-semibold py-1.5"
+                onClick={() => toast.dismiss(t.id)}
+              >
+                Keep cart
+              </button>
+            </div>
+          </div>
+        ),
+        { duration: 8000, id: `cart-mode-${product.id}-${location}` }
+      )
+      return
+    }
+
+    addToCartLine(product, location, stock, sellPrice)
+  }
+
+  const addToCartLine = (
+    product: any,
+    location: SaleLocation,
+    stock: number,
+    sellPrice: number
+  ) => {
     setCart((prev) => {
       const existing = prev.find(
         (i) =>
@@ -569,6 +628,24 @@ export function StaffPOSInterface({
         } · ${locs}`,
         { duration: 5000 }
       )
+      for (const r of results) {
+        if (!r?.sale_id) continue
+        try {
+          const receipt = (await invoke('get_sale_receipt', {
+            saleId: r.sale_id,
+            businessId,
+          })) as any
+          printReceipt({
+            ...receipt,
+            business_name: receipt.business_name || businessInfo?.name || 'POS System',
+            business_address: receipt.business_address || businessInfo?.address || null,
+            business_phone: receipt.business_phone || businessInfo?.phone || null,
+            location: receipt.location || r.location,
+          })
+        } catch (printErr) {
+          console.warn('Receipt print skipped:', printErr)
+        }
+      }
       await loadProducts()
     } catch (error) {
       toast.error(`Payment failed: ${error}`)
@@ -1506,6 +1583,10 @@ export function SalesLogDashboard({
   const [editItems, setEditItems] = useState<any[]>([])
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [savingDate, setSavingDate] = useState(false)
+  const [voidingId, setVoidingId] = useState<number | null>(null)
+  const [shiftOpen, setShiftOpen] = useState(false)
+  const [shiftLoading, setShiftLoading] = useState(false)
+  const [shiftPreview, setShiftPreview] = useState<any | null>(null)
   const businessId = currentUser?.business_id || businessInfo?.id
   const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(
     String(currentUser?.role || '')
@@ -1727,6 +1808,50 @@ export function SalesLogDashboard({
     }
   }
 
+  const handleVoid = async (sale: any) => {
+    if (!sale?.id) return
+    if (
+      !window.confirm(
+        `Void sale #${sale.id}?\n\nStock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
+      )
+    ) {
+      return
+    }
+    try {
+      setVoidingId(Number(sale.id))
+      await invoke('void_sale', {
+        saleId: sale.id,
+        businessId,
+        actorUserId: currentUser?.id,
+      })
+      toast.success(`Sale #${sale.id} voided · stock returned`)
+      setViewReceipt(null)
+      await load()
+    } catch (error) {
+      toast.error(`Void failed: ${error}`)
+    } finally {
+      setVoidingId(null)
+    }
+  }
+
+  const openShiftReport = async () => {
+    setShiftOpen(true)
+    setShiftLoading(true)
+    try {
+      const today = toDateInputValue()
+      const preview = (await invoke('get_sales_email_preview', {
+        businessId,
+        reportDate: today,
+      })) as any
+      setShiftPreview(preview)
+    } catch (error) {
+      toast.error(`Shift report failed: ${error}`)
+      setShiftPreview(null)
+    } finally {
+      setShiftLoading(false)
+    }
+  }
+
   const filtered = rows.filter((r) => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return true
@@ -1764,13 +1889,22 @@ export function SalesLogDashboard({
               {ownOnly ? 'Your recent sales.' : 'Recent sales for this business.'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
-          >
-            Refresh
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => void openShiftReport()}
+              className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Today’s shift
+            </button>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Refresh
+            </button>
+          </div>
         </header>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
@@ -1901,6 +2035,14 @@ export function SalesLogDashboard({
                   >
                     {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleVoid(sale)}
+                    disabled={voidingId === Number(sale.id)}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-200 text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    {voidingId === Number(sale.id) ? 'Voiding…' : 'Void'}
+                  </button>
                 </div>
               </div>
             </article>
@@ -1967,6 +2109,14 @@ export function SalesLogDashboard({
                         className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
                       >
                         {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleVoid(sale)}
+                        disabled={voidingId === Number(sale.id)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-200 text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+                      >
+                        {voidingId === Number(sale.id) ? 'Voiding…' : 'Void'}
                       </button>
                     </div>
                   </td>
@@ -2121,7 +2271,68 @@ export function SalesLogDashboard({
               >
                 {printingId === Number(viewReceipt.id) ? 'Printing…' : 'Print'}
               </button>
+              <button
+                type="button"
+                onClick={() => void handleVoid(viewReceipt)}
+                disabled={voidingId === Number(viewReceipt.id)}
+                className="flex-1 border border-rose-200 text-rose-800 py-3 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {voidingId === Number(viewReceipt.id) ? 'Voiding…' : 'Void'}
+              </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {shiftOpen && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-[#121c19]/55"
+            onClick={() => setShiftOpen(false)}
+          />
+          <div className="relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
+            <h2 className="font-display text-xl font-bold text-[#121c19]">Today’s shift</h2>
+            {shiftLoading ? (
+              <p className="text-sm text-[#2a3d36]/60">Loading…</p>
+            ) : (
+              <>
+                <p className="text-sm text-[#2a3d36]/70">
+                  {shiftPreview?.salesCount || 0} sales · Normal {money(shiftPreview?.normal?.total)} · Staff{' '}
+                  {money(shiftPreview?.staff?.total)} · Total{' '}
+                  {money(
+                    Number(shiftPreview?.normal?.total || 0) + Number(shiftPreview?.staff?.total || 0)
+                  )}
+                </p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                  Same numbers as the daily email
+                </p>
+                {(shiftPreview?.normal?.lines || []).slice(0, 12).map((l: any) => (
+                  <div key={`n-${l.name}`} className="flex justify-between text-sm">
+                    <span>{l.name} × {l.qty}</span>
+                    <span>{money(l.amount)}</span>
+                  </div>
+                ))}
+                {(shiftPreview?.staff?.lines || []).length > 0 && (
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 pt-2">
+                    Staff price
+                  </p>
+                )}
+                {(shiftPreview?.staff?.lines || []).slice(0, 12).map((l: any) => (
+                  <div key={`s-${l.name}`} className="flex justify-between text-sm">
+                    <span>{l.name} × {l.qty}</span>
+                    <span>{money(l.amount)}</span>
+                  </div>
+                ))}
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => setShiftOpen(false)}
+              className="w-full border border-[#d4dcd8] py-3 rounded-lg font-semibold"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}

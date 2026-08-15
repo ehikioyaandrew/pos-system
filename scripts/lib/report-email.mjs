@@ -127,7 +127,7 @@ export function buildSalesReportHtml(p) {
   </style>
 </head>
 <body class="page" style="margin:0;padding:0;background:#efece6;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-  <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
+  <div style="max-width:640px;margin:0 auto;padding:32px 16px;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="card" style="background:#fffcf8;border:1px solid #e4ddd3;border-radius:4px;">
       <tr>
         <td style="background:${color};padding:28px 28px 24px;">
@@ -164,17 +164,33 @@ export function buildSalesReportHtml(p) {
           ${linesTable('Normal price', p.normal.lines, p.normal.total)}
           ${linesTable('Staff price', p.staff.lines, p.staff.total)}
           ${simpleTable(
-            'Items sold',
-            ['Product', 'Before', 'Sold', 'Left'],
+            'Items sold (fridge)',
+            ['Product', 'Fridge before', 'Sold', 'Fridge left', 'New', 'Store'],
             (p.sold || []).map((r) => {
-              const sold = Number(r.sold ?? 0)
-              const left = Number(r.left ?? 0)
-              const before = Number(r.before ?? left + sold)
-              return [escapeHtml(r.name), String(before), String(sold), String(left)]
+              const fridgeSold = Number(r.fridge_sold ?? r.sold ?? 0)
+              const fridgeLeft = Number(r.fridge_left ?? 0)
+              const added = Number(r.new_stock ?? 0)
+              const fridgeBefore = Number(
+                r.fridge_before ?? Math.max(0, fridgeLeft + fridgeSold - added)
+              )
+              const store = Number(r.store ?? 0)
+              const showSold = Number(r.show_sold ?? 0)
+              const name =
+                showSold > 0
+                  ? `${escapeHtml(r.name)} <span style="color:#8a938e;font-size:11px;">(+${showSold} show)</span>`
+                  : escapeHtml(r.name)
+              return [
+                name,
+                String(fridgeBefore),
+                String(fridgeSold),
+                String(fridgeLeft),
+                String(added),
+                String(store),
+              ]
             })
           )}
 
-          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Before = stock at start of the day (left now + sold). Staff price is listed separately. Automated POS report.</p>
+          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Fridge left is the fridge at the end of this date (next day’s Fridge before). Fridge before = left + sold − new. Store is store stock at the end of this date.</p>
         </td>
       </tr>
     </table>

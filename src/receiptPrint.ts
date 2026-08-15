@@ -280,4 +280,16 @@ export function printReceipt(data: ReceiptData) {
   printWindow.document.open()
   printWindow.document.write(html)
   printWindow.document.close()
+
+  const runPrint = () => {
+    try {
+      printWindow.focus()
+      printWindow.print()
+    } catch {
+      printViaIframe(html)
+    }
+  }
+
+  printWindow.onload = () => setTimeout(runPrint, 80)
+  setTimeout(runPrint, 400)
 }

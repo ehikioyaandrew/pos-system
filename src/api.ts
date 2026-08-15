@@ -978,7 +978,7 @@ async function processSale(request: Record<string, unknown>) {
   // Only DEBT stays Pending until the customer balance is cleared.
   // Cash / Card / External POS are completed as soon as the sale is recorded.
   const paymentStatus = paymentMethod === 'DEBT' ? 'PENDING' : 'COMPLETED'
-  const salePayload = {
+  const salePayload: Record<string, unknown> = {
     id: saleId,
     user_id: staffId,
     total_amount: totalAmount,
@@ -987,9 +987,15 @@ async function processSale(request: Record<string, unknown>) {
     notes,
     created_at: createdAt,
     synced_at: new Date().toISOString(),
+    location,
   }
 
-  const { error: saleError } = await supabase.from('sales_backup').insert(salePayload)
+  let { error: saleError } = await supabase.from('sales_backup').insert(salePayload)
+  if (saleError && /location/i.test(saleError.message)) {
+    delete salePayload.location
+    const retry = await supabase.from('sales_backup').insert(salePayload)
+    saleError = retry.error
+  }
   if (saleError) throw new Error(saleError.message)
 
   for (let i = 0; i < items.length; i++) {
@@ -1057,7 +1063,76 @@ async function processSale(request: Record<string, unknown>) {
     created_at: createdAt,
     items: items.length,
     timestamp: createdAt,
+    location,
   }
+}
+
+async function voidSale(saleId: number, businessId: number, actorUserId: number) {
+  const { data: sale, error } = await supabase
+    .from('sales_backup')
+    .select('*')
+    .eq('id', saleId)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  if (!sale) throw new Error('Sale not found')
+  if (String(sale.payment_status || '').toUpperCase() === 'CANCELLED') {
+    throw new Error('Sale already voided')
+  }
+
+  const location = String(sale.location || 'fridge').toLowerCase()
+  const items = await getSaleItemsForSale(saleId)
+  if (location !== 'sports') {
+    for (const item of items) {
+      const productId = Number(item.product_id)
+      const qty = Number(item.quantity || 0)
+      if (!productId || qty <= 0) continue
+      await updateStockType({
+        productId,
+        stockType: location === 'show' ? 'show' : 'fridge',
+        quantityChange: qty,
+      })
+    }
+  }
+
+  const method = String(sale.payment_method || '').toUpperCase()
+  const amount = Number(sale.total_amount || 0)
+  if (method === 'DEBT' && amount > 0) {
+    const customer = parseDebtCustomer(sale.notes) || ''
+    if (customer) {
+      const useRemote = await debtsTableAvailable()
+      if (useRemote) {
+        const key = normalizeCustomerKey(customer)
+        const { data: debts } = await supabase
+          .from('customer_debts_backup')
+          .select('*')
+          .eq('business_id', businessId)
+        const debt = (debts || []).find(
+          (d: any) => normalizeCustomerKey(String(d.customer_name || '')) === key
+        )
+        if (debt) {
+          const charged = Math.max(0, Number(debt.total_charged || 0) - amount)
+          const balance = Math.max(0, Number(debt.balance || 0) - amount)
+          await supabase
+            .from('customer_debts_backup')
+            .update({
+              total_charged: charged,
+              balance,
+              status: balance <= 0.0001 ? 'PAID' : 'OPEN',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', debt.id)
+        }
+      }
+    }
+  }
+
+  const { error: updErr } = await supabase
+    .from('sales_backup')
+    .update({ payment_status: 'CANCELLED', synced_at: new Date().toISOString() })
+    .eq('id', saleId)
+  if (updErr) throw new Error(updErr.message)
+
+  return { ok: true, sale_id: saleId }
 }
 
 function localDayStartIso(dateStr: string) {
@@ -1105,7 +1180,9 @@ async function getSalesLog(
   const { data, error } = await query
   if (error) throw new Error(error.message)
 
-  const rows = (data || []).map((s: any) => {
+  const rows = (data || [])
+    .filter((s: any) => String(s.payment_status || '').toUpperCase() !== 'CANCELLED')
+    .map((s: any) => {
     const u = userMap.get(s.user_id)
     return {
       ...s,
@@ -2289,14 +2366,39 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
   const userIds = (users || []).map((u) => u.id)
   let saleIds: number[] = []
   let salesCount = 0
+  const saleLoc = new Map<number, string>()
+  const saleWhen = new Map<number, number>()
+  const endMs = end.getTime()
   if (userIds.length) {
-    const { data: sales } = await supabase
+    const nowIso = new Date().toISOString()
+    let { data: sales, error: salesErr } = await supabase
       .from('sales_backup')
-      .select('id, created_at, user_id')
+      .select('id, created_at, user_id, payment_status, location')
       .in('user_id', userIds)
       .gte('created_at', start.toISOString())
-      .lte('created_at', end.toISOString())
-    saleIds = (sales || []).map((s: any) => Number(s.id)).filter(Boolean)
+      .lte('created_at', nowIso)
+    if (salesErr && /location/i.test(salesErr.message)) {
+      const retry = await supabase
+        .from('sales_backup')
+        .select('id, created_at, user_id, payment_status')
+        .in('user_id', userIds)
+        .gte('created_at', start.toISOString())
+        .lte('created_at', nowIso)
+      sales = retry.data
+    }
+    const kept = (sales || []).filter(
+      (s: any) => String(s.payment_status || '').toUpperCase() !== 'CANCELLED'
+    )
+    for (const s of kept) {
+      const id = Number(s.id)
+      if (!id) continue
+      saleLoc.set(id, String(s.location || 'fridge').toLowerCase())
+      saleWhen.set(id, new Date(s.created_at).getTime())
+    }
+    saleIds = kept
+      .filter((s: any) => new Date(s.created_at).getTime() <= endMs)
+      .map((s: any) => Number(s.id))
+      .filter(Boolean)
     salesCount = saleIds.length
   }
 
@@ -2314,27 +2416,74 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
     map.set(name, cur)
   }
 
+  const fridgeSoldById = new Map<number, number>()
+  const fridgeSoldAfter = new Map<number, number>()
+  const showSoldById = new Map<number, number>()
   const soldById = new Map<number, number>()
-  if (saleIds.length) {
+  const allSaleIds = [...saleWhen.keys()]
+  if (allSaleIds.length) {
     const { data } = await supabase
       .from('sale_items_backup')
       .select('product_id, quantity, total_price, unit_price, sale_id')
-      .in('sale_id', saleIds)
+      .in('sale_id', allSaleIds)
     for (const row of data || []) {
+      const saleId = Number((row as any).sale_id)
+      const onReportDay = (saleWhen.get(saleId) || 0) <= endMs
       const p = productById.get(Number((row as any).product_id)) as any
       const name = p?.name || `Product ${(row as any).product_id}`
       const qty = Number((row as any).quantity || 0)
       const amount =
         Number((row as any).total_price || 0) || qty * Number((row as any).unit_price || 0)
       const unit = Number((row as any).unit_price || 0)
-      if (isStaffPricedLine(unit, Number(p?.price || 0), Number(p?.staff_price || 0))) {
-        bump(staffMap, name, qty, amount)
-      } else {
-        bump(normalMap, name, qty, amount)
-      }
       const pid = Number((row as any).product_id)
-      soldById.set(pid, (soldById.get(pid) || 0) + qty)
+      const loc = saleLoc.get(saleId) || 'fridge'
+      if (onReportDay) {
+        if (isStaffPricedLine(unit, Number(p?.price || 0), Number(p?.staff_price || 0))) {
+          bump(staffMap, name, qty, amount)
+        } else {
+          bump(normalMap, name, qty, amount)
+        }
+        soldById.set(pid, (soldById.get(pid) || 0) + qty)
+        if (loc === 'show') showSoldById.set(pid, (showSoldById.get(pid) || 0) + qty)
+        else if (loc !== 'sports') fridgeSoldById.set(pid, (fridgeSoldById.get(pid) || 0) + qty)
+      } else if (loc !== 'show' && loc !== 'sports') {
+        fridgeSoldAfter.set(pid, (fridgeSoldAfter.get(pid) || 0) + qty)
+      }
     }
+  }
+
+  const newOnDay = new Map<number, number>()
+  const newAfter = new Map<number, number>()
+  const storeOutAfter = new Map<number, number>()
+  try {
+    const { data: moves } = await supabase
+      .from('inventory_transactions_backup')
+      .select('product_id, transaction_type, quantity, reason, created_at')
+      .gte('created_at', start.toISOString())
+      .lte('created_at', new Date().toISOString())
+    for (const m of moves || []) {
+      const type = String((m as any).transaction_type || '').toUpperCase()
+      const reason = String((m as any).reason || '')
+      const qty = Number((m as any).quantity || 0)
+      const pid = Number((m as any).product_id)
+      const t = new Date((m as any).created_at).getTime()
+      if (!pid || !(qty > 0)) continue
+      const intoFridge =
+        type.includes('TO_FRIDGE') ||
+        (type === 'STOCK_FRIDGE' && !/void/i.test(reason))
+      const outOfStore =
+        type.includes('TRANSFER_STORE') ||
+        type.includes('TO_FRIDGE') ||
+        type.includes('TO_SHOW')
+      if (t <= endMs) {
+        if (intoFridge) newOnDay.set(pid, (newOnDay.get(pid) || 0) + qty)
+      } else {
+        if (intoFridge) newAfter.set(pid, (newAfter.get(pid) || 0) + qty)
+        if (outOfStore) storeOutAfter.set(pid, (storeOutAfter.get(pid) || 0) + qty)
+      }
+    }
+  } catch {
+    /* table may not exist on cloud */
   }
 
   const remainingOf = (p: any) =>
@@ -2343,12 +2492,36 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
     Number(p?.store_stock || 0) +
     Number(p?.sports_stock || 0)
 
-  const sold = [...soldById.entries()]
-    .map(([id, qty]) => {
+  const soldIds = new Set([...soldById.keys(), ...fridgeSoldById.keys()])
+  const sold = [...soldIds]
+    .map((id) => {
       const p = productById.get(id) as any
-      return { name: p?.name || `Product ${id}`, sold: qty, left: remainingOf(p), before: remainingOf(p) + qty }
+      const fridgeNow = Number(p?.fridge_stock || 0)
+      const fridgeSold = fridgeSoldById.get(id) || 0
+      const added = newOnDay.get(id) || 0
+      const fridgeLeft = Math.max(
+        0,
+        fridgeNow + (fridgeSoldAfter.get(id) || 0) - (newAfter.get(id) || 0)
+      )
+      const fridgeBefore = Math.max(0, fridgeLeft + fridgeSold - added)
+      const storeLeft = Math.max(
+        0,
+        Number(p?.store_stock || 0) + (storeOutAfter.get(id) || 0)
+      )
+      return {
+        name: p?.name || `Product ${id}`,
+        sold: fridgeSold,
+        fridge_sold: fridgeSold,
+        fridge_left: fridgeLeft,
+        fridge_before: fridgeBefore,
+        new_stock: added,
+        store: storeLeft,
+        show_sold: showSoldById.get(id) || 0,
+        left: remainingOf(p),
+        before: fridgeBefore,
+      }
     })
-    .sort((a, b) => b.sold - a.sold)
+    .sort((a, b) => b.fridge_sold - a.fridge_sold || a.name.localeCompare(b.name))
 
   const active = products.filter((p: any) => p.is_active !== false)
   const outOfStock = active
@@ -2681,7 +2854,7 @@ async function createProduct(request: Record<string, unknown>) {
     fridge_stock: Number(request.fridge_stock ?? request.fridgeStock ?? 0),
     show_stock: Number(request.show_stock ?? request.showStock ?? 0),
     store_stock: Number(request.store_stock ?? request.storeStock ?? 0),
-    sports_stock: Number(request.sports_stock ?? request.sportsStock ?? 0),
+    sports_stock: 0,
     duration_value:
       request.duration_value != null || request.durationValue != null
         ? Number(request.duration_value ?? request.durationValue)
@@ -2737,36 +2910,46 @@ async function updateProduct(request: Record<string, unknown>) {
   const rawCategory = String(request.category || 'BAR').toUpperCase()
   const category = rawCategory === 'SPORTS' ? 'SPORTS' : 'BAR'
 
+  const updatePrices = request.update_prices === true || request.updatePrices === true
+  const updateStock = request.update_stock === true || request.updateStock === true
+
   const payload: Record<string, unknown> = {
     name: String(request.name || ''),
     description: request.description ? String(request.description) : null,
     category,
     packaging: request.packaging ? String(request.packaging) : null,
-    price: Number(request.price || 0),
-    staff_price: Number(
-      request.staff_price ?? request.staffPrice ?? request.price ?? 0
-    ),
-    cost_price: Number(request.cost_price ?? request.costPrice ?? 0),
     min_stock_level: Number(request.min_stock_level ?? request.minStockLevel ?? 0),
-    fridge_stock: Number(request.fridge_stock ?? request.fridgeStock ?? 0),
-    show_stock: Number(request.show_stock ?? request.showStock ?? 0),
-    store_stock: Number(request.store_stock ?? request.storeStock ?? 0),
-    sports_stock: Number(request.sports_stock ?? request.sportsStock ?? 0),
-    duration_value:
-      request.duration_value != null || request.durationValue != null
-        ? Number(request.duration_value ?? request.durationValue)
-        : null,
-    duration_unit: request.duration_unit
-      ? String(request.duration_unit)
-      : request.durationUnit
-        ? String(request.durationUnit)
-        : null,
     image_path: request.image_path
       ? String(request.image_path)
       : request.imagePath
         ? String(request.imagePath)
         : null,
     synced_at: new Date().toISOString(),
+  }
+
+  if (updatePrices) {
+    payload.price = Number(request.price || 0)
+    payload.staff_price = Number(
+      request.staff_price ?? request.staffPrice ?? request.price ?? 0
+    )
+    payload.cost_price = Number(request.cost_price ?? request.costPrice ?? 0)
+    payload.duration_value =
+      request.duration_value != null || request.durationValue != null
+        ? Number(request.duration_value ?? request.durationValue)
+        : null
+    payload.duration_unit = request.duration_unit
+      ? String(request.duration_unit)
+      : request.durationUnit
+        ? String(request.durationUnit)
+        : null
+  }
+
+  if (updateStock) {
+    payload.fridge_stock = Number(request.fridge_stock ?? request.fridgeStock ?? 0)
+    payload.show_stock = Number(request.show_stock ?? request.showStock ?? 0)
+    payload.store_stock = Number(request.store_stock ?? request.storeStock ?? 0)
+    payload.stock_quantity =
+      Number(payload.fridge_stock) + Number(payload.show_stock) + Number(payload.store_stock)
   }
 
   const { error } = await supabase
@@ -3047,11 +3230,19 @@ export async function invoke<T = unknown>(
 ): Promise<T> {
   const command = String(cmd || '').trim()
 
-  if (command === 'get_sales_email_preview' && isSupabaseConfigured) {
+  if (command === 'get_sales_email_preview') {
     const businessId = argNumber(args, 'businessId', 'business_id')
     if (!businessId) throw new Error('businessId is required')
     const reportDate = String((args as any)?.reportDate || (args as any)?.report_date || '')
-    return (await getSalesEmailPreview(businessId, reportDate || undefined)) as T
+    if (isTauriApp()) {
+      return (await invokeTauri('get_sales_email_preview', {
+        businessId,
+        reportDate: reportDate || null,
+      })) as T
+    }
+    if (isSupabaseConfigured) {
+      return (await getSalesEmailPreview(businessId, reportDate || undefined)) as T
+    }
   }
 
   if (isTauriApp()) {
@@ -3069,7 +3260,8 @@ export async function invoke<T = unknown>(
         command === 'mark_debt_paid' ||
         command === 'mark_sale_as_completed' ||
         command === 'update_sale_details' ||
-        command === 'update_sale_date'
+        command === 'update_sale_date' ||
+        command === 'void_sale'
       ) {
         void syncToCloudDesktop().catch(() => {
           /* offline — local data kept */
@@ -3245,6 +3437,14 @@ export async function invoke<T = unknown>(
         if (!saleId) throw new Error('saleId is required')
         const businessId = argNumber(args, 'businessId', 'business_id')
         return (await getSaleReceipt(saleId, businessId)) as T
+      }
+      case 'void_sale': {
+        const saleId = argNumber(args, 'saleId', 'sale_id')
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        const actorUserId = argNumber(args, 'actorUserId', 'actor_user_id')
+        if (!saleId) throw new Error('saleId is required')
+        if (!businessId) throw new Error('businessId is required')
+        return (await voidSale(saleId, businessId, actorUserId || 0)) as T
       }
       case 'update_sale_date':
       case 'update_sale_details': {

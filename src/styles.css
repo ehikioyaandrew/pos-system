@@ -60,3 +60,15 @@ body {
 .pos-sidebar-button {
   @apply w-full text-left py-2 px-4 rounded hover:bg-gray-700 transition-colors duration-200;
 }
+
+/* Keep sidebar scrollable without a visible scrollbar */
+.sidebar-nav-scroll {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.sidebar-nav-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}

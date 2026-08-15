@@ -33,8 +33,19 @@ Do **not** put the key in code. Dashboard → API Keys → copy `re_...` into Gi
 
 Until a domain is verified, Resend only delivers to **your Resend login email**. The sender detects that and sends all reports there so the test still works.
 
-To mail staff for real: [verify a domain](https://resend.com/domains), then set `RESEND_FROM` to `POS Reports <reports@yourdomain.com>`.
+## Mail staff for real (do this once)
+
+1. In Resend: **Domains** → **Add domain** (the shop’s real domain, e.g. `yourbar.com`).
+2. Add the DNS records Resend shows (SPF / DKIM). Wait until status is **Verified**.
+3. GitHub → repo **Settings → Secrets → Actions**:
+   - Keep `RESEND_API_KEY`
+   - Set `RESEND_FROM` to `POS Reports <reports@yourbar.com>` (must match the verified domain)
+   - Remove or leave empty `RESEND_TEST_TO` so mail goes to staff, not only the test inbox
+4. Actions → **Scheduled sales emails** → **Run workflow** → `daily`
+5. Confirm owner + staff inboxes received it (check spam once)
+
+Until step 2–3 are done, only the Resend account email will receive mail. Code already supports production sending; this is DNS + the `RESEND_FROM` secret.
 
 ## Preview
 
-In the web app: **Reports** → **Email preview** (same layout as the email).
+In the web app: **Email Preview** in the sidebar (same layout as the 9am emails).

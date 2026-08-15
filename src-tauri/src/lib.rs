@@ -326,6 +326,7 @@ pub fn run() {
             get_business_by_id,
             change_password,
             create_product,
+            update_product,
             get_all_products,
             get_products_for_business,
             get_low_stock_products,
@@ -387,6 +388,8 @@ pub fn run() {
             get_inventory_summary,
             get_sales_log,
             get_sale_receipt,
+            void_sale,
+            get_sales_email_preview,
             get_debtors,
             get_debt_sales,
             add_manual_debt,
@@ -642,17 +645,6 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
     let cost_price: f64 = request["cost_price"].as_f64()
         .or_else(|| request["costPrice"].as_f64())
         .unwrap_or(0.0);
-    // Handle both stock_quantity and stockQuantity, default to 0 if not provided
-    let stock_quantity: i32 = request["stock_quantity"].as_i64()
-        .or_else(|| request["stockQuantity"].as_i64())
-        .map(|v| v as i32)
-        .unwrap_or(0);
-    // Handle both min_stock_level and minStockLevel, default to 0 if not provided
-    let min_stock_level: i32 = request["min_stock_level"].as_i64()
-        .or_else(|| request["minStockLevel"].as_i64())
-        .map(|v| v as i32)
-        .unwrap_or(0);
-    // Handle new stock fields
     let fridge_stock: i32 = request["fridge_stock"].as_i64()
         .or_else(|| request["fridgeStock"].as_i64())
         .map(|v| v as i32)
@@ -663,6 +655,11 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
         .unwrap_or(0);
     let store_stock: i32 = request["store_stock"].as_i64()
         .or_else(|| request["storeStock"].as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(0);
+    let stock_quantity: i32 = fridge_stock + show_stock + store_stock;
+    let min_stock_level: i32 = request["min_stock_level"].as_i64()
+        .or_else(|| request["minStockLevel"].as_i64())
         .map(|v| v as i32)
         .unwrap_or(0);
     let barcode: Option<String> = request["barcode"].as_str().map(|s| s.to_string());
@@ -704,6 +701,61 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
 
     db.create_product(&product)
         .map_err(|e| format!("Failed to create product: {}", e))
+}
+
+#[tauri::command]
+async fn update_product(state: State<'_, AppState>, request: serde_json::Value) -> Result<i64, String> {
+    let db = state.db.lock().unwrap();
+    let id: i64 = request["id"].as_i64().ok_or("Invalid product id")?;
+    let business_id: i64 = request["business_id"]
+        .as_i64()
+        .or_else(|| request["businessId"].as_i64())
+        .ok_or("Invalid business_id")?;
+    let name = request["name"].as_str().unwrap_or("").to_string();
+    let description = request["description"].as_str().map(|s| s.to_string());
+    let category = request["category"].as_str().unwrap_or("BAR").to_string();
+    let packaging = request["packaging"].as_str().map(|s| s.to_string());
+    let image_path = request["image_path"]
+        .as_str()
+        .or_else(|| request["imagePath"].as_str())
+        .map(|s| s.to_string());
+    let min_stock_level: i32 = request["min_stock_level"]
+        .as_i64()
+        .or_else(|| request["minStockLevel"].as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(0);
+    let update_prices = request["update_prices"].as_bool().unwrap_or(false)
+        || request["updatePrices"].as_bool().unwrap_or(false);
+    let update_stock = request["update_stock"].as_bool().unwrap_or(false)
+        || request["updateStock"].as_bool().unwrap_or(false);
+
+    let price = request["price"].as_f64();
+    let staff_price = request["staff_price"].as_f64().or_else(|| request["staffPrice"].as_f64());
+    let cost_price = request["cost_price"].as_f64().or_else(|| request["costPrice"].as_f64());
+    let fridge_stock = request["fridge_stock"].as_i64().or_else(|| request["fridgeStock"].as_i64()).map(|v| v as i32);
+    let show_stock = request["show_stock"].as_i64().or_else(|| request["showStock"].as_i64()).map(|v| v as i32);
+    let store_stock = request["store_stock"].as_i64().or_else(|| request["storeStock"].as_i64()).map(|v| v as i32);
+
+    db.update_product(
+        id,
+        business_id,
+        &name,
+        description.as_deref(),
+        &category,
+        packaging.as_deref(),
+        image_path.as_deref(),
+        min_stock_level,
+        update_prices,
+        price,
+        staff_price,
+        cost_price,
+        update_stock,
+        fridge_stock,
+        show_stock,
+        store_stock,
+    )
+    .map_err(|e| format!("Failed to update product: {}", e))?;
+    Ok(id)
 }
 
 #[tauri::command]
@@ -901,6 +953,7 @@ async fn process_sale(
             payment_status,
             Some(&notes),
             &created_at,
+            Some(&location),
         )
         .map_err(|e| format!("Failed to create sale: {}", e))?;
 
@@ -1342,9 +1395,15 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         ).unwrap_or(0) > 0;
 
         if exists {
+            // Keep till stock — cloud catalog (name/price) can update, but
+            // unsynced fridge/show/store counts must not be overwritten on pull.
+            let _ = stock_quantity;
+            let _ = fridge_stock;
+            let _ = show_stock;
+            let _ = store_stock;
             db.conn.execute(
-                "UPDATE products SET business_id = ?1, name = ?2, description = ?3, category = ?4, price = ?5, staff_price = ?6, cost_price = ?7, stock_quantity = ?8, min_stock_level = ?9, fridge_stock = ?10, show_stock = ?11, store_stock = ?12, barcode = ?13, serial_number = ?14, image_path = ?15, packaging = ?16, is_active = ?17, created_at = ?18 WHERE id = ?19",
-                [&business_id.to_string(), name, description.unwrap_or(""), category, &price.to_string(), &staff_price.to_string(), &cost_price.to_string(), &stock_quantity.to_string(), &min_stock_level.to_string(), &fridge_stock.to_string(), &show_stock.to_string(), &store_stock.to_string(), barcode.unwrap_or(""), serial_number.unwrap_or(""), image_path.unwrap_or(""), packaging, &(is_active as i64).to_string(), created_at, &id.to_string()]
+                "UPDATE products SET business_id = ?1, name = ?2, description = ?3, category = ?4, price = ?5, staff_price = ?6, cost_price = ?7, min_stock_level = ?8, barcode = ?9, serial_number = ?10, image_path = ?11, packaging = ?12, is_active = ?13, created_at = ?14 WHERE id = ?15",
+                [&business_id.to_string(), name, description.unwrap_or(""), category, &price.to_string(), &staff_price.to_string(), &cost_price.to_string(), &min_stock_level.to_string(), barcode.unwrap_or(""), serial_number.unwrap_or(""), image_path.unwrap_or(""), packaging, &(is_active as i64).to_string(), created_at, &id.to_string()]
             ).ok();
         } else {
             db.conn.execute(
@@ -1378,22 +1437,30 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         let notes = sale.get("notes").and_then(|v| v.as_str());
         let created_at = sale.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
 
-        let exists = db.conn.query_row(
-            "SELECT COUNT(*) FROM sales WHERE id = ?1",
+        let exists_status: Option<String> = db.conn.query_row(
+            "SELECT payment_status FROM sales WHERE id = ?1",
             [id],
-            |row: &rusqlite::Row| row.get::<_, i64>(0)
-        ).unwrap_or(0) > 0;
+            |row: &rusqlite::Row| row.get::<_, String>(0)
+        ).ok();
+        let exists = exists_status.is_some();
+        let local_cancelled = exists_status
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("CANCELLED"))
+            .unwrap_or(false);
 
         let bid = business_id.map(|v| v.to_string()).unwrap_or_default();
+        let location = sale.get("location").and_then(|v| v.as_str()).unwrap_or("fridge");
         if exists {
-            db.conn.execute(
-                "UPDATE sales SET user_id = ?1, business_id = ?2, total_amount = ?3, payment_method = ?4, payment_status = ?5, notes = ?6, created_at = ?7 WHERE id = ?8",
-                [&user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, &id.to_string()]
-            ).ok();
+            if !local_cancelled {
+                db.conn.execute(
+                    "UPDATE sales SET user_id = ?1, business_id = ?2, total_amount = ?3, payment_method = ?4, payment_status = ?5, notes = ?6, created_at = ?7, location = ?8 WHERE id = ?9",
+                    [&user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, location, &id.to_string()]
+                ).ok();
+            }
         } else {
             db.conn.execute(
-                "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                [&id.to_string(), &user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at]
+                "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at, location) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                [&id.to_string(), &user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, location]
             ).ok();
         }
         sales_count += 1;
@@ -2603,6 +2670,44 @@ async fn get_sale_receipt(
     let db = state.db.lock().unwrap();
     db.get_sale_receipt(sale_id, business_id)
         .map_err(|e| format!("Failed to get sale receipt: {}", e))
+}
+
+#[tauri::command]
+async fn void_sale(
+    state: State<'_, AppState>,
+    sale_id: i64,
+    business_id: i64,
+    actor_user_id: i64,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().unwrap();
+    let result = db
+        .void_sale(sale_id, business_id, actor_user_id)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("no rows") || msg.contains("QueryReturnedNoRows") {
+                "Sale not found".into()
+            } else {
+                format!("Failed to void sale: {}", e)
+            }
+        })?;
+    if result.get("error").and_then(|v| v.as_str()) == Some("already_voided") {
+        return Err("Sale already voided".into());
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn get_sales_email_preview(
+    state: State<'_, AppState>,
+    business_id: i64,
+    report_date: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let date = report_date
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let db = state.db.lock().unwrap();
+    db.get_sales_email_preview(business_id, &date)
+        .map_err(|e| format!("Failed to load shift report: {}", e))
 }
 
 #[tauri::command]
