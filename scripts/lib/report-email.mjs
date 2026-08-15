@@ -187,6 +187,51 @@ export function buildStockAlertHtml(p) {
   const color = brandColor(p.primaryColor)
   const out = p.outOfStock || []
   const low = p.lowStock || []
+
+  function compactPairList(title, names) {
+    if (!names.length) {
+      return `<p class="section-label" style="margin:22px 0 8px;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#6f7c76;">${escapeHtml(title)}</p><p class="muted" style="margin:0;font-size:13px;">None</p>`
+    }
+    const pairs = []
+    for (let i = 0; i < names.length; i += 2) pairs.push(names.slice(i, i + 2))
+    const rows = pairs
+      .map((pair) => {
+        const a = `<td class="cell-name" width="50%" style="padding:6px 10px 6px 0;font-size:13px;line-height:1.3;border-bottom:1px solid #eee8df;vertical-align:top;">${escapeHtml(pair[0])}</td>`
+        const b =
+          pair[1] != null
+            ? `<td class="cell-name" width="50%" style="padding:6px 0 6px 10px;font-size:13px;line-height:1.3;border-bottom:1px solid #eee8df;vertical-align:top;">${escapeHtml(pair[1])}</td>`
+            : `<td width="50%" style="padding:6px 0;border-bottom:1px solid #eee8df;"></td>`
+        return `<tr>${a}${b}</tr>`
+      })
+      .join('')
+    return `<p class="section-label" style="margin:22px 0 8px;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#6f7c76;">${escapeHtml(title)} · ${names.length}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">${rows}</table>`
+  }
+
+  function compactQtyTable(title, rows) {
+    const body =
+      rows.length === 0
+        ? `<tr><td class="muted" colspan="3" style="padding:8px 0;font-size:13px;">None</td></tr>`
+        : rows
+            .map(
+              (r) => `<tr>
+              <td class="cell-name" style="padding:5px 8px 5px 0;font-size:13px;line-height:1.3;border-bottom:1px solid #eee8df;">${escapeHtml(r.name)}</td>
+              <td style="padding:5px 8px;font-size:13px;text-align:right;white-space:nowrap;border-bottom:1px solid #eee8df;">${r.left}</td>
+              <td style="padding:5px 0 5px 8px;font-size:13px;text-align:right;white-space:nowrap;border-bottom:1px solid #eee8df;">${r.min}</td>
+            </tr>`
+            )
+            .join('')
+    return `<p class="section-label" style="margin:22px 0 8px;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#6f7c76;">${escapeHtml(title)} · ${rows.length}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+      <thead><tr>
+        <th align="left" style="padding:0 8px 6px 0;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;">Product</th>
+        <th align="right" style="padding:0 8px 6px;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;">Left</th>
+        <th align="right" style="padding:0 0 6px 8px;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#8a938e;">Min</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>`
+  }
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -205,31 +250,27 @@ export function buildStockAlertHtml(p) {
   </style>
 </head>
 <body class="page" style="margin:0;padding:0;background:#efece6;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-  <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
+  <div style="max-width:560px;margin:0 auto;padding:24px 16px;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="card" style="background:#fffcf8;border:1px solid #e4ddd3;border-radius:4px;">
       <tr>
-        <td style="background:${color};padding:28px 28px 24px;">
+        <td style="background:${color};padding:20px 22px;">
           <p style="margin:0;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#ffffff;opacity:0.7;">Stock alert</p>
-          <h1 style="margin:10px 0 0;font-size:26px;line-height:1.25;font-weight:600;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">${escapeHtml(p.businessName)}</h1>
-          ${p.businessAddress ? `<p style="margin:10px 0 0;font-size:13px;line-height:1.5;color:#ffffff;opacity:0.78;">${escapeHtml(p.businessAddress)}</p>` : ''}
+          <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;font-weight:600;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">${escapeHtml(p.businessName)}</h1>
         </td>
       </tr>
       <tr>
-        <td style="padding:28px 28px 32px;">
-          <p class="section-label" style="margin:0;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#6f7c76;">Out of stock today</p>
-          <p class="ink" style="margin:8px 0 0;font-size:20px;color:#1c1917;">${escapeHtml(p.periodLabel)}</p>
-          <p class="muted" style="margin:12px 0 0;font-size:14px;color:#5c6662;">${out.length} product${out.length === 1 ? '' : 's'} with zero fridge + show + store.</p>
-          ${simpleTable(
+        <td style="padding:20px 22px 24px;">
+          <p class="section-label" style="margin:0;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:#6f7c76;">Out of stock · ${escapeHtml(p.periodLabel)}</p>
+          <p class="muted" style="margin:6px 0 0;font-size:13px;color:#5c6662;">Zero in fridge, show and store.</p>
+          ${compactPairList(
             'Out of stock',
-            ['Product'],
-            out.map((r) => [escapeHtml(r.name)])
+            out.map((r) => r.name)
           )}
-          ${simpleTable(
-            'Low stock (still some left)',
-            ['Product', 'Left', 'Min'],
-            low.map((r) => [escapeHtml(r.name), String(r.left ?? 0), String(r.min ?? 0)])
+          ${compactQtyTable(
+            'Low stock',
+            low.map((r) => ({ name: r.name, left: Number(r.left ?? 0), min: Number(r.min ?? 0) }))
           )}
-          <p class="muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Restock these before the next shift. Automated POS alert.</p>
+          <p class="muted" style="margin:20px 0 0;font-size:12px;line-height:1.45;color:#8a938e;">Restock before the next shift.</p>
         </td>
       </tr>
     </table>

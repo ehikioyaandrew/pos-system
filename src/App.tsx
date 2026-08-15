@@ -7242,7 +7242,7 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
               title="Stock alert email preview"
               srcDoc={stockHtml}
               className="w-full bg-[#f4f6f5]"
-              style={{ minHeight: 560, border: 0 }}
+              style={{ minHeight: 420, border: 0 }}
             />
           </div>
         ) : null}
