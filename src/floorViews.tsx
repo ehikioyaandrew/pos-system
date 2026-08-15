@@ -47,6 +47,32 @@ function money(n: number) {
   })}`
 }
 
+function auditDetail(row: any): string {
+  const raw = row?.after_json || row?.after
+  if (!raw) return ''
+  try {
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (!obj || typeof obj !== 'object') return ''
+    if (obj.from && obj.to) {
+      return `${obj.quantity ?? ''} ${obj.product || ''} · ${obj.from} → ${obj.to}`.trim()
+    }
+    if (obj.location && obj.quantity_change != null) {
+      const n = Number(obj.quantity_change)
+      return `${n >= 0 ? '+' : ''}${n} on ${obj.location}${obj.product ? ` · ${obj.product}` : ''}`
+    }
+    const bits = [
+      obj.product && `Item: ${obj.product}`,
+      obj.name && `Name: ${obj.name}`,
+      obj.price != null && `Price: ${obj.price}`,
+      obj.role && `Role: ${obj.role}`,
+      obj.username && `User: ${obj.username}`,
+    ].filter(Boolean)
+    return bits.join(' · ')
+  } catch {
+    return ''
+  }
+}
+
 function formatWhen(value?: string | null) {
   if (!value) return '—'
   const d = new Date(value)
@@ -3025,7 +3051,7 @@ export function AuditLogDashboard({
       setLoading(true)
       const data = (await invoke('get_activity_logs', {
         businessId,
-        limit: 150,
+        limit: 250,
       })) as any[]
       setRows(Array.isArray(data) ? data : [])
     } catch (error) {
@@ -3068,7 +3094,7 @@ export function AuditLogDashboard({
               Audit log
             </h1>
             <p className="mt-2 text-[#2a3d36]/70">
-              Sale edits, debt payments, and other admin actions for this business.
+              Sale edits stay on the sales log. This list shows stock moves, product edits, staff changes, and logins.
             </p>
           </div>
           <button
@@ -3092,7 +3118,7 @@ export function AuditLogDashboard({
           <div className="rounded-xl border border-dashed border-[#d4dcd8] bg-white px-6 py-16 text-center">
             <p className="font-display text-xl font-bold text-[#121c19]">No activity yet</p>
             <p className="mt-2 text-sm text-[#2a3d36]/55">
-              Edit a sale or record a debt payment to see entries here.
+              Edit a product, move stock, or add staff to see entries here.
             </p>
           </div>
         ) : (
@@ -3106,10 +3132,14 @@ export function AuditLogDashboard({
                         {row.summary || row.action}
                       </p>
                       <p className="text-sm text-[#2a3d36]/55 mt-1">
-                        {row.actor_name || 'System'}
+                        By {row.actor_name || 'System'}
                         {row.entity_type ? ` · ${row.entity_type}` : ''}
-                        {row.entity_id ? ` #${row.entity_id}` : ''}
                       </p>
+                      {auditDetail(row) ? (
+                        <p className="text-sm text-[#121c19]/80 mt-2 whitespace-pre-wrap">
+                          {auditDetail(row)}
+                        </p>
+                      ) : null}
                       <p className="text-[11px] font-semibold uppercase tracking-wide text-[#c4783a] mt-2">
                         {String(row.action || '').replace(/_/g, ' ')}
                       </p>

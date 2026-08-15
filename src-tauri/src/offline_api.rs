@@ -120,12 +120,114 @@ impl Database {
         )?;
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS stock_daily_snapshots (
+                business_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                report_date TEXT NOT NULL,
+                fridge_stock INTEGER NOT NULL DEFAULT 0,
+                show_stock INTEGER NOT NULL DEFAULT 0,
+                store_stock INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (business_id, product_id, report_date)
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS sync_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )",
             [],
         )?;
+
+        let already: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_meta WHERE key = 'audit_backfill_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if already == 0 {
+            let _ = self.backfill_historic_audit();
+            let _ = self.conn.execute(
+                "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('audit_backfill_v1', '1')",
+                [],
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Copy old inventory_transactions / product creates into activity_logs (once).
+    pub fn backfill_historic_audit(&self) -> Result<()> {
+        let _ = self.conn.execute(
+            "INSERT INTO activity_logs
+             (id, business_id, actor_user_id, action, entity_type, entity_id, summary, before_json, after_json, created_at, synced_at)
+             SELECT
+               500000000000000000 + it.id,
+               p.business_id,
+               it.user_id,
+               CASE WHEN upper(it.transaction_type) LIKE 'TRANSFER%' THEN 'STOCK_MOVE' ELSE 'STOCK_ADJUST' END,
+               'inventory',
+               CAST(it.product_id AS TEXT),
+               CASE
+                 WHEN upper(it.transaction_type) LIKE 'TRANSFER%' THEN
+                   COALESCE(NULLIF(u.name, ''), u.username, 'Someone')
+                   || ' moved ' || it.quantity || ' ' || p.name
+                   || ' (' || replace(replace(it.transaction_type, 'TRANSFER_', ''), '_', ' → ') || ')'
+                 ELSE
+                   COALESCE(NULLIF(u.name, ''), u.username, 'Someone')
+                   || ' adjusted ' || abs(it.quantity) || ' ' || p.name
+                   || ' (' || lower(replace(it.transaction_type, 'STOCK_', '')) || ')'
+               END,
+               '',
+               json_object(
+                 'product', p.name,
+                 'type', it.transaction_type,
+                 'quantity', it.quantity,
+                 'reason', COALESCE(it.reason, ''),
+                 'historic', 1
+               ),
+               it.created_at,
+               NULL
+             FROM inventory_transactions it
+             JOIN products p ON p.id = it.product_id
+             LEFT JOIN users u ON u.id = it.user_id
+             WHERE p.business_id IS NOT NULL
+               AND lower(COALESCE(it.reason, '')) NOT LIKE '%sale%'
+               AND lower(COALESCE(it.reason, '')) NOT LIKE '%void%'
+               AND upper(COALESCE(it.transaction_type, '')) NOT LIKE '%SALE%'
+               AND NOT EXISTS (
+                 SELECT 1 FROM activity_logs a WHERE a.id = 500000000000000000 + it.id
+               )",
+            [],
+        );
+
+        let _ = self.conn.execute(
+            "INSERT INTO activity_logs
+             (id, business_id, actor_user_id, action, entity_type, entity_id, summary, before_json, after_json, created_at, synced_at)
+             SELECT
+               520000000000000000 + p.id,
+               p.business_id,
+               NULL,
+               'PRODUCT_CREATED',
+               'product',
+               CAST(p.id AS TEXT),
+               'Created product ' || p.name || ' (historic — who created it was not stored)',
+               '',
+               json_object('name', p.name, 'historic', 1),
+               COALESCE(p.created_at, datetime('now')),
+               NULL
+             FROM products p
+             WHERE p.business_id IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM activity_logs a
+                 WHERE a.entity_type = 'product' AND a.entity_id = CAST(p.id AS TEXT)
+                   AND a.action = 'PRODUCT_CREATED'
+               )",
+            [],
+        );
 
         Ok(())
     }
@@ -509,6 +611,8 @@ impl Database {
             std::collections::HashMap::new();
         let mut store_out_after: std::collections::HashMap<i64, i32> =
             std::collections::HashMap::new();
+        let mut fridge_adjust_after: std::collections::HashMap<i64, i32> =
+            std::collections::HashMap::new();
         if let Ok(mut mstmt) = self.conn.prepare(
             "SELECT it.product_id, it.transaction_type, it.quantity, COALESCE(it.reason, ''), it.created_at
              FROM inventory_transactions it
@@ -526,26 +630,41 @@ impl Database {
             }) {
                 for mr in mrows.flatten() {
                     let (pid, typ, qty, reason, created) = mr;
-                    if qty <= 0 {
+                    let t = typ.to_uppercase();
+                    let reason_l = reason.to_lowercase();
+                    if reason_l.contains("sale") || reason_l.contains("void") || t.contains("SALE") {
                         continue;
                     }
-                    let t = typ.to_uppercase();
                     let on_day = created.starts_with(report_date);
-                    let into = t.contains("TO_FRIDGE")
-                        || (t == "STOCK_FRIDGE" && !reason.to_lowercase().contains("void"));
-                    let out_store = t.contains("TRANSFER_STORE")
-                        || t.contains("TO_FRIDGE")
-                        || t.contains("TO_SHOW");
-                    if on_day {
-                        if into {
-                            *new_fridge.entry(pid).or_insert(0) += qty;
+                    if t.contains("TRANSFER") {
+                        if qty <= 0 {
+                            continue;
                         }
-                    } else {
-                        if into {
-                            *new_fridge_after.entry(pid).or_insert(0) += qty;
+                        let into = t.contains("TO_FRIDGE");
+                        let out_store = t.contains("TRANSFER_STORE")
+                            || t.contains("TO_FRIDGE")
+                            || t.contains("TO_SHOW");
+                        if on_day {
+                            if into {
+                                *new_fridge.entry(pid).or_insert(0) += qty;
+                            }
+                        } else {
+                            if into {
+                                *new_fridge_after.entry(pid).or_insert(0) += qty;
+                            }
+                            if out_store {
+                                *store_out_after.entry(pid).or_insert(0) += qty;
+                            }
                         }
-                        if out_store {
-                            *store_out_after.entry(pid).or_insert(0) += qty;
+                        continue;
+                    }
+                    if t == "STOCK_FRIDGE" || t.ends_with("_FRIDGE") {
+                        if on_day {
+                            if qty > 0 {
+                                *new_fridge.entry(pid).or_insert(0) += qty;
+                            }
+                        } else {
+                            *fridge_adjust_after.entry(pid).or_insert(0) += qty;
                         }
                     }
                 }
@@ -658,7 +777,8 @@ impl Database {
                 let ssold = *show_sold.get(&id).unwrap_or(&0);
                 let added = *new_fridge.get(&id).unwrap_or(&0);
                 let fridge_left = (fridge + *fridge_sold_after.get(&id).unwrap_or(&0)
-                    - *new_fridge_after.get(&id).unwrap_or(&0))
+                    - *new_fridge_after.get(&id).unwrap_or(&0)
+                    - *fridge_adjust_after.get(&id).unwrap_or(&0))
                 .max(0);
                 let fridge_before = (fridge_left + fsold - added).max(0);
                 let store_left = (store + *store_out_after.get(&id).unwrap_or(&0)).max(0);
@@ -986,6 +1106,11 @@ impl Database {
             let hidden = v.get("actor_hidden").and_then(|x| x.as_i64()).unwrap_or(0) != 0;
             let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
             let after = v.get("after_json").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
+            let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+            let entity = v.get("entity_type").and_then(|x| x.as_str()).unwrap_or("");
+            if action.to_uppercase().starts_with("SALE") || entity.eq_ignore_ascii_case("sale") {
+                continue;
+            }
             if hidden || summary.contains("admin2") || after.contains("\"username\":\"admin2\"") {
                 continue;
             }
@@ -1027,6 +1152,10 @@ impl Database {
         before_json: Option<&str>,
         after_json: Option<&str>,
     ) -> Result<()> {
+        // Sales stay on the sales log — do not write SALE* to audit
+        if action.to_uppercase().starts_with("SALE") {
+            return Ok(());
+        }
         // Skip audit for ghost/support users
         if let Some(uid) = actor_user_id {
             let hidden: i64 = self

@@ -3505,6 +3505,7 @@ function BusinessDashboard({
 
       await invoke('create_user', {
         request: {
+          actor_user_id: currentUser?.id || null,
           username: staffData.username,
           password_hash: passwordHash,
           role: staffData.role,
@@ -3786,6 +3787,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
       await invoke('create_product', {
         request: {
           business_id: id,
+          actor_user_id: currentUser?.id || null,
           name: productData.name,
           description: productData.description || '',
           category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
@@ -3827,6 +3829,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         request: {
           id: productData.id,
           business_id: id,
+          actor_user_id: currentUser?.id || null,
           name: productData.name,
           description: productData.description || '',
           category: productData.category === 'SPORTS' ? 'SPORTS' : 'BAR',
@@ -5711,6 +5714,7 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
 
       await invoke('create_user', {
         request: {
+          actor_user_id: currentUser?.id || null,
           username: staffData.username,
           password_hash: passwordHash,
           role: staffData.role,
@@ -5748,6 +5752,8 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
       const result = (await invoke('reset_staff_password', {
         request: {
           user_id: user.id,
+          business_id: businessId,
+          actor_user_id: currentUser?.id || null,
           temporary_password: tempPassword,
         },
       })) as any
@@ -5781,6 +5787,8 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
         request: {
           user_id: user.id,
           is_active: !currentlyActive,
+          business_id: businessId,
+          actor_user_id: currentUser?.id || null,
         },
       })
       toast.success(
@@ -5818,7 +5826,11 @@ function BusinessStaff({ currentUser, businessInfo }: { currentUser?: any, busin
     try {
       setActionId(Number(user.id))
       await invoke('delete_staff_user', {
-        request: { user_id: user.id },
+        request: {
+          user_id: user.id,
+          business_id: businessId,
+          actor_user_id: currentUser?.id || null,
+        },
       })
       toast.success(`${user.name || user.username} deleted`)
       await loadStaff()

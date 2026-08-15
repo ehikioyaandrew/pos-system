@@ -552,6 +552,9 @@ async function writeActivityLog(opts: {
   before?: unknown
   after?: unknown
 }) {
+  if (String(opts.action || '').toUpperCase().startsWith('SALE')) {
+    return null
+  }
   const now = new Date().toISOString()
   const row = {
     id: Date.now() + Math.floor(Math.random() * 1000),
@@ -628,6 +631,9 @@ async function getActivityLogs(businessId: number, limit = 100) {
     .filter((r) => {
       const actorId = Number(r.actor_user_id)
       if (actorId && ghostIds.has(actorId)) return false
+      const action = String(r.action || '').toUpperCase()
+      const entity = String(r.entity_type || '').toLowerCase()
+      if (action.startsWith('SALE') || entity === 'sale') return false
       const summary = String(r.summary || '').toLowerCase()
       const after = String(r.after_json || '').toLowerCase()
       if (summary.includes('admin2') || after.includes('"username":"admin2"')) return false
@@ -1067,7 +1073,7 @@ async function processSale(request: Record<string, unknown>) {
   }
 }
 
-async function voidSale(saleId: number, businessId: number, actorUserId: number) {
+async function voidSale(saleId: number, businessId: number) {
   const { data: sale, error } = await supabase
     .from('sales_backup')
     .select('*')
@@ -1991,6 +1997,19 @@ async function resetStaffPassword(request: Record<string, unknown>) {
     .select('id, username, name, role')
     .single()
   if (error) throw new Error(error.message)
+  try {
+    await writeActivityLog({
+      businessId: argNumber(request, 'business_id', 'businessId') || 0,
+      actorUserId: argNumber(request, 'actor_user_id', 'actorUserId'),
+      action: 'STAFF_PASSWORD_RESET',
+      entityType: 'user',
+      entityId: userId,
+      summary: `Reset password for ${data?.name || data?.username || userId}`,
+      after: { username: data?.username, role: data?.role },
+    })
+  } catch {
+    /* ignore */
+  }
   return { ...data, temporary_password: temporaryPassword }
 }
 
@@ -2022,6 +2041,19 @@ async function setStaffActive(request: Record<string, unknown>) {
     .select('id, username, name, role, is_active')
     .single()
   if (error) throw new Error(error.message)
+  try {
+    await writeActivityLog({
+      businessId: argNumber(request, 'business_id', 'businessId') || 0,
+      actorUserId: argNumber(request, 'actor_user_id', 'actorUserId'),
+      action: isActive ? 'STAFF_ACTIVATED' : 'STAFF_DEACTIVATED',
+      entityType: 'user',
+      entityId: userId,
+      summary: `${isActive ? 'Activated' : 'Deactivated'} ${data?.name || data?.username || userId}`,
+      after: { username: data?.username, is_active: isActive },
+    })
+  } catch {
+    /* ignore */
+  }
   return data
 }
 
@@ -2045,6 +2077,19 @@ async function deleteStaffUser(request: Record<string, unknown>) {
 
   const { error } = await supabase.from('users_backup').delete().eq('id', userId)
   if (error) throw new Error(error.message)
+  try {
+    await writeActivityLog({
+      businessId: argNumber(request, 'business_id', 'businessId') || 0,
+      actorUserId: argNumber(request, 'actor_user_id', 'actorUserId'),
+      action: 'STAFF_DELETED',
+      entityType: 'user',
+      entityId: userId,
+      summary: `Removed staff ${existing.username}`,
+      after: { username: existing.username, role: existing.role },
+    })
+  } catch {
+    /* ignore */
+  }
   return { id: userId, deleted: true, username: existing.username }
 }
 
@@ -2114,7 +2159,21 @@ async function createUser(request: Record<string, unknown>) {
 
   const { data, error } = await supabase.from('users_backup').insert(payload).select('id').single()
   if (error) throw new Error(error.message)
-  return data?.id ?? id
+  const createdId = data?.id ?? id
+  try {
+    await writeActivityLog({
+      businessId,
+      actorUserId: argNumber(request, 'actor_user_id', 'actorUserId', 'user_id', 'userId'),
+      action: 'STAFF_CREATED',
+      entityType: 'user',
+      entityId: createdId,
+      summary: `Added staff ${name || username} (${role})`,
+      after: { username, role, name },
+    })
+  } catch {
+    /* audit is best-effort */
+  }
+  return createdId
 }
 
 function parseLocalReportDay(reportDate?: string): { start: Date; end: Date; dateStr: string } {
@@ -2384,7 +2443,7 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
         .in('user_id', userIds)
         .gte('created_at', start.toISOString())
         .lte('created_at', nowIso)
-      sales = retry.data
+      sales = (retry.data || []).map((s) => ({ ...s, location: 'fridge' }))
     }
     const kept = (sales || []).filter(
       (s: any) => String(s.payment_status || '').toUpperCase() !== 'CANCELLED'
@@ -2455,6 +2514,7 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
   const newOnDay = new Map<number, number>()
   const newAfter = new Map<number, number>()
   const storeOutAfter = new Map<number, number>()
+  const fridgeAdjustAfter = new Map<number, number>()
   try {
     const { data: moves } = await supabase
       .from('inventory_transactions_backup')
@@ -2464,26 +2524,73 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
     for (const m of moves || []) {
       const type = String((m as any).transaction_type || '').toUpperCase()
       const reason = String((m as any).reason || '')
+      if (/sale|void/i.test(reason) || type.includes('SALE')) continue
       const qty = Number((m as any).quantity || 0)
       const pid = Number((m as any).product_id)
       const t = new Date((m as any).created_at).getTime()
-      if (!pid || !(qty > 0)) continue
-      const intoFridge =
-        type.includes('TO_FRIDGE') ||
-        (type === 'STOCK_FRIDGE' && !/void/i.test(reason))
-      const outOfStore =
-        type.includes('TRANSFER_STORE') ||
-        type.includes('TO_FRIDGE') ||
-        type.includes('TO_SHOW')
-      if (t <= endMs) {
-        if (intoFridge) newOnDay.set(pid, (newOnDay.get(pid) || 0) + qty)
-      } else {
-        if (intoFridge) newAfter.set(pid, (newAfter.get(pid) || 0) + qty)
-        if (outOfStore) storeOutAfter.set(pid, (storeOutAfter.get(pid) || 0) + qty)
+      if (!pid || !qty) continue
+      const afterEnd = t > endMs
+      if (type.includes('TRANSFER')) {
+        const n = Math.abs(qty)
+        if (!n) continue
+        const intoFridge = type.includes('TO_FRIDGE')
+        const outOfStore = type.includes('TRANSFER_STORE') || type.includes('TO_FRIDGE') || type.includes('TO_SHOW')
+        if (!afterEnd) {
+          if (intoFridge) newOnDay.set(pid, (newOnDay.get(pid) || 0) + n)
+        } else {
+          if (intoFridge) newAfter.set(pid, (newAfter.get(pid) || 0) + n)
+          if (outOfStore) storeOutAfter.set(pid, (storeOutAfter.get(pid) || 0) + n)
+        }
+        continue
       }
     }
   } catch {
     /* table may not exist on cloud */
+  }
+
+  try {
+    const { data: logs } = await supabase
+      .from('activity_logs_backup')
+      .select('action, after_json, created_at, entity_id')
+      .eq('business_id', businessId)
+      .in('action', ['STOCK_ADJUST'])
+      .gte('created_at', start.toISOString())
+    for (const row of logs || []) {
+      const t = new Date(String((row as any).created_at || '')).getTime()
+      const pid = Number((row as any).entity_id)
+      if (!pid || Number.isNaN(t)) continue
+      let after: any = {}
+      try {
+        after = JSON.parse(String((row as any).after_json || '{}'))
+      } catch {
+        after = {}
+      }
+      const afterEnd = t > endMs
+      const loc = String(after.location || '').toLowerCase()
+      const q = Number(after.quantity_change || 0)
+      if (loc !== 'fridge' || !q) continue
+      if (afterEnd) fridgeAdjustAfter.set(pid, (fridgeAdjustAfter.get(pid) || 0) + q)
+      else if (q > 0) newOnDay.set(pid, (newOnDay.get(pid) || 0) + q)
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const snapByProduct = new Map<number, { fridge: number; store: number }>()
+  try {
+    const { data: snaps } = await supabase
+      .from('stock_daily_snapshots_backup')
+      .select('product_id, fridge_stock, store_stock')
+      .eq('business_id', businessId)
+      .eq('report_date', dateStr)
+    for (const s of snaps || []) {
+      snapByProduct.set(Number((s as any).product_id), {
+        fridge: Number((s as any).fridge_stock || 0),
+        store: Number((s as any).store_stock || 0),
+      })
+    }
+  } catch {
+    /* run supabase/stock_daily_snapshots.sql */
   }
 
   const remainingOf = (p: any) =>
@@ -2499,15 +2606,20 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
       const fridgeNow = Number(p?.fridge_stock || 0)
       const fridgeSold = fridgeSoldById.get(id) || 0
       const added = newOnDay.get(id) || 0
-      const fridgeLeft = Math.max(
-        0,
-        fridgeNow + (fridgeSoldAfter.get(id) || 0) - (newAfter.get(id) || 0)
-      )
+      const snap = snapByProduct.get(id)
+      const fridgeLeft = snap
+        ? snap.fridge
+        : Math.max(
+            0,
+            fridgeNow +
+              (fridgeSoldAfter.get(id) || 0) -
+              (newAfter.get(id) || 0) -
+              (fridgeAdjustAfter.get(id) || 0)
+          )
       const fridgeBefore = Math.max(0, fridgeLeft + fridgeSold - added)
-      const storeLeft = Math.max(
-        0,
-        Number(p?.store_stock || 0) + (storeOutAfter.get(id) || 0)
-      )
+      const storeLeft = snap
+        ? snap.store
+        : Math.max(0, Number(p?.store_stock || 0) + (storeOutAfter.get(id) || 0))
       return {
         name: p?.name || `Product ${id}`,
         sold: fridgeSold,
@@ -2519,9 +2631,27 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
         show_sold: showSoldById.get(id) || 0,
         left: remainingOf(p),
         before: fridgeBefore,
+        product_id: id,
       }
     })
     .sort((a, b) => b.fridge_sold - a.fridge_sold || a.name.localeCompare(b.name))
+
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  if (dateStr < today && snapByProduct.size === 0 && sold.length) {
+    const rows = sold.map((r: any) => ({
+      business_id: businessId,
+      product_id: r.product_id,
+      report_date: dateStr,
+      fridge_stock: r.fridge_left,
+      show_stock: 0,
+      store_stock: r.store,
+      synced_at: new Date().toISOString(),
+    }))
+    void supabase.from('stock_daily_snapshots_backup').upsert(rows, {
+      onConflict: 'business_id,product_id,report_date',
+    })
+  }
 
   const active = products.filter((p: any) => p.is_active !== false)
   const outOfStock = active
@@ -2882,6 +3012,30 @@ async function createProduct(request: Record<string, unknown>) {
     .select('id')
     .single()
 
+  const finishCreate = async (createdId: number) => {
+    try {
+      await writeActivityLog({
+        businessId,
+        actorUserId: argNumber(request, 'actor_user_id', 'actorUserId', 'user_id', 'userId'),
+        action: 'PRODUCT_CREATED',
+        entityType: 'product',
+        entityId: createdId,
+        summary: `Created product ${payload.name}`,
+        after: {
+          name: payload.name,
+          category: payload.category,
+          price: payload.price,
+          fridge_stock: payload.fridge_stock,
+          show_stock: payload.show_stock,
+          store_stock: payload.store_stock,
+        },
+      })
+    } catch {
+      /* ignore */
+    }
+    return createdId
+  }
+
   if (error) {
     // Columns may not exist yet — retry without newer fields
     if (/sports_stock|duration_|staff_price/i.test(error.message)) {
@@ -2894,11 +3048,11 @@ async function createProduct(request: Record<string, unknown>) {
       } = payload as any
       const retry = await supabase.from('products_backup').insert(fallback).select('id').single()
       if (retry.error) throw new Error(retry.error.message)
-      return retry.data?.id ?? payload.id
+      return finishCreate(retry.data?.id ?? payload.id)
     }
     throw new Error(error.message)
   }
-  return data?.id ?? payload.id
+  return finishCreate(data?.id ?? payload.id)
 }
 
 async function updateProduct(request: Record<string, unknown>) {
@@ -2973,9 +3127,22 @@ async function updateProduct(request: Record<string, unknown>) {
         .eq('id', id)
         .eq('business_id', businessId)
       if (retry.error) throw new Error(retry.error.message)
-      return id
+    } else {
+      throw new Error(error.message)
     }
-    throw new Error(error.message)
+  }
+  try {
+    await writeActivityLog({
+      businessId,
+      actorUserId: argNumber(request, 'actor_user_id', 'actorUserId', 'user_id', 'userId'),
+      action: 'PRODUCT_UPDATED',
+      entityType: 'product',
+      entityId: id,
+      summary: `Edited product ${payload.name}`,
+      after: payload,
+    })
+  } catch {
+    /* ignore */
   }
   return id
 }
@@ -2997,7 +3164,7 @@ async function updateStockType(args: Record<string, unknown>) {
 
   const { data: product, error: readError } = await supabase
     .from('products_backup')
-    .select(`id, ${column}`)
+    .select(`id, name, business_id, ${column}`)
     .eq('id', productId)
     .single()
 
@@ -3011,6 +3178,43 @@ async function updateStockType(args: Record<string, unknown>) {
     .eq('id', productId)
 
   if (error) throw new Error(error.message)
+  const reason = String(args.reason || '')
+  try {
+    await supabase.from('inventory_transactions_backup').insert({
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      product_id: productId,
+      transaction_type: `STOCK_${stockType.toUpperCase()}`,
+      quantity: quantityChange,
+      reason: reason || 'Stock update',
+      user_id: argNumber(args, 'userId', 'user_id') || 0,
+      created_at: new Date().toISOString(),
+    })
+  } catch {
+    /* optional table */
+  }
+  if (!/sale|void/i.test(reason)) {
+    const qty = Math.abs(quantityChange)
+    const verb = quantityChange >= 0 ? 'added' : 'removed'
+    const pname = String((product as any)?.name || `product #${productId}`)
+    try {
+      await writeActivityLog({
+        businessId: Number((product as any)?.business_id || 0),
+        actorUserId: argNumber(args, 'userId', 'user_id', 'actorUserId', 'actor_user_id'),
+        action: 'STOCK_ADJUST',
+        entityType: 'inventory',
+        entityId: productId,
+        summary: `${verb} ${qty} ${pname} on ${stockType}`,
+        after: {
+          product: pname,
+          location: stockType,
+          quantity_change: quantityChange,
+          reason,
+        },
+      })
+    } catch {
+      /* ignore */
+    }
+  }
   return true
 }
 
@@ -3036,7 +3240,7 @@ async function transferStock(args: Record<string, unknown>) {
 
   const { data: product, error: readError } = await supabase
     .from('products_backup')
-    .select('id, fridge_stock, show_stock, store_stock, sports_stock')
+    .select('id, name, business_id, fridge_stock, show_stock, store_stock, sports_stock')
     .eq('id', productId)
     .single()
 
@@ -3062,6 +3266,7 @@ async function transferStock(args: Record<string, unknown>) {
       })
       .eq('id', productId)
     if (error) throw new Error(error.message)
+    await logStockMoveAudit(args, productId, from, to, quantity, fallback.data as any)
     return true
   }
   const fromVal = Number((product as any)?.[fromCol] || 0)
@@ -3077,7 +3282,32 @@ async function transferStock(args: Record<string, unknown>) {
     .eq('id', productId)
 
   if (error) throw new Error(error.message)
+  await logStockMoveAudit(args, productId, from, to, quantity, product as any)
   return true
+}
+
+async function logStockMoveAudit(
+  args: Record<string, unknown>,
+  productId: number,
+  from: string,
+  to: string,
+  quantity: number,
+  product: any
+) {
+  const pname = String(product?.name || `product #${productId}`)
+  try {
+    await writeActivityLog({
+      businessId: Number(product?.business_id || 0),
+      actorUserId: argNumber(args, 'userId', 'user_id', 'actorUserId', 'actor_user_id'),
+      action: 'STOCK_MOVE',
+      entityType: 'inventory',
+      entityId: productId,
+      summary: `moved ${quantity} ${pname} from ${from} to ${to}`,
+      after: { product: pname, from, to, quantity },
+    })
+  } catch {
+    /* ignore */
+  }
 }
 
 type ProductCategory = {
@@ -3188,7 +3418,24 @@ async function createProductCategory(request: Record<string, unknown>): Promise<
     return payload
   }
 
-  return data as ProductCategory
+  if (data) {
+    try {
+      await writeActivityLog({
+        businessId,
+        actorUserId: argNumber(request, 'actor_user_id', 'actorUserId', 'user_id', 'userId'),
+        action: 'PACKAGING_CREATED',
+        entityType: 'category',
+        entityId: (data as ProductCategory).id,
+        summary: `Added packaging type ${name}`,
+        after: { name },
+      })
+    } catch {
+      /* ignore */
+    }
+    return data as ProductCategory
+  }
+
+  return payload
 }
 
 async function deleteProductCategory(request: Record<string, unknown>) {
@@ -3441,10 +3688,9 @@ export async function invoke<T = unknown>(
       case 'void_sale': {
         const saleId = argNumber(args, 'saleId', 'sale_id')
         const businessId = argNumber(args, 'businessId', 'business_id')
-        const actorUserId = argNumber(args, 'actorUserId', 'actor_user_id')
         if (!saleId) throw new Error('saleId is required')
         if (!businessId) throw new Error('businessId is required')
-        return (await voidSale(saleId, businessId, actorUserId || 0)) as T
+        return (await voidSale(saleId, businessId)) as T
       }
       case 'update_sale_date':
       case 'update_sale_details': {

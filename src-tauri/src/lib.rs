@@ -523,6 +523,25 @@ async fn create_user(state: State<'_, AppState>, request: serde_json::Value) -> 
     let user_id = db.create_user(&username, &password_hash, &role, name.as_deref(), email.as_deref(), business_id, temporary_password.as_deref())
         .map_err(|e| format!("Failed to create user: {}", e))?;
     println!("User created successfully with ID: {}", user_id);
+    if let Some(business_id_val) = bid {
+        let actor = request["actor_user_id"].as_i64()
+            .or_else(|| request["actorUserId"].as_i64());
+        let after = serde_json::json!({
+            "username": username,
+            "role": role_str,
+            "name": user_name_str,
+        })
+        .to_string();
+        let _ = db.log_activity(
+            business_id_val,
+            actor,
+            "STAFF_CREATED",
+            "user",
+            &user_id.to_string(),
+            &format!("Added staff {} ({})", user_name_str, role_str),
+            Some(&after),
+        );
+    }
 
     // Send new user registration notification email if business_id exists
     // Do this after releasing the database lock
@@ -699,8 +718,31 @@ async fn create_product(state: State<'_, AppState>, request: serde_json::Value) 
         created_at: "".to_string(), // This will be set by the database
     };
 
-    db.create_product(&product)
-        .map_err(|e| format!("Failed to create product: {}", e))
+    let product_id = db.create_product(&product)
+        .map_err(|e| format!("Failed to create product: {}", e))?;
+    let actor = request["actor_user_id"].as_i64()
+        .or_else(|| request["actorUserId"].as_i64())
+        .or_else(|| request["user_id"].as_i64());
+    let after = serde_json::json!({
+        "name": name,
+        "category": category,
+        "price": price,
+        "staff_price": staff_price,
+        "fridge_stock": fridge_stock,
+        "show_stock": show_stock,
+        "store_stock": store_stock,
+    })
+    .to_string();
+    let _ = db.log_activity(
+        business_id,
+        actor,
+        "PRODUCT_CREATED",
+        "product",
+        &product_id.to_string(),
+        &format!("Created product {}", name),
+        Some(&after),
+    );
+    Ok(product_id)
 }
 
 #[tauri::command]
@@ -736,6 +778,18 @@ async fn update_product(state: State<'_, AppState>, request: serde_json::Value) 
     let show_stock = request["show_stock"].as_i64().or_else(|| request["showStock"].as_i64()).map(|v| v as i32);
     let store_stock = request["store_stock"].as_i64().or_else(|| request["storeStock"].as_i64()).map(|v| v as i32);
 
+    let actor = request["actor_user_id"].as_i64()
+        .or_else(|| request["actorUserId"].as_i64())
+        .or_else(|| request["user_id"].as_i64());
+    let before_name: String = db
+        .conn
+        .query_row(
+            "SELECT name FROM products WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| name.clone());
+
     db.update_product(
         id,
         business_id,
@@ -755,6 +809,27 @@ async fn update_product(state: State<'_, AppState>, request: serde_json::Value) 
         store_stock,
     )
     .map_err(|e| format!("Failed to update product: {}", e))?;
+    let after = serde_json::json!({
+        "name": name,
+        "category": category,
+        "update_prices": update_prices,
+        "update_stock": update_stock,
+        "price": price,
+        "fridge_stock": fridge_stock,
+        "show_stock": show_stock,
+        "store_stock": store_stock,
+    })
+    .to_string();
+    let _ = db.log_activity_full(
+        business_id,
+        actor,
+        "PRODUCT_UPDATED",
+        "product",
+        &id.to_string(),
+        &format!("Edited product {}", name),
+        Some(&serde_json::json!({ "name": before_name }).to_string()),
+        Some(&after),
+    );
     Ok(id)
 }
 
@@ -1020,15 +1095,6 @@ async fn process_sale(
             .map_err(|e| format!("Sale saved but debt ledger update failed: {}", e))?;
         }
 
-        let _ = db.log_activity(
-            request.business_id,
-            Some(request.staff_id),
-            "SALE",
-            "sale",
-            &sale_id.to_string(),
-            &format!("Sale #{} · {}", sale_id, payment_method),
-            None,
-        );
     }
 
     if payment_method == "DEBT" {
@@ -2839,8 +2905,20 @@ async fn create_product_category(
         .and_then(|v| v.as_str())
         .ok_or("name required")?;
     let db = state.db.lock().unwrap();
-    db.create_product_category(business_id, name)
-        .map_err(|e| format!("Failed to create category: {}", e))
+    let created = db.create_product_category(business_id, name)
+        .map_err(|e| format!("Failed to create category: {}", e))?;
+    let actor = request["actor_user_id"].as_i64()
+        .or_else(|| request["actorUserId"].as_i64());
+    let _ = db.log_activity(
+        business_id,
+        actor,
+        "PACKAGING_CREATED",
+        "category",
+        &created.get("id").and_then(|v| v.as_i64()).unwrap_or(0).to_string(),
+        &format!("Added packaging type {}", name.trim()),
+        Some(&created.to_string()),
+    );
+    Ok(created)
 }
 
 #[tauri::command]

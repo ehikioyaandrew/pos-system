@@ -780,6 +780,46 @@ impl Database {
                 &user_id.to_string(),
             ],
         )?;
+
+        let reason_l = reason.unwrap_or("").to_lowercase();
+        if !reason_l.contains("sale") && !reason_l.contains("void") {
+            if let Ok((bid, pname)) = self.conn.query_row(
+                "SELECT business_id, name FROM products WHERE id = ?1",
+                [product_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            ) {
+                let who: String = self
+                    .conn
+                    .query_row(
+                        "SELECT COALESCE(NULLIF(name, ''), username) FROM users WHERE id = ?1",
+                        [user_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_else(|_| format!("User {}", user_id));
+                let qty = quantity_change.abs();
+                let verb = if quantity_change >= 0 { "added" } else { "removed" };
+                let summary = format!(
+                    "{} {} {} {} on {}",
+                    who, verb, qty, pname, stock_type
+                );
+                let after = serde_json::json!({
+                    "product": pname,
+                    "location": stock_type,
+                    "quantity_change": quantity_change,
+                    "reason": reason.unwrap_or(""),
+                })
+                .to_string();
+                let _ = self.log_activity(
+                    bid,
+                    Some(user_id),
+                    "STOCK_ADJUST",
+                    "inventory",
+                    &product_id.to_string(),
+                    &summary,
+                    Some(&after),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -828,6 +868,41 @@ impl Database {
                 &user_id.to_string(),
             ],
         )?;
+
+        if let Ok((bid, pname)) = self.conn.query_row(
+            "SELECT business_id, name FROM products WHERE id = ?1",
+            [product_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            let who: String = self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(NULLIF(name, ''), username) FROM users WHERE id = ?1",
+                    [user_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| format!("User {}", user_id));
+            let summary = format!(
+                "{} moved {} {} from {} to {}",
+                who, quantity, pname, from, to
+            );
+            let after = serde_json::json!({
+                "product": pname,
+                "from": from,
+                "to": to,
+                "quantity": quantity,
+            })
+            .to_string();
+            let _ = self.log_activity(
+                bid,
+                Some(user_id),
+                "STOCK_MOVE",
+                "inventory",
+                &product_id.to_string(),
+                &summary,
+                Some(&after),
+            );
+        }
         Ok(())
     }
 

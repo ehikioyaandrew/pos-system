@@ -1,6 +1,7 @@
 -- Activity / audit log for business actions (sale edits, debt payments, etc.)
 -- Run in Supabase SQL Editor once, then edit a sale or record a debt payment to see entries.
--- Audit log does NOT backfill old history — only actions after this table exists.
+-- Audit log does NOT store sales. Historic inventory can be copied with
+-- supabase/backfill_inventory_audit.sql (product edits cannot be recovered).
 
 create table if not exists public.activity_logs_backup (
   id bigint primary key,

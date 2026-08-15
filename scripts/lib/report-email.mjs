@@ -190,7 +190,7 @@ export function buildSalesReportHtml(p) {
             })
           )}
 
-          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Fridge left is the fridge at the end of this date (next day’s Fridge before). Fridge before = left + sold − new. Store is store stock at the end of this date.</p>
+          <p class="foot-note muted" style="margin:36px 0 0;font-size:12px;line-height:1.5;color:#8a938e;">Fridge left is frozen for this date after the first preview/email. Later stock edits do not change older days. Fridge before = left + sold − new.</p>
         </td>
       </tr>
     </table>

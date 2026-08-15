@@ -189,6 +189,15 @@ async function main() {
   } catch {
     stockMoves = []
   }
+  let stockLogs = []
+  try {
+    stockLogs = await fetchAll(
+      'activity_logs_backup',
+      'select=business_id,action,entity_id,after_json,created_at'
+    )
+  } catch {
+    stockLogs = []
+  }
 
   const productById = new Map(products.map((p) => [Number(p.id), p]))
   const userById = new Map(users.map((u) => [Number(u.id), u]))
@@ -304,16 +313,16 @@ async function main() {
         const newFridge = new Map()
         const newAfter = new Map()
         const storeOutAfter = new Map()
+        const fridgeAdjustAfter = new Map()
         for (const m of stockMoves) {
           const p = productById.get(Number(m.product_id))
           if (!p || Number(p.business_id) !== bid) continue
           const type = String(m.transaction_type || '').toUpperCase()
           const reason = String(m.reason || '')
+          if (/sale|void/i.test(reason) || type.includes('SALE')) continue
           const qty = Number(m.quantity || 0)
-          if (!(qty > 0)) continue
-          const intoFridge =
-            type.includes('TO_FRIDGE') ||
-            (type === 'STOCK_FRIDGE' && !/void/i.test(reason))
+          if (!(qty > 0) || !type.includes('TRANSFER')) continue
+          const intoFridge = type.includes('TO_FRIDGE')
           const outOfStore =
             type.includes('TRANSFER_STORE') ||
             type.includes('TO_FRIDGE') ||
@@ -327,6 +336,26 @@ async function main() {
             if (outOfStore) storeOutAfter.set(id, (storeOutAfter.get(id) || 0) + qty)
           }
         }
+        for (const row of stockLogs) {
+          if (Number(row.business_id) !== bid) continue
+          if (String(row.action) !== 'STOCK_ADJUST') continue
+          const t = Date.parse(String(row.created_at || ''))
+          const pid = Number(row.entity_id)
+          if (!pid || Number.isNaN(t)) continue
+          let after = {}
+          try {
+            after = JSON.parse(String(row.after_json || '{}'))
+          } catch {
+            after = {}
+          }
+          const loc = String(after.location || '').toLowerCase()
+          const q = Number(after.quantity_change || 0)
+          if (loc !== 'fridge' || !q) continue
+          if (t >= end) fridgeAdjustAfter.set(pid, (fridgeAdjustAfter.get(pid) || 0) + q)
+          else if (inRange(row.created_at, start, end) && q > 0) {
+            newFridge.set(pid, (newFridge.get(pid) || 0) + q)
+          }
+        }
         const ids = new Set([...fridgeSold.keys(), ...showSold.keys()])
         return [...ids]
           .map((id) => {
@@ -334,7 +363,13 @@ async function main() {
             const fridgeNow = Number(p?.fridge_stock || 0)
             const fsold = fridgeSold.get(id) || 0
             const added = newFridge.get(id) || 0
-            const fridgeLeft = Math.max(0, fridgeNow + (fridgeSoldAfter.get(id) || 0) - (newAfter.get(id) || 0))
+            const fridgeLeft = Math.max(
+              0,
+              fridgeNow +
+                (fridgeSoldAfter.get(id) || 0) -
+                (newAfter.get(id) || 0) -
+                (fridgeAdjustAfter.get(id) || 0)
+            )
             const fridgeBefore = Math.max(0, fridgeLeft + fsold - added)
             const storeLeft = Math.max(0, Number(p?.store_stock || 0) + (storeOutAfter.get(id) || 0))
             return {
