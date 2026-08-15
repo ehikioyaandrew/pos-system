@@ -5,6 +5,7 @@ import {
   isTauriApp,
   syncToCloudDesktop,
 } from './tauriBridge'
+import { isStaffPricedLine } from './reportEmail'
 
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD_HASH = btoa('Pawpaw4life@')
@@ -2276,6 +2277,81 @@ async function getDailyStockReport(businessId: number, reportDate?: string) {
   }
 }
 
+async function getSalesEmailPreview(businessId: number, reportDate?: string) {
+  const { start, end, dateStr } = parseLocalReportDay(reportDate)
+  const products = await getProductsForBusiness(businessId)
+  const productById = new Map(products.map((p: any) => [Number(p.id), p]))
+
+  const { data: users } = await supabase
+    .from('users_backup')
+    .select('id')
+    .eq('business_id', businessId)
+  const userIds = (users || []).map((u) => u.id)
+  let saleIds: number[] = []
+  let salesCount = 0
+  if (userIds.length) {
+    const { data: sales } = await supabase
+      .from('sales_backup')
+      .select('id, created_at, user_id')
+      .in('user_id', userIds)
+      .gte('created_at', start.toISOString())
+      .lte('created_at', end.toISOString())
+    saleIds = (sales || []).map((s: any) => Number(s.id)).filter(Boolean)
+    salesCount = saleIds.length
+  }
+
+  const normalMap = new Map<string, { name: string; qty: number; amount: number }>()
+  const staffMap = new Map<string, { name: string; qty: number; amount: number }>()
+  const bump = (
+    map: Map<string, { name: string; qty: number; amount: number }>,
+    name: string,
+    qty: number,
+    amount: number
+  ) => {
+    const cur = map.get(name) || { name, qty: 0, amount: 0 }
+    cur.qty += qty
+    cur.amount += amount
+    map.set(name, cur)
+  }
+
+  if (saleIds.length) {
+    const { data } = await supabase
+      .from('sale_items_backup')
+      .select('product_id, quantity, total_price, unit_price, sale_id')
+      .in('sale_id', saleIds)
+    for (const row of data || []) {
+      const p = productById.get(Number((row as any).product_id)) as any
+      const name = p?.name || `Product ${(row as any).product_id}`
+      const qty = Number((row as any).quantity || 0)
+      const amount =
+        Number((row as any).total_price || 0) || qty * Number((row as any).unit_price || 0)
+      const unit = Number((row as any).unit_price || 0)
+      if (isStaffPricedLine(unit, Number(p?.price || 0), Number(p?.staff_price || 0))) {
+        bump(staffMap, name, qty, amount)
+      } else {
+        bump(normalMap, name, qty, amount)
+      }
+    }
+  }
+
+  const normalLines = [...normalMap.values()].sort((a, b) => b.amount - a.amount)
+  const staffLines = [...staffMap.values()].sort((a, b) => b.amount - a.amount)
+  return {
+    periodLabel: dateStr,
+    kind: 'daily' as const,
+    reminder: true,
+    salesCount,
+    normal: {
+      total: normalLines.reduce((s, l) => s + l.amount, 0),
+      lines: normalLines,
+    },
+    staff: {
+      total: staffLines.reduce((s, l) => s + l.amount, 0),
+      lines: staffLines,
+    },
+  }
+}
+
 async function updateBusinessSettings(request: Record<string, unknown>) {
   const businessId = argNumber(request, 'business_id', 'businessId')
   if (!businessId) throw new Error('business_id is required')
@@ -2938,6 +3014,13 @@ export async function invoke<T = unknown>(
 ): Promise<T> {
   const command = String(cmd || '').trim()
 
+  if (command === 'get_sales_email_preview' && isSupabaseConfigured) {
+    const businessId = argNumber(args, 'businessId', 'business_id')
+    if (!businessId) throw new Error('businessId is required')
+    const reportDate = String((args as any)?.reportDate || (args as any)?.report_date || '')
+    return (await getSalesEmailPreview(businessId, reportDate || undefined)) as T
+  }
+
   if (isTauriApp()) {
     try {
       const result = await invokeTauri<T>(command, args)
@@ -3240,6 +3323,12 @@ export async function invoke<T = unknown>(
         if (!businessId) throw new Error('businessId is required')
         const reportDate = String((args as any)?.reportDate || (args as any)?.report_date || '')
         return (await getDailyStockReport(businessId, reportDate || undefined)) as T
+      }
+      case 'get_sales_email_preview': {
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        if (!businessId) throw new Error('businessId is required')
+        const reportDate = String((args as any)?.reportDate || (args as any)?.report_date || '')
+        return (await getSalesEmailPreview(businessId, reportDate || undefined)) as T
       }
       case 'update_business_settings': {
         const request =

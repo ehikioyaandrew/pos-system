@@ -1,0 +1,53 @@
+# Sends per-business daily (08:00 Africa/Lagos) and weekly sales emails.
+#
+# Secrets:
+#   VITE_SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY
+#   RESEND_API_KEY          — free at https://resend.com
+#   RESEND_FROM             — optional, default POS Reports <onboarding@resend.dev>
+#                             After you verify a domain: POS Reports <reports@yourdomain.com>
+
+name: Scheduled sales emails
+
+on:
+  schedule:
+    # 07:00 UTC = 08:00 Africa/Lagos (WAT, no DST)
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: daily or weekly
+        required: true
+        default: daily
+        type: choice
+        options:
+          - daily
+          - weekly
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - name: Send reports
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM: ${{ secrets.RESEND_FROM }}
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            DOW=$(TZ=Africa/Lagos date +%u)
+            # Monday Lagos = weekly + daily
+            if [ "$DOW" = "1" ]; then
+              node scripts/send-scheduled-reports.mjs weekly
+            fi
+            MODE=daily
+          fi
+          node scripts/send-scheduled-reports.mjs "$MODE"

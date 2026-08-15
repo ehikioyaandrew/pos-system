@@ -18,6 +18,7 @@ import {
   AuditLogDashboard,
 } from './floorViews'
 import * as XLSX from 'xlsx'
+import { buildSalesReportHtml } from './reportEmail'
 
 const SESSION_KEY = 'pos_web_user'
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes idle
@@ -6961,6 +6962,7 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
   const [hasAccess, setHasAccess] = useState(false)
   const [reportDate, setReportDate] = useState(yesterday)
   const [report, setReport] = useState<any>(null)
+  const [emailHtml, setEmailHtml] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [view, setView] = useState<'all' | 'sold' | 'remaining'>('all')
 
@@ -7017,6 +7019,27 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
         reportDate,
       }) as any
       setReport(data)
+      try {
+        const preview = (await invoke('get_sales_email_preview', {
+          businessId,
+          reportDate,
+        })) as any
+        setEmailHtml(
+          buildSalesReportHtml({
+            businessName: businessInfo?.name || 'Business',
+            businessAddress: businessInfo?.address || '',
+            primaryColor: businessInfo?.primary_color || '#121c19',
+            periodLabel: preview?.periodLabel || reportDate,
+            kind: 'daily',
+            reminder: true,
+            salesCount: Number(preview?.salesCount || 0),
+            normal: preview?.normal || { total: 0, lines: [] },
+            staff: preview?.staff || { total: 0, lines: [] },
+          })
+        )
+      } catch {
+        setEmailHtml('')
+      }
     } catch (error) {
       console.error('Failed to load daily stock report:', error)
       toast.error('Failed to load daily stock report')
@@ -7170,6 +7193,27 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
             accent="rose"
           />
         </div>
+
+        {emailHtml ? (
+          <div className="rounded-xl border border-[#d4dcd8] bg-white overflow-hidden mb-6">
+            <div className="px-4 sm:px-5 py-3 border-b border-[#e8ecea] flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold tracking-[0.16em] uppercase text-[#c4783a]">
+                  Email preview
+                </p>
+                <p className="text-sm text-[#2a3d36]/70">
+                  Same layout as the 8am email: normal vs staff price, this business only.
+                </p>
+              </div>
+            </div>
+            <iframe
+              title="Sales email preview"
+              srcDoc={emailHtml}
+              className="w-full bg-[#f4f6f5]"
+              style={{ minHeight: 720, border: 0 }}
+            />
+          </div>
+        ) : null}
 
         <div className="rounded-xl border border-[#d4dcd8] bg-white p-4 sm:p-5 mb-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
