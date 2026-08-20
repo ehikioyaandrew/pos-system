@@ -1241,36 +1241,66 @@ async function attachSaleItemsSummary(sales: any[]) {
   const productIds = [
     ...new Set(itemRows.map((r) => Number(r.product_id)).filter(Boolean)),
   ]
-  const nameMap = new Map<number, string>()
+  const productMap = new Map<number, { name: string; price: number; staff_price: number }>()
   if (productIds.length) {
     const { data: products } = await supabase
       .from('products_backup')
-      .select('id, name')
+      .select('id, name, price, staff_price')
       .in('id', productIds)
     for (const p of products || []) {
-      nameMap.set(Number(p.id), String(p.name || `Product #${p.id}`))
+      productMap.set(Number(p.id), {
+        name: String(p.name || `Product #${p.id}`),
+        price: Number(p.price || 0),
+        staff_price: Number(p.staff_price || 0),
+      })
     }
   }
 
   const bySale = new Map<number, any[]>()
   for (const row of itemRows) {
     const sid = Number(row.sale_id)
+    const pid = Number(row.product_id)
+    const product = productMap.get(pid)
+    const unit = Number(row.unit_price || 0)
+    const normal = Number(product?.price || 0)
+    const staff = Number(product?.staff_price || 0)
+    const isStaff = isStaffPricedLine(unit, normal, staff)
     const list = bySale.get(sid) || []
     list.push({
-      name: nameMap.get(Number(row.product_id)) || `Product #${row.product_id}`,
+      name: product?.name || `Product #${pid}`,
       quantity: Number(row.quantity || 0),
-      unit_price: Number(row.unit_price || 0),
+      unit_price: unit,
+      normal_price: normal,
+      staff_price: staff,
+      price_kind: isStaff ? 'staff' : 'normal',
     })
     bySale.set(sid, list)
   }
 
   return sales.map((sale) => {
     const items = bySale.get(Number(sale.id)) || []
-    const summary = items.map((it) => `${it.quantity}×${it.name}`).join(', ')
+    let hasStaff = false
+    let hasNormal = false
+    const summary = items
+      .map((it) => {
+        if (it.price_kind === 'staff') hasStaff = true
+        else hasNormal = true
+        return `${it.quantity}×${it.name} (${it.price_kind === 'staff' ? 'staff' : 'normal'})`
+      })
+      .join(', ')
+    const price_mix =
+      hasStaff && hasNormal
+        ? 'mixed'
+        : hasStaff
+          ? 'staff'
+          : hasNormal
+            ? 'normal'
+            : 'none'
     return {
       ...sale,
       items,
       items_summary: summary,
+      price_mix,
     }
   })
 }

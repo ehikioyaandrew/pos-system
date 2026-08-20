@@ -339,7 +339,8 @@ impl Database {
             let sid = sale.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
             if sid > 0 {
                 if let Ok(mut istmt) = self.conn.prepare(
-                    "SELECT COALESCE(p.name, 'Item'), si.quantity, si.unit_price
+                    "SELECT COALESCE(p.name, 'Item'), si.quantity, si.unit_price,
+                            COALESCE(p.price, 0), COALESCE(p.staff_price, 0)
                      FROM sale_items si
                      LEFT JOIN products p ON p.id = si.product_id
                      WHERE si.sale_id = ?1
@@ -347,26 +348,59 @@ impl Database {
                 ) {
                     let items: Vec<Value> = istmt
                         .query_map([sid], |row| {
+                            let name: String = row.get(0)?;
+                            let qty: i32 = row.get(1)?;
+                            let unit: f64 = row.get(2)?;
+                            let normal: f64 = row.get(3)?;
+                            let staff: f64 = row.get(4)?;
+                            let is_staff = staff > 0.0
+                                && (staff - normal).abs() >= 0.009
+                                && (unit - staff).abs() <= 0.05;
                             Ok(serde_json::json!({
-                                "name": row.get::<_, String>(0)?,
-                                "quantity": row.get::<_, i32>(1)?,
-                                "unit_price": row.get::<_, f64>(2)?,
+                                "name": name,
+                                "quantity": qty,
+                                "unit_price": unit,
+                                "normal_price": normal,
+                                "staff_price": staff,
+                                "price_kind": if is_staff { "staff" } else { "normal" },
                             }))
                         })?
                         .filter_map(|x| x.ok())
                         .collect();
+                    let mut has_staff = false;
+                    let mut has_normal = false;
                     let summary: Vec<String> = items
                         .iter()
                         .map(|it| {
+                            let kind = it
+                                .get("price_kind")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("normal");
+                            if kind == "staff" {
+                                has_staff = true;
+                            } else {
+                                has_normal = true;
+                            }
                             format!(
-                                "{}×{}",
+                                "{}×{} ({})",
                                 it.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
-                                it.get("name").and_then(|v| v.as_str()).unwrap_or("Item")
+                                it.get("name").and_then(|v| v.as_str()).unwrap_or("Item"),
+                                if kind == "staff" { "staff" } else { "normal" }
                             )
                         })
                         .collect();
+                    let mix = if has_staff && has_normal {
+                        "mixed"
+                    } else if has_staff {
+                        "staff"
+                    } else if has_normal {
+                        "normal"
+                    } else {
+                        "none"
+                    };
                     sale["items"] = Value::Array(items);
                     sale["items_summary"] = Value::String(summary.join(", "));
+                    sale["price_mix"] = Value::String(mix.into());
                 }
             }
             out.push(sale);

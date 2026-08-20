@@ -162,6 +162,60 @@ function PaymentMethodBadge({ method }: { method?: string | null }) {
   )
 }
 
+function PriceMixBadge({ mix }: { mix?: string | null }) {
+  const value = String(mix || '').toLowerCase()
+  if (!value || value === 'none') return null
+  const styles =
+    value === 'mixed'
+      ? 'bg-violet-50 text-violet-900 border-violet-200'
+      : value === 'staff'
+        ? 'bg-indigo-50 text-indigo-900 border-indigo-200'
+        : 'bg-[#f4f6f5] text-[#2a3d36] border-[#d4dcd8]'
+  const label =
+    value === 'mixed' ? 'Mixed' : value === 'staff' ? 'Staff price' : 'Normal'
+  return (
+    <span className={`inline-flex text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md border ${styles}`}>
+      {label}
+    </span>
+  )
+}
+
+function SaleItemsCell({ sale }: { sale: any }) {
+  const items = Array.isArray(sale?.items) ? sale.items : []
+  if (items.length) {
+    return (
+      <div className="space-y-1 max-w-[16rem]">
+        <PriceMixBadge mix={sale.price_mix} />
+        {items.map((it: any, idx: number) => {
+          const kind = String(it.price_kind || 'normal').toLowerCase()
+          return (
+            <p key={`${it.name}-${idx}`} className="text-sm text-[#2a3d36]/80 leading-snug">
+              <span className="font-medium text-[#121c19]">
+                {Number(it.quantity || 0)}×{it.name || 'Item'}
+              </span>{' '}
+              <span
+                className={
+                  kind === 'staff' ? 'text-indigo-800 font-semibold' : 'text-[#2a3d36]/55'
+                }
+              >
+                ({kind === 'staff' ? 'staff' : 'normal'})
+              </span>
+            </p>
+          )
+        })}
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1 max-w-[16rem]">
+      <PriceMixBadge mix={sale.price_mix} />
+      <span className="text-sm text-[#2a3d36]/75 line-clamp-3" title={sale.items_summary || ''}>
+        {sale.items_summary || '—'}
+      </span>
+    </div>
+  )
+}
+
 function DebtProgressBlock({ sale }: { sale: any }) {
   const isDebt = String(sale?.payment_method || '').toUpperCase() === 'DEBT'
   if (!isDebt) {
@@ -1972,6 +2026,7 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
       String(r.payment_method || '').toLowerCase().includes(q) ||
       String(r.payment_status || '').toLowerCase().includes(q) ||
       String(r.items_summary || '').toLowerCase().includes(q) ||
+      String(r.price_mix || '').toLowerCase().includes(q) ||
       String(r.review_status || '').toLowerCase().includes(q) ||
       String(r.id).includes(q) ||
       saleCustomerName(r).toLowerCase().includes(q)
@@ -2139,7 +2194,7 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
               <p className="text-sm text-[#121c19] mt-1">{saleCustomerName(sale)}</p>
               <p className="text-sm text-[#2a3d36]/60 mt-0.5">{sale.staff_name}</p>
               <p className="text-xs text-[#2a3d36]/70 mt-2 leading-snug">
-                {sale.items_summary || '—'}
+                <SaleItemsCell sale={sale} />
               </p>
               <p className="text-xs text-[#2a3d36]/45 mt-2">{formatWhen(sale.created_at)}</p>
               <div className="mt-3 flex flex-wrap gap-2 items-center">
@@ -2220,10 +2275,8 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
                 <tr key={sale.id} className="hover:bg-[#f4f6f5]/70">
                   <td className="px-5 py-4 font-semibold text-[#121c19]">#{sale.id}</td>
                   <td className="px-5 py-4 text-[#121c19]">{saleCustomerName(sale)}</td>
-                  <td className="px-5 py-4 text-sm text-[#2a3d36]/75 max-w-[14rem]">
-                    <span className="line-clamp-3" title={sale.items_summary || ''}>
-                      {sale.items_summary || '—'}
-                    </span>
+                  <td className="px-5 py-4">
+                    <SaleItemsCell sale={sale} />
                   </td>
                   <td className="px-5 py-4 text-[#2a3d36]/70">{sale.staff_name}</td>
                   <td className="px-5 py-4">
