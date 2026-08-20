@@ -9,7 +9,7 @@ import {
 } from './api'
 import { checkForUpdates, installUpdate } from './updateApi'
 import { runtimeLabel } from './lib/platform'
-import { isTauriApp, syncFromCloudDesktop, syncToCloudDesktop, tauriErrorMessage } from './tauriBridge'
+import { isTauriApp, syncProductsFromCloudDesktop, syncToCloudDesktop, tauriErrorMessage } from './tauriBridge'
 import {
   StaffPOSInterface,
   StaffInventoryCheck,
@@ -1397,7 +1397,8 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
             <p className="text-xs text-white/40 truncate">{currentUser?.name || currentUser?.username}</p>
             <p className="text-[11px] text-white/25">{roleLabel}</p>
             <p className="mt-1 text-[10px] font-semibold tracking-wide uppercase text-[#e0a06a]">
-              {runtimeLabel()}{isTauriApp() ? ' · Offline' : ''}
+              {runtimeLabel()}
+              {isTauriApp() ? ' · Local till' : ''}
             </p>
           </div>
           {isTauriApp() ? (
@@ -1406,10 +1407,33 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               type="button"
               onClick={async () => {
                 try {
-                  toast.loading('Syncing…', { id: 'desktop-sync' })
-                  await syncFromCloudDesktop()
+                  toast.loading('Pulling products…', { id: 'desktop-pull-products' })
+                  const result = (await syncProductsFromCloudDesktop()) as {
+                    products_count?: number
+                    updated?: number
+                    inserted?: number
+                  }
+                  toast.success(
+                    `Products updated · ${result?.products_count ?? 0} catalog (${result?.updated ?? 0} stock refreshed)`,
+                    { id: 'desktop-pull-products' }
+                  )
+                } catch (e: unknown) {
+                  toast.error(tauriErrorMessage(e, 'Pull products failed (offline?)'), {
+                    id: 'desktop-pull-products',
+                  })
+                }
+              }}
+              className="w-full mb-2 border border-sky-400/40 hover:bg-sky-400/10 text-sky-200 py-2 px-4 rounded-md text-sm font-medium transition-colors"
+            >
+              Pull products
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  toast.loading('Pushing sales & stock…', { id: 'desktop-sync' })
                   await syncToCloudDesktop()
-                  toast.success('Sync complete', { id: 'desktop-sync' })
+                  toast.success('Pushed sales & stock to cloud', { id: 'desktop-sync' })
                 } catch (e: unknown) {
                   toast.error(tauriErrorMessage(e, 'Sync failed (offline?)'), { id: 'desktop-sync' })
                 }
@@ -1434,13 +1458,12 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                   const n = Number(preview?.normal?.total || 0)
                   const s = Number(preview?.staff?.total || 0)
                   const ok = window.confirm(
-                    `Close day ${dateStr}?\n\n${preview?.salesCount || 0} sales\nNormal ${n.toLocaleString()}\nStaff ${s.toLocaleString()}\nTotal ${(n + s).toLocaleString()}\n\nThis will sync to the cloud.`
+                    `Close day ${dateStr}?\n\n${preview?.salesCount || 0} sales\nNormal ${n.toLocaleString()}\nStaff ${s.toLocaleString()}\nTotal ${(n + s).toLocaleString()}\n\nThis will push sales & stock to the cloud (no pull).`
                   )
                   if (!ok) return
                   toast.loading('Closing day…', { id: 'desktop-eod' })
-                  await syncFromCloudDesktop()
                   await syncToCloudDesktop()
-                  toast.success('Day closed · synced', { id: 'desktop-eod' })
+                  toast.success('Day closed · sales & stock pushed', { id: 'desktop-eod' })
                 } catch (e: unknown) {
                   toast.error(tauriErrorMessage(e, 'Close day failed (offline?)'), { id: 'desktop-eod' })
                 }

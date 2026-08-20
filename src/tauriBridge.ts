@@ -113,11 +113,21 @@ export function normalizeTauriArgs(
     }
   }
 
-  if (command === 'void_sale') {
+  if (command === 'void_sale' || command === 'approve_sale') {
     return {
       saleId: normalized.saleId,
       businessId: normalized.businessId,
       actorUserId: normalized.actorUserId,
+    }
+  }
+
+  if (command === 'approve_sales_for_date') {
+    return {
+      businessId: normalized.businessId,
+      reportDate: normalized.reportDate,
+      actorUserId: normalized.actorUserId ?? null,
+      expectedAmount: normalized.expectedAmount ?? null,
+      staffDebtorUserId: normalized.staffDebtorUserId ?? null,
     }
   }
 
@@ -157,6 +167,11 @@ export async function syncFromCloudDesktop(): Promise<unknown> {
 
 export async function syncToCloudDesktop(): Promise<unknown> {
   return invokeTauri('sync_to_cloud')
+}
+
+/** Pull product catalog + stock only (fridge/show moves). Does not pull sales. */
+export async function syncProductsFromCloudDesktop(): Promise<unknown> {
+  return invokeTauri('sync_products_from_cloud')
 }
 
 export async function authenticateDesktopUser(

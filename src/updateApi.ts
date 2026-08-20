@@ -55,12 +55,27 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
   } catch (e) {
     pendingUpdate = null
     const msg = e instanceof Error ? e.message : String(e)
-    // Surface as "no update" with message via throw so UI can toast
-    throw new Error(
-      msg.includes('pubkey') || msg.includes('endpoint')
-        ? 'Updater is not fully configured yet. Ask your admin to publish a signed release.'
-        : msg || 'Could not check for updates'
-    )
+    const lower = msg.toLowerCase()
+    // Private GitHub repo / missing latest.json / no network → friendly message
+    if (
+      lower.includes('release json') ||
+      lower.includes('latest.json') ||
+      lower.includes('404') ||
+      lower.includes('not found') ||
+      lower.includes('failed to fetch') ||
+      lower.includes('network') ||
+      lower.includes('dns')
+    ) {
+      throw new Error(
+        'Could not reach the update feed. The till still works — install a new setup.exe from your admin when one is ready, or try again when online.'
+      )
+    }
+    if (lower.includes('pubkey') || lower.includes('endpoint') || lower.includes('signature')) {
+      throw new Error(
+        'Updater is not fully configured yet. Ask your admin to publish a signed release.'
+      )
+    }
+    throw new Error(msg || 'Could not check for updates')
   }
 }
 

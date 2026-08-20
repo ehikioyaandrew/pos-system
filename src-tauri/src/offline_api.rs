@@ -31,6 +31,16 @@ impl Database {
             [],
         );
         let _ = self.conn.execute(
+            "ALTER TABLE sales ADD COLUMN review_status TEXT DEFAULT 'PENDING_REVIEW'",
+            [],
+        );
+        // Older sales without a review flag stay pending until secretary/admin approves
+        let _ = self.conn.execute(
+            "UPDATE sales SET review_status = 'PENDING_REVIEW'
+             WHERE review_status IS NULL OR trim(review_status) = ''",
+            [],
+        );
+        let _ = self.conn.execute(
             "ALTER TABLE sale_items ADD COLUMN synced_at TEXT",
             [],
         );
@@ -245,8 +255,8 @@ impl Database {
         location: Option<&str>,
     ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at, location)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at, location, review_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'PENDING_REVIEW')",
             params![
                 sale_id,
                 user_id,
@@ -295,7 +305,8 @@ impl Database {
             "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status,
                     s.notes, s.created_at,
                     COALESCE(u.name, u.username, '') as staff_name,
-                    COALESCE(s.location, 'fridge') as location
+                    COALESCE(s.location, 'fridge') as location,
+                    COALESCE(NULLIF(trim(s.review_status), ''), 'PENDING_REVIEW') as review_status
              FROM sales s
              LEFT JOIN users u ON u.id = s.user_id
              WHERE (s.business_id = ?1 OR (s.business_id IS NULL AND u.business_id = ?1))
@@ -318,14 +329,320 @@ impl Database {
                 "created_at": row.get::<_, String>(6)?,
                 "staff_name": row.get::<_, String>(7)?,
                 "location": row.get::<_, String>(8)?,
+                "review_status": row.get::<_, String>(9)?,
             }))
         })?;
 
         let mut out = Vec::new();
         for r in rows {
-            out.push(r?);
+            let mut sale = r?;
+            let sid = sale.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            if sid > 0 {
+                if let Ok(mut istmt) = self.conn.prepare(
+                    "SELECT COALESCE(p.name, 'Item'), si.quantity, si.unit_price
+                     FROM sale_items si
+                     LEFT JOIN products p ON p.id = si.product_id
+                     WHERE si.sale_id = ?1
+                     ORDER BY si.id",
+                ) {
+                    let items: Vec<Value> = istmt
+                        .query_map([sid], |row| {
+                            Ok(serde_json::json!({
+                                "name": row.get::<_, String>(0)?,
+                                "quantity": row.get::<_, i32>(1)?,
+                                "unit_price": row.get::<_, f64>(2)?,
+                            }))
+                        })?
+                        .filter_map(|x| x.ok())
+                        .collect();
+                    let summary: Vec<String> = items
+                        .iter()
+                        .map(|it| {
+                            format!(
+                                "{}×{}",
+                                it.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
+                                it.get("name").and_then(|v| v.as_str()).unwrap_or("Item")
+                            )
+                        })
+                        .collect();
+                    sale["items"] = Value::Array(items);
+                    sale["items_summary"] = Value::String(summary.join(", "));
+                }
+            }
+            out.push(sale);
         }
         Ok(out)
+    }
+
+    pub fn approve_sale(
+        &self,
+        sale_id: i64,
+        business_id: i64,
+        actor_user_id: Option<i64>,
+    ) -> Result<Value> {
+        let n = self.conn.execute(
+            "UPDATE sales SET review_status = 'APPROVED'
+             WHERE id = ?1
+               AND (business_id = ?2 OR business_id IS NULL)
+               AND UPPER(COALESCE(payment_status, '')) != 'CANCELLED'",
+            params![sale_id, business_id],
+        )?;
+        if n == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let _ = self.log_activity(
+            business_id,
+            actor_user_id,
+            "SALE_APPROVED",
+            "sale",
+            &sale_id.to_string(),
+            &format!("Approved sale #{}", sale_id),
+            None,
+        );
+        Ok(serde_json::json!({ "ok": true, "sale_id": sale_id, "review_status": "APPROVED" }))
+    }
+
+    pub fn approve_sales_for_date(
+        &self,
+        business_id: i64,
+        report_date: &str,
+        actor_user_id: Option<i64>,
+        expected_amount: Option<f64>,
+        staff_debtor_user_id: Option<i64>,
+    ) -> Result<Value> {
+        let system_total: f64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(total_amount), 0)
+             FROM sales
+             WHERE (business_id = ?1 OR business_id IS NULL)
+               AND date(created_at) = date(?2)
+               AND UPPER(COALESCE(payment_status, '')) != 'CANCELLED'",
+            params![business_id, report_date],
+            |row| row.get(0),
+        )?;
+
+        let n = self.conn.execute(
+            "UPDATE sales SET review_status = 'APPROVED'
+             WHERE (business_id = ?1 OR business_id IS NULL)
+               AND date(created_at) = date(?2)
+               AND UPPER(COALESCE(payment_status, '')) != 'CANCELLED'
+               AND UPPER(COALESCE(review_status, 'PENDING_REVIEW')) != 'APPROVED'",
+            params![business_id, report_date],
+        )?;
+
+        let mut variance: Option<Value> = None;
+        if let Some(expected) = expected_amount {
+            let diff = (expected - system_total).abs();
+            if diff > 0.5 {
+                let debtor_id = staff_debtor_user_id.ok_or(rusqlite::Error::InvalidQuery)?;
+                let staff_name: String = self
+                    .conn
+                    .query_row(
+                        "SELECT COALESCE(NULLIF(trim(name), ''), username, 'Staff')
+                         FROM users WHERE id = ?1",
+                        [debtor_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_else(|_| "Staff".into());
+                let customer = Self::staff_debt_customer_name(&staff_name);
+                let note = format!(
+                    "STAFF_SHORTAGE|{}|system={:.2}|manual={:.2}|diff={:.2}",
+                    report_date, system_total, expected, diff
+                );
+                self.charge_staff_till_variance(
+                    business_id,
+                    &customer,
+                    diff,
+                    actor_user_id.unwrap_or(debtor_id),
+                    &note,
+                    report_date,
+                )?;
+                variance = Some(serde_json::json!({
+                    "system_total": system_total,
+                    "expected_amount": expected,
+                    "difference": diff,
+                    "staff_user_id": debtor_id,
+                    "staff_name": staff_name,
+                    "debt_customer": customer,
+                }));
+            }
+        }
+
+        let _ = self.log_activity(
+            business_id,
+            actor_user_id,
+            "SALES_DAY_APPROVED",
+            "sales",
+            report_date,
+            &format!("Approved {} sale(s) for {}", n, report_date),
+            Some(
+                &serde_json::json!({
+                    "count": n,
+                    "date": report_date,
+                    "system_total": system_total,
+                    "variance": variance,
+                })
+                .to_string(),
+            ),
+        );
+        Ok(serde_json::json!({
+            "ok": true,
+            "count": n,
+            "date": report_date,
+            "system_total": system_total,
+            "variance": variance,
+        }))
+    }
+
+    fn staff_debt_customer_name(staff_name: &str) -> String {
+        format!("Staff · {}", staff_name.trim())
+    }
+
+    pub fn is_staff_named_debt(customer_name: &str) -> bool {
+        let n = customer_name.trim().to_lowercase();
+        n.starts_with("staff ·") || n.starts_with("staff -") || n.starts_with("staff:")
+    }
+
+    /// Accumulating till shortage: same Staff · name account keeps growing until paid.
+    pub fn charge_staff_till_variance(
+        &self,
+        business_id: i64,
+        customer_name: &str,
+        amount: f64,
+        created_by: i64,
+        note: &str,
+        entry_date: &str,
+    ) -> Result<Value> {
+        if amount <= 0.0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let key = Self::normalize_customer_key(customer_name);
+        let now = chrono::Utc::now().to_rfc3339();
+        let entry_at = if entry_date.len() == 10 {
+            format!("{}T12:00:00.000Z", entry_date)
+        } else {
+            entry_date.to_string()
+        };
+        let debt_id: i64 = {
+            let existing: Result<i64> = self.conn.query_row(
+                "SELECT id FROM customer_debts WHERE business_id = ?1 AND customer_key = ?2",
+                params![business_id, key],
+                |row| row.get(0),
+            );
+            match existing {
+                Ok(id) => {
+                    self.conn.execute(
+                        "UPDATE customer_debts
+                         SET total_charged = total_charged + ?1,
+                             balance = balance + ?1,
+                             status = 'OPEN',
+                             updated_at = ?2
+                         WHERE id = ?3",
+                        params![amount, now, id],
+                    )?;
+                    id
+                }
+                Err(_) => {
+                    let id = chrono::Utc::now().timestamp_millis();
+                    self.conn.execute(
+                        "INSERT INTO customer_debts
+                         (id, business_id, customer_name, customer_key, total_charged, total_paid, balance, status, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?5, 'OPEN', ?6, ?6)",
+                        params![id, business_id, customer_name.trim(), key, amount, now],
+                    )?;
+                    id
+                }
+            }
+        };
+        let entry_id = chrono::Utc::now().timestamp_millis() + 7;
+        self.conn.execute(
+            "INSERT INTO debt_entries
+             (id, debt_id, business_id, entry_type, amount, sale_id, note, created_by, created_at)
+             VALUES (?1, ?2, ?3, 'TILL_VARIANCE', ?4, NULL, ?5, ?6, ?7)",
+            params![entry_id, debt_id, business_id, amount, note, created_by, entry_at],
+        )?;
+        let balance: f64 = self.conn.query_row(
+            "SELECT balance FROM customer_debts WHERE id = ?1",
+            [debt_id],
+            |row| row.get(0),
+        )?;
+        let _ = self.log_activity(
+            business_id,
+            Some(created_by),
+            "STAFF_TILL_VARIANCE",
+            "debt",
+            &debt_id.to_string(),
+            &format!("{} · +{:.0} (balance {:.0})", customer_name, amount, balance),
+            Some(
+                &serde_json::json!({
+                    "amount": amount,
+                    "balance": balance,
+                    "note": note,
+                })
+                .to_string(),
+            ),
+        );
+        Ok(serde_json::json!({
+            "ok": true,
+            "debt_id": debt_id,
+            "amount": amount,
+            "balance": balance,
+            "customer_name": customer_name,
+        }))
+    }
+
+    pub fn actor_is_floor_staff(&self, user_id: i64) -> bool {
+        let role: String = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(role, '') FROM users WHERE id = ?1",
+                [user_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        matches!(
+            role.as_str(),
+            "Staff" | "BarStaff" | "KitchenStaff"
+        )
+    }
+
+    pub fn assert_can_edit_debt(
+        &self,
+        business_id: i64,
+        debt_id: i64,
+        actor_user_id: i64,
+    ) -> Result<()> {
+        if !self.actor_is_floor_staff(actor_user_id) {
+            return Ok(());
+        }
+        let customer_name: String = self.conn.query_row(
+            "SELECT customer_name FROM customer_debts WHERE id = ?1 AND business_id = ?2",
+            params![debt_id, business_id],
+            |row| row.get(0),
+        )?;
+        if Self::is_staff_named_debt(&customer_name) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        // Also block if customer name matches any floor staff (self or second)
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(NULLIF(trim(name), ''), username)
+             FROM users
+             WHERE business_id = ?1
+               AND role IN ('Staff', 'BarStaff', 'KitchenStaff')
+               AND COALESCE(is_active, 1) = 1",
+        )?;
+        let names: Vec<String> = stmt
+            .query_map([business_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let key = Self::normalize_customer_key(&customer_name);
+        for n in names {
+            if Self::normalize_customer_key(&n) == key
+                || Self::normalize_customer_key(&Self::staff_debt_customer_name(&n)) == key
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        Ok(())
     }
 
     pub fn get_sale_receipt(&self, sale_id: i64, business_id: Option<i64>) -> Result<Value> {
@@ -364,7 +681,8 @@ impl Database {
 
         let mut stmt = self.conn.prepare(
             "SELECT si.id, si.product_id, si.quantity, si.unit_price, si.total_price,
-                    COALESCE(p.name, 'Item') as product_name
+                    COALESCE(p.name, 'Item') as product_name,
+                    COALESCE(p.price, 0), COALESCE(p.staff_price, 0)
              FROM sale_items si
              LEFT JOIN products p ON p.id = si.product_id
              WHERE si.sale_id = ?1",
@@ -379,6 +697,8 @@ impl Database {
                     "total_price": row.get::<_, f64>(4)?,
                     "product_name": row.get::<_, String>(5)?,
                     "name": row.get::<_, String>(5)?,
+                    "normal_price": row.get::<_, f64>(6)?,
+                    "staff_price": row.get::<_, f64>(7)?,
                 }))
             })?
             .collect::<Result<Vec<_>>>()?;
@@ -946,6 +1266,7 @@ impl Database {
         if amount <= 0.0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        self.assert_can_edit_debt(business_id, debt_id, staff_id)?;
         let now = chrono::Utc::now().to_rfc3339();
         let (balance, customer_name): (f64, String) = self.conn.query_row(
             "SELECT balance, customer_name FROM customer_debts WHERE id = ?1 AND business_id = ?2",
@@ -1051,6 +1372,28 @@ impl Database {
         staff_id: i64,
         note: Option<&str>,
     ) -> Result<Value> {
+        if self.actor_is_floor_staff(staff_id) {
+            if Self::is_staff_named_debt(customer_name) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let key = Self::normalize_customer_key(customer_name);
+            let mut stmt = self.conn.prepare(
+                "SELECT COALESCE(NULLIF(trim(name), ''), username)
+                 FROM users
+                 WHERE business_id = ?1
+                   AND role IN ('Staff', 'BarStaff', 'KitchenStaff')",
+            )?;
+            for n in stmt
+                .query_map([business_id], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+            {
+                if Self::normalize_customer_key(&n) == key
+                    || Self::normalize_customer_key(&Self::staff_debt_customer_name(&n)) == key
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let sale_id = chrono::Utc::now().timestamp_millis();
         self.create_sale_full(
@@ -1363,8 +1706,11 @@ impl Database {
             }
         }
 
+        // Edits need re-review by secretary/admin
         self.conn.execute(
-            "UPDATE sales SET total_amount = ?1, created_at = ?2, business_id = COALESCE(business_id, ?3) WHERE id = ?4",
+            "UPDATE sales SET total_amount = ?1, created_at = ?2, business_id = COALESCE(business_id, ?3),
+                    review_status = 'PENDING_REVIEW'
+             WHERE id = ?4",
             params![after_total, created_at, business_id, sale_id],
         )?;
 

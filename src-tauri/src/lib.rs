@@ -339,6 +339,7 @@ pub fn run() {
             fix_orphaned_users,
             sync_to_cloud,
             sync_from_cloud,
+            sync_products_from_cloud,
             get_sync_status,
             get_business_staff_count,
             check_business_exists,
@@ -389,6 +390,8 @@ pub fn run() {
             get_sales_log,
             get_sale_receipt,
             void_sale,
+            approve_sale,
+            approve_sales_for_date,
             get_sales_email_preview,
             get_debtors,
             get_debt_sales,
@@ -1502,31 +1505,45 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
         let payment_status = sale.get("payment_status").and_then(|v| v.as_str()).unwrap_or("PENDING");
         let notes = sale.get("notes").and_then(|v| v.as_str());
         let created_at = sale.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let cloud_review = sale
+            .get("review_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("PENDING_REVIEW");
 
-        let exists_status: Option<String> = db.conn.query_row(
-            "SELECT payment_status FROM sales WHERE id = ?1",
+        let exists_row: Option<(String, String)> = db.conn.query_row(
+            "SELECT payment_status, COALESCE(NULLIF(trim(review_status), ''), 'PENDING_REVIEW')
+             FROM sales WHERE id = ?1",
             [id],
-            |row: &rusqlite::Row| row.get::<_, String>(0)
+            |row: &rusqlite::Row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         ).ok();
-        let exists = exists_status.is_some();
-        let local_cancelled = exists_status
-            .as_deref()
-            .map(|s| s.eq_ignore_ascii_case("CANCELLED"))
+        let exists = exists_row.is_some();
+        let local_cancelled = exists_row
+            .as_ref()
+            .map(|(s, _)| s.eq_ignore_ascii_case("CANCELLED"))
             .unwrap_or(false);
+        let local_approved = exists_row
+            .as_ref()
+            .map(|(_, r)| r.eq_ignore_ascii_case("APPROVED"))
+            .unwrap_or(false);
+        let review_status = if local_approved {
+            "APPROVED"
+        } else {
+            cloud_review
+        };
 
         let bid = business_id.map(|v| v.to_string()).unwrap_or_default();
         let location = sale.get("location").and_then(|v| v.as_str()).unwrap_or("fridge");
         if exists {
             if !local_cancelled {
                 db.conn.execute(
-                    "UPDATE sales SET user_id = ?1, business_id = ?2, total_amount = ?3, payment_method = ?4, payment_status = ?5, notes = ?6, created_at = ?7, location = ?8 WHERE id = ?9",
-                    [&user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, location, &id.to_string()]
+                    "UPDATE sales SET user_id = ?1, business_id = ?2, total_amount = ?3, payment_method = ?4, payment_status = ?5, notes = ?6, created_at = ?7, location = ?8, review_status = ?9 WHERE id = ?10",
+                    [&user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, location, review_status, &id.to_string()]
                 ).ok();
             }
         } else {
             db.conn.execute(
-                "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at, location) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                [&id.to_string(), &user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, location]
+                "INSERT INTO sales (id, user_id, business_id, total_amount, payment_method, payment_status, notes, created_at, location, review_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                [&id.to_string(), &user_id.to_string(), &bid, &total_amount.to_string(), payment_method, payment_status, notes.unwrap_or(""), created_at, location, review_status]
             ).ok();
         }
         sales_count += 1;
@@ -1622,6 +1639,142 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
     );
 
     Ok(sync_result)
+}
+
+/// Pull products (and stock) from cloud into the till — for fridge/show moves done online.
+/// Does not pull sales. Prefer Sync now (push) first if you already sold offline.
+#[tauri::command]
+async fn sync_products_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let supabase_url = get_supabase_url();
+    let anon_key = get_supabase_anon_key();
+
+    if supabase_url == "https://your-project.supabase.co" || anon_key.is_empty() {
+        return Err("Supabase not configured. Please set SUPABASE_URL and SUPABASE_ANON_KEY.".to_string());
+    }
+
+    let client = SupabaseClient::new(&supabase_url, &anon_key);
+    let cloud_products = client
+        .fetch_products()
+        .await
+        .map_err(|e| format!("Failed to fetch products: {}", e))?;
+
+    let db = state.db.lock().unwrap();
+    let mut products_count = 0;
+    let mut updated_stock = 0;
+    let mut inserted = 0;
+
+    for product in cloud_products {
+        let id = product.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        if id == 0 {
+            continue;
+        }
+        let business_id = product.get("business_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let name = product.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let description = product.get("description").and_then(|v| v.as_str());
+        let category = product.get("category").and_then(|v| v.as_str()).unwrap_or("BAR");
+        let price = product.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let staff_price = product.get("staff_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let packaging = product.get("packaging").and_then(|v| v.as_str()).unwrap_or("");
+        let cost_price = product.get("cost_price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let stock_quantity = product.get("stock_quantity").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let min_stock_level = product.get("min_stock_level").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let fridge_stock = product.get("fridge_stock").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let show_stock = product.get("show_stock").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let store_stock = product.get("store_stock").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let sports_stock = product
+            .get("sports_stock")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let barcode = product.get("barcode").and_then(|v| v.as_str());
+        let serial_number = product.get("serial_number").and_then(|v| v.as_str());
+        let image_path = product.get("image_path").and_then(|v| v.as_str());
+        let is_active = product.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+        let created_at = product.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+
+        let exists = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM products WHERE id = ?1",
+                [id],
+                |row: &rusqlite::Row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if exists {
+            db.conn
+                .execute(
+                    "UPDATE products SET business_id = ?1, name = ?2, description = ?3, category = ?4,
+                     price = ?5, staff_price = ?6, cost_price = ?7, stock_quantity = ?8, min_stock_level = ?9,
+                     fridge_stock = ?10, show_stock = ?11, store_stock = ?12, sports_stock = ?13,
+                     barcode = ?14, serial_number = ?15, image_path = ?16, packaging = ?17, is_active = ?18,
+                     created_at = ?19 WHERE id = ?20",
+                    [
+                        &business_id.to_string(),
+                        name,
+                        description.unwrap_or(""),
+                        category,
+                        &price.to_string(),
+                        &staff_price.to_string(),
+                        &cost_price.to_string(),
+                        &stock_quantity.to_string(),
+                        &min_stock_level.to_string(),
+                        &fridge_stock.to_string(),
+                        &show_stock.to_string(),
+                        &store_stock.to_string(),
+                        &sports_stock.to_string(),
+                        barcode.unwrap_or(""),
+                        serial_number.unwrap_or(""),
+                        image_path.unwrap_or(""),
+                        packaging,
+                        &(is_active as i64).to_string(),
+                        created_at,
+                        &id.to_string(),
+                    ],
+                )
+                .ok();
+            updated_stock += 1;
+        } else {
+            db.conn
+                .execute(
+                    "INSERT INTO products (id, business_id, name, description, category, price, staff_price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, sports_stock, barcode, serial_number, image_path, packaging, is_active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    [
+                        &id.to_string(),
+                        &business_id.to_string(),
+                        name,
+                        description.unwrap_or(""),
+                        category,
+                        &price.to_string(),
+                        &staff_price.to_string(),
+                        &cost_price.to_string(),
+                        &stock_quantity.to_string(),
+                        &min_stock_level.to_string(),
+                        &fridge_stock.to_string(),
+                        &show_stock.to_string(),
+                        &store_stock.to_string(),
+                        &sports_stock.to_string(),
+                        barcode.unwrap_or(""),
+                        serial_number.unwrap_or(""),
+                        image_path.unwrap_or(""),
+                        packaging,
+                        &(is_active as i64).to_string(),
+                        created_at,
+                    ],
+                )
+                .ok();
+            inserted += 1;
+        }
+        products_count += 1;
+    }
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "products_count": products_count,
+        "updated": updated_stock,
+        "inserted": inserted,
+        "message": "Products and stock pulled from cloud",
+        "last_sync": chrono::Utc::now().to_rfc3339()
+    }))
 }
 
 #[tauri::command]
@@ -2763,6 +2916,52 @@ async fn void_sale(
 }
 
 #[tauri::command]
+async fn approve_sale(
+    state: State<'_, AppState>,
+    sale_id: i64,
+    business_id: i64,
+    actor_user_id: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().unwrap();
+    db.approve_sale(sale_id, business_id, actor_user_id)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("no rows") || msg.contains("QueryReturnedNoRows") {
+                "Sale not found or already approved".into()
+            } else {
+                format!("Failed to approve sale: {}", e)
+            }
+        })
+}
+
+#[tauri::command]
+async fn approve_sales_for_date(
+    state: State<'_, AppState>,
+    business_id: i64,
+    report_date: String,
+    actor_user_id: Option<i64>,
+    expected_amount: Option<f64>,
+    staff_debtor_user_id: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().unwrap();
+    db.approve_sales_for_date(
+        business_id,
+        &report_date,
+        actor_user_id,
+        expected_amount,
+        staff_debtor_user_id,
+    )
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("InvalidQuery") {
+            "When manual amount does not match sales, pick the staff on duty for the shortage debt.".into()
+        } else {
+            format!("Failed to approve sales: {}", e)
+        }
+    })
+}
+
+#[tauri::command]
 async fn get_sales_email_preview(
     state: State<'_, AppState>,
     business_id: i64,
@@ -2826,7 +3025,14 @@ async fn add_manual_debt(
     let note = request.get("note").and_then(|v| v.as_str());
     let db = state.db.lock().unwrap();
     db.add_manual_debt(business_id, customer_name, amount, staff_id, note)
-        .map_err(|e| format!("Failed to add debt: {}", e))
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("InvalidQuery") {
+                "Bar staff cannot add debt against staff names. Ask secretary/admin.".into()
+            } else {
+                format!("Failed to add debt: {}", e)
+            }
+        })
 }
 
 #[tauri::command]
@@ -2856,7 +3062,14 @@ async fn record_debt_payment(
     let note = request.get("note").and_then(|v| v.as_str());
     let db = state.db.lock().unwrap();
     db.record_debt_payment(business_id, debt_id, amount, staff_id, note)
-        .map_err(|e| format!("Failed to record payment: {}", e))
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("InvalidQuery") {
+                "Bar staff cannot edit or pay staff shortage debts (own or second). Ask secretary/admin.".into()
+            } else {
+                format!("Failed to record payment: {}", e)
+            }
+        })
 }
 
 #[tauri::command]

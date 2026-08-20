@@ -1,0 +1,14 @@
+# Web-only deploy: Vite + Supabase. Do not upload the desktop app.
+src-tauri
+src-tauri/**
+dist-desktop
+node_modules
+dist
+.tools
+.cursor
+target
+*.exe
+*.msi
+*.md
+.env
+.env.*

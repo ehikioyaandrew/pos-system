@@ -563,7 +563,8 @@ impl Database {
     pub fn get_all_sales(&self) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.user_id, s.total_amount, s.payment_method, s.payment_status, s.created_at, s.notes, s.business_id,
-                    COALESCE(s.location, 'fridge')
+                    COALESCE(s.location, 'fridge'),
+                    COALESCE(NULLIF(trim(s.review_status), ''), 'PENDING_REVIEW')
              FROM sales s
              ORDER BY s.created_at DESC"
         )?;
@@ -592,6 +593,7 @@ impl Database {
                 "notes": row.get::<_, Option<String>>(6)?,
                 "business_id": bid,
                 "location": row.get::<_, String>(8).unwrap_or_else(|_| "fridge".into()),
+                "review_status": row.get::<_, String>(9).unwrap_or_else(|_| "PENDING_REVIEW".into()),
                 "synced_at": now,
             }))
         })?;

@@ -679,7 +679,10 @@ async function updateSaleDetails(opts: {
 
   const beforeTotal = Number(sale.total_amount || 0)
   const syncedAt = new Date().toISOString()
-  const salePatch: Record<string, unknown> = { synced_at: syncedAt }
+  const salePatch: Record<string, unknown> = {
+    synced_at: syncedAt,
+    review_status: 'PENDING_REVIEW',
+  }
   let createdAt = sale.created_at
 
   if (opts.saleDate) {
@@ -758,7 +761,15 @@ async function updateSaleDetails(opts: {
     .from('sales_backup')
     .update(salePatch)
     .eq('id', saleId)
-  if (updateError) throw new Error(updateError.message)
+  if (updateError) {
+    if (/review_status/i.test(updateError.message) && 'review_status' in salePatch) {
+      delete salePatch.review_status
+      const retry = await supabase.from('sales_backup').update(salePatch).eq('id', saleId)
+      if (retry.error) throw new Error(retry.error.message)
+    } else {
+      throw new Error(updateError.message)
+    }
+  }
 
   const afterTotal =
     salePatch.total_amount != null ? Number(salePatch.total_amount) : beforeTotal
@@ -994,9 +1005,15 @@ async function processSale(request: Record<string, unknown>) {
     created_at: createdAt,
     synced_at: new Date().toISOString(),
     location,
+    review_status: 'PENDING_REVIEW',
   }
 
   let { error: saleError } = await supabase.from('sales_backup').insert(salePayload)
+  if (saleError && /review_status/i.test(saleError.message)) {
+    delete salePayload.review_status
+    const retry = await supabase.from('sales_backup').insert(salePayload)
+    saleError = retry.error
+  }
   if (saleError && /location/i.test(saleError.message)) {
     delete salePayload.location
     const retry = await supabase.from('sales_backup').insert(salePayload)
@@ -1192,12 +1209,326 @@ async function getSalesLog(
     const u = userMap.get(s.user_id)
     return {
       ...s,
+      review_status: String(s.review_status || 'PENDING_REVIEW').toUpperCase() || 'PENDING_REVIEW',
       staff_name: u?.name || u?.username || 'Unknown',
       customer_name: parseDebtCustomer(s.notes) || WALK_IN_CUSTOMER,
     }
   })
 
-  return attachDebtProgressToSales(businessId, userIds, rows)
+  const withDebt = await attachDebtProgressToSales(businessId, userIds, rows)
+  return attachSaleItemsSummary(withDebt)
+}
+
+/** Batch-attach line items so the sales log table can show what was sold. */
+async function attachSaleItemsSummary(sales: any[]) {
+  if (!sales.length) return sales
+  const saleIds = sales.map((s) => Number(s.id)).filter(Boolean)
+  if (!saleIds.length) return sales
+
+  let itemRows: any[] = []
+  const tables = ['sale_items_backup', 'sale_items_sync', 'sale_items']
+  for (const table of tables) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('sale_id, product_id, quantity, unit_price')
+      .in('sale_id', saleIds)
+    if (!error && data) {
+      itemRows = data
+      break
+    }
+  }
+
+  const productIds = [
+    ...new Set(itemRows.map((r) => Number(r.product_id)).filter(Boolean)),
+  ]
+  const nameMap = new Map<number, string>()
+  if (productIds.length) {
+    const { data: products } = await supabase
+      .from('products_backup')
+      .select('id, name')
+      .in('id', productIds)
+    for (const p of products || []) {
+      nameMap.set(Number(p.id), String(p.name || `Product #${p.id}`))
+    }
+  }
+
+  const bySale = new Map<number, any[]>()
+  for (const row of itemRows) {
+    const sid = Number(row.sale_id)
+    const list = bySale.get(sid) || []
+    list.push({
+      name: nameMap.get(Number(row.product_id)) || `Product #${row.product_id}`,
+      quantity: Number(row.quantity || 0),
+      unit_price: Number(row.unit_price || 0),
+    })
+    bySale.set(sid, list)
+  }
+
+  return sales.map((sale) => {
+    const items = bySale.get(Number(sale.id)) || []
+    const summary = items.map((it) => `${it.quantity}×${it.name}`).join(', ')
+    return {
+      ...sale,
+      items,
+      items_summary: summary,
+    }
+  })
+}
+
+async function approveSale(saleId: number, businessId: number, actorUserId?: number | null) {
+  const { data: sale, error } = await supabase
+    .from('sales_backup')
+    .select('id, user_id, payment_status, review_status')
+    .eq('id', saleId)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  if (!sale) throw new Error('Sale not found')
+  if (String(sale.payment_status || '').toUpperCase() === 'CANCELLED') {
+    throw new Error('Cannot approve a voided sale')
+  }
+
+  const { data: staff } = await supabase
+    .from('users_backup')
+    .select('business_id')
+    .eq('id', sale.user_id)
+    .maybeSingle()
+  if (staff && Number(staff.business_id) !== businessId) {
+    throw new Error('Sale does not belong to this business')
+  }
+
+  const { error: updErr } = await supabase
+    .from('sales_backup')
+    .update({
+      review_status: 'APPROVED',
+      synced_at: new Date().toISOString(),
+    })
+    .eq('id', saleId)
+  if (updErr) {
+    if (/review_status/i.test(updErr.message)) {
+      throw new Error(
+        'Run supabase/add_sale_review_status.sql in Supabase first, then try again.'
+      )
+    }
+    throw new Error(updErr.message)
+  }
+
+  void actorUserId
+  return { ok: true, sale_id: saleId, review_status: 'APPROVED' }
+}
+
+async function approveSalesForDate(
+  businessId: number,
+  reportDate: string,
+  actorUserId?: number | null,
+  expectedAmount?: number | null,
+  staffDebtorUserId?: number | null
+) {
+  const dateStr = String(reportDate || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    throw new Error('reportDate must be YYYY-MM-DD')
+  }
+  const fromIso = localDayStartIso(dateStr)
+  const toIso = localDayEndIso(dateStr)
+  if (!fromIso || !toIso) throw new Error('Invalid report date')
+
+  const { data: users, error: usersError } = await supabase
+    .from('users_backup')
+    .select('id, name, username, role')
+    .eq('business_id', businessId)
+  if (usersError) throw new Error(usersError.message)
+  const userIds = (users || []).map((u) => u.id)
+  if (!userIds.length) return { ok: true, count: 0, date: dateStr }
+
+  const { data: sales, error } = await supabase
+    .from('sales_backup')
+    .select('id, payment_status, review_status, total_amount')
+    .in('user_id', userIds)
+    .gte('created_at', fromIso)
+    .lte('created_at', toIso)
+  if (error) throw new Error(error.message)
+
+  const activeSales = (sales || []).filter(
+    (s: any) => String(s.payment_status || '').toUpperCase() !== 'CANCELLED'
+  )
+  const systemTotal = activeSales.reduce(
+    (sum: number, s: any) => sum + Number(s.total_amount || 0),
+    0
+  )
+
+  const pendingIds = activeSales
+    .filter(
+      (s: any) =>
+        String(s.review_status || 'PENDING_REVIEW').toUpperCase() !== 'APPROVED'
+    )
+    .map((s: any) => Number(s.id))
+    .filter(Boolean)
+
+  if (pendingIds.length) {
+    const { error: updErr } = await supabase
+      .from('sales_backup')
+      .update({
+        review_status: 'APPROVED',
+        synced_at: new Date().toISOString(),
+      })
+      .in('id', pendingIds)
+    if (updErr) {
+      if (/review_status/i.test(updErr.message)) {
+        throw new Error(
+          'Run supabase/add_sale_review_status.sql in Supabase first, then try again.'
+        )
+      }
+      throw new Error(updErr.message)
+    }
+  }
+
+  let variance: any = null
+  const expected =
+    expectedAmount != null && Number.isFinite(Number(expectedAmount))
+      ? Number(expectedAmount)
+      : null
+  if (expected != null) {
+    const diff = Math.abs(expected - systemTotal)
+    if (diff > 0.5) {
+      const debtorId = Number(staffDebtorUserId || 0)
+      if (!debtorId) {
+        throw new Error(
+          'When manual amount does not match sales, pick the staff on duty for the shortage debt.'
+        )
+      }
+      const debtor = (users || []).find((u) => Number(u.id) === debtorId)
+      const staffName = String(debtor?.name || debtor?.username || 'Staff').trim()
+      const customerName = staffDebtCustomerName(staffName)
+      const note = `STAFF_SHORTAGE|${dateStr}|system=${systemTotal.toFixed(2)}|manual=${expected.toFixed(2)}|diff=${diff.toFixed(2)}`
+      const debtResult = await chargeStaffTillVariance({
+        businessId,
+        customerName,
+        amount: diff,
+        actorUserId: actorUserId || debtorId,
+        note,
+        entryDate: dateStr,
+      })
+      variance = {
+        system_total: systemTotal,
+        expected_amount: expected,
+        difference: diff,
+        staff_user_id: debtorId,
+        staff_name: staffName,
+        debt_customer: customerName,
+        debt_id: debtResult?.id,
+        balance: debtResult?.balance,
+      }
+    }
+  }
+
+  void actorUserId
+  return {
+    ok: true,
+    count: pendingIds.length,
+    date: dateStr,
+    system_total: systemTotal,
+    variance,
+  }
+}
+
+function staffDebtCustomerName(staffName: string) {
+  return `Staff · ${String(staffName || '').trim()}`
+}
+
+function isStaffNamedDebtName(customerName: string) {
+  const n = String(customerName || '')
+    .trim()
+    .toLowerCase()
+  return n.startsWith('staff ·') || n.startsWith('staff -') || n.startsWith('staff:')
+}
+
+async function chargeStaffTillVariance(opts: {
+  businessId: number
+  customerName: string
+  amount: number
+  actorUserId?: number | null
+  note: string
+  entryDate: string
+}) {
+  const useRemote = await debtsTableAvailable()
+  const account = await findOrCreateDebtAccount({
+    businessId: opts.businessId,
+    customerName: opts.customerName,
+    debtDate: `${opts.entryDate}T12:00:00.000Z`,
+    notes: opts.note,
+    useRemote,
+  })
+  const result = await appendDebtEntry({
+    businessId: opts.businessId,
+    debtId: Number(account.id),
+    entryType: 'TILL_VARIANCE',
+    amount: opts.amount,
+    note: opts.note,
+    entryDate: `${opts.entryDate}T12:00:00.000Z`,
+    staffId: opts.actorUserId,
+    useRemote,
+  })
+  return result.debt
+}
+
+async function assertFloorStaffCannotEditStaffDebt(opts: {
+  businessId: number
+  debtId?: number | null
+  customerName?: string | null
+  actorUserId?: number | null
+}) {
+  const actorId = Number(opts.actorUserId || 0)
+  if (!actorId) return
+  const { data: actor } = await supabase
+    .from('users_backup')
+    .select('id, role, name, username')
+    .eq('id', actorId)
+    .maybeSingle()
+  const role = String(actor?.role || '')
+  if (!['Staff', 'BarStaff', 'KitchenStaff'].includes(role)) return
+
+  let customerName = String(opts.customerName || '').trim()
+  if (!customerName && opts.debtId) {
+    const useRemote = await debtsTableAvailable()
+    if (useRemote) {
+      const { data } = await supabase
+        .from('customer_debts_backup')
+        .select('customer_name')
+        .eq('id', opts.debtId)
+        .eq('business_id', opts.businessId)
+        .maybeSingle()
+      customerName = String(data?.customer_name || '')
+    } else {
+      const row = readLocalDebts(opts.businessId).find(
+        (r) => Number(r.id) === Number(opts.debtId)
+      )
+      customerName = String(row?.customer_name || '')
+    }
+  }
+
+  if (isStaffNamedDebtName(customerName)) {
+    throw new Error(
+      'Bar staff cannot edit or pay staff shortage debts (own or second). Ask secretary/admin.'
+    )
+  }
+
+  const { data: floorStaff } = await supabase
+    .from('users_backup')
+    .select('name, username, role')
+    .eq('business_id', opts.businessId)
+    .in('role', ['Staff', 'BarStaff', 'KitchenStaff'])
+  const key = normalizeCustomerKey(customerName)
+  for (const u of floorStaff || []) {
+    const n = String(u.name || u.username || '').trim()
+    if (!n) continue
+    if (
+      normalizeCustomerKey(n) === key ||
+      normalizeCustomerKey(staffDebtCustomerName(n)) === key
+    ) {
+      throw new Error(
+        'Bar staff cannot edit debt on their name or another bar staff. Ask secretary/admin.'
+      )
+    }
+  }
 }
 
 /** Allocate customer payments FIFO across DEBT sales → per-sale paid / left. */
@@ -1615,7 +1946,7 @@ async function findOrCreateDebtAccount(opts: {
 async function appendDebtEntry(opts: {
   businessId: number
   debtId: number
-  entryType: 'CHARGE' | 'PAYMENT' | 'MANUAL'
+  entryType: 'CHARGE' | 'PAYMENT' | 'MANUAL' | 'TILL_VARIANCE'
   amount: number
   saleId?: number | null
   note?: string | null
@@ -1833,6 +2164,12 @@ async function addManualDebt(request: Record<string, unknown>) {
   if (!customerName) throw new Error('Customer name is required')
   if (!(amount > 0)) throw new Error('Amount must be greater than zero')
 
+  await assertFloorStaffCannotEditStaffDebt({
+    businessId,
+    customerName,
+    actorUserId: staffId,
+  })
+
   const useRemote = await debtsTableAvailable()
   const account = await findOrCreateDebtAccount({
     businessId,
@@ -1865,6 +2202,12 @@ async function recordDebtPayment(request: Record<string, unknown>) {
   if (!businessId) throw new Error('businessId is required')
   if (!debtId) throw new Error('debtId is required')
   if (!(amount > 0)) throw new Error('Payment amount must be greater than zero')
+
+  await assertFloorStaffCannotEditStaffDebt({
+    businessId,
+    debtId,
+    actorUserId: staffId,
+  })
 
   const useRemote = await debtsTableAvailable()
   let debt: any
@@ -3691,6 +4034,41 @@ export async function invoke<T = unknown>(
         if (!saleId) throw new Error('saleId is required')
         if (!businessId) throw new Error('businessId is required')
         return (await voidSale(saleId, businessId)) as T
+      }
+      case 'approve_sale': {
+        const saleId = argNumber(args, 'saleId', 'sale_id')
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        const actorUserId = argNumber(args, 'actorUserId', 'actor_user_id')
+        if (!saleId) throw new Error('saleId is required')
+        if (!businessId) throw new Error('businessId is required')
+        return (await approveSale(saleId, businessId, actorUserId)) as T
+      }
+      case 'approve_sales_for_date': {
+        const businessId = argNumber(args, 'businessId', 'business_id')
+        const reportDate = String(
+          (args as any)?.reportDate ?? (args as any)?.report_date ?? ''
+        ).trim()
+        const actorUserId = argNumber(args, 'actorUserId', 'actor_user_id')
+        const expectedRaw =
+          (args as any)?.expectedAmount ?? (args as any)?.expected_amount
+        const expectedAmount =
+          expectedRaw === null || expectedRaw === undefined || expectedRaw === ''
+            ? null
+            : Number(expectedRaw)
+        const staffDebtorUserId = argNumber(
+          args,
+          'staffDebtorUserId',
+          'staff_debtor_user_id'
+        )
+        if (!businessId) throw new Error('businessId is required')
+        if (!reportDate) throw new Error('reportDate is required')
+        return (await approveSalesForDate(
+          businessId,
+          reportDate,
+          actorUserId,
+          expectedAmount,
+          staffDebtorUserId
+        )) as T
       }
       case 'update_sale_date':
       case 'update_sale_details': {

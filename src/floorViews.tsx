@@ -1602,22 +1602,31 @@ export function SalesLogDashboard({
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [printingId, setPrintingId] = useState<number | null>(null)
-  const [viewingId, setViewingId] = useState<number | null>(null)
-  const [viewReceipt, setViewReceipt] = useState<any | null>(null)
   const [editSale, setEditSale] = useState<any | null>(null)
   const [editDate, setEditDate] = useState('')
   const [editItems, setEditItems] = useState<any[]>([])
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [savingDate, setSavingDate] = useState(false)
   const [voidingId, setVoidingId] = useState<number | null>(null)
+  const [approvingId, setApprovingId] = useState<number | null>(null)
+  const [approvingDay, setApprovingDay] = useState(false)
+  const [approveDayOpen, setApproveDayOpen] = useState(false)
+  const [expectedAmount, setExpectedAmount] = useState('')
+  const [staffDebtorId, setStaffDebtorId] = useState('')
   const [shiftOpen, setShiftOpen] = useState(false)
   const [shiftLoading, setShiftLoading] = useState(false)
   const [shiftPreview, setShiftPreview] = useState<any | null>(null)
   const businessId = currentUser?.business_id || businessInfo?.id
-  const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(
-    String(currentUser?.role || '')
-  )
+  const role = String(currentUser?.role || '')
+  const canApprove = ['Secretary', 'SuperAdmin', 'Manager'].includes(role)
+  const canEditSale = ['Secretary', 'SuperAdmin', 'Manager', 'Staff', 'BarStaff'].includes(role)
+  const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(role)
   const today = toDateInputValue()
+  const singleDay =
+    dateFrom && dateTo && dateFrom === dateTo ? dateFrom : ''
+  const pendingReviewCount = rows.filter(
+    (r) => String(r.review_status || 'PENDING_REVIEW').toUpperCase() !== 'APPROVED'
+  ).length
 
   useEffect(() => {
     if (businessId) void load()
@@ -1676,6 +1685,13 @@ export function SalesLogDashboard({
   }
 
   const openEditDate = async (sale: any) => {
+    if (!canEditSale) return
+    const approved =
+      String(sale?.review_status || '').toUpperCase() === 'APPROVED'
+    if (approved && !canEditSaleDate) {
+      toast.error('This sale is approved — ask secretary/admin to edit it')
+      return
+    }
     setEditSale(sale)
     setEditDate(toDateInputValue(sale?.created_at))
     setEditItems([])
@@ -1727,9 +1743,11 @@ export function SalesLogDashboard({
   }, 0)
 
   const handleSaveSaleDate = async () => {
-    if (!editSale?.id || !editDate) return
+    if (!editSale?.id) return
+    const dateToSave = canEditSaleDate ? editDate : toDateInputValue(editSale.created_at)
+    if (!dateToSave) return
     const today = toDateInputValue()
-    if (editDate > today) {
+    if (dateToSave > today) {
       toast.error('Sale date cannot be in the future')
       return
     }
@@ -1768,7 +1786,7 @@ export function SalesLogDashboard({
       await invoke('update_sale_details', {
         saleId: editSale.id,
         businessId,
-        saleDate: editDate,
+        saleDate: dateToSave,
         actorUserId: currentUser?.id,
         items: expanded,
       })
@@ -1780,33 +1798,6 @@ export function SalesLogDashboard({
       toast.error(`Failed to update sale: ${error}`)
     } finally {
       setSavingDate(false)
-    }
-  }
-
-  const handleView = async (sale: any) => {
-    if (!sale?.id) return
-    try {
-      setViewingId(Number(sale.id))
-      const receipt = (await invoke('get_sale_receipt', {
-        saleId: sale.id,
-        businessId,
-      })) as any
-      setViewReceipt({
-        ...receipt,
-        staff_name: receipt.staff_name || sale.staff_name,
-        customer_name:
-          receipt.customer_name || sale.customer_name || 'Walk-in customer',
-        debt_paid: sale.debt_paid,
-        debt_remaining: sale.debt_remaining,
-        payment_method: receipt.payment_method || sale.payment_method,
-        payment_status: receipt.payment_status || sale.payment_status,
-        total_amount: receipt.total_amount ?? sale.total_amount,
-      })
-    } catch (error) {
-      toast.error(`Failed to load sale: ${error}`)
-      setViewReceipt(null)
-    } finally {
-      setViewingId(null)
     }
   }
 
@@ -1838,7 +1829,9 @@ export function SalesLogDashboard({
     if (!sale?.id) return
     if (
       !window.confirm(
-        `Void sale #${sale.id}?\n\nStock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
+        `Void sale #${sale.id}?
+
+Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
       )
     ) {
       return
@@ -1851,7 +1844,6 @@ export function SalesLogDashboard({
         actorUserId: currentUser?.id,
       })
       toast.success(`Sale #${sale.id} voided · stock returned`)
-      setViewReceipt(null)
       await load()
     } catch (error) {
       toast.error(`Void failed: ${error}`)
@@ -1860,7 +1852,101 @@ export function SalesLogDashboard({
     }
   }
 
+  const handleApprove = async (sale: any) => {
+    if (!sale?.id || !canApprove) return
+    try {
+      setApprovingId(Number(sale.id))
+      await invoke('approve_sale', {
+        saleId: sale.id,
+        businessId,
+        actorUserId: currentUser?.id,
+      })
+      toast.success(`Sale #${sale.id} approved`)
+      await load()
+    } catch (error) {
+      toast.error(`Approve failed: ${error}`)
+    } finally {
+      setApprovingId(null)
+    }
+  }
+
+  const daySales = singleDay
+    ? rows.filter((r) => toDateInputValue(r.created_at) === singleDay)
+    : []
+  const systemTotalForDay = daySales.reduce(
+    (s, r) => s + Number(r.total_amount || 0),
+    0
+  )
+  const dayStaffOptions = (() => {
+    const map = new Map<number, string>()
+    for (const s of daySales) {
+      const id = Number(s.user_id || 0)
+      if (!id) continue
+      map.set(id, String(s.staff_name || `User #${id}`))
+    }
+    return [...map.entries()].map(([id, name]) => ({ id, name }))
+  })()
+  const expectedNum = Number(String(expectedAmount).replace(/,/g, ''))
+  const varianceDiff =
+    expectedAmount.trim() && Number.isFinite(expectedNum)
+      ? Math.abs(expectedNum - systemTotalForDay)
+      : 0
+
+  const openApproveDay = () => {
+    if (!canApprove || !singleDay) return
+    setExpectedAmount('')
+    setStaffDebtorId(
+      dayStaffOptions.length === 1 ? String(dayStaffOptions[0].id) : ''
+    )
+    setApproveDayOpen(true)
+  }
+
+  const handleApproveDay = async () => {
+    if (!canApprove || !singleDay) return
+    const hasExpected = expectedAmount.trim() !== ''
+    if (hasExpected && !(expectedNum >= 0)) {
+      toast.error('Enter a valid expected (manual) amount')
+      return
+    }
+    if (hasExpected && varianceDiff > 0.5 && !staffDebtorId) {
+      toast.error('Pick the staff on duty — the difference will be logged as their debt')
+      return
+    }
+    const confirmMsg = hasExpected && varianceDiff > 0.5
+      ? `Approve ${singleDay}?\n\nSales total: ${money(systemTotalForDay)}\nManual: ${money(expectedNum)}\nDifference: ${money(varianceDiff)}\n\nThis difference will be added as debt against the staff on duty (accumulates until paid).`
+      : `Approve all pending sales for ${singleDay}?\n\nSales total: ${money(systemTotalForDay)}\n\nConfirm they match the manual check & remaining stock.`
+    if (!window.confirm(confirmMsg)) return
+    try {
+      setApprovingDay(true)
+      const result = (await invoke('approve_sales_for_date', {
+        businessId,
+        reportDate: singleDay,
+        actorUserId: currentUser?.id,
+        expectedAmount: hasExpected ? expectedNum : null,
+        staffDebtorUserId: staffDebtorId ? Number(staffDebtorId) : null,
+      })) as {
+        count?: number
+        variance?: { difference?: number; staff_name?: string; balance?: number }
+      }
+      const v = result?.variance
+      if (v?.difference) {
+        toast.success(
+          `Approved ${result?.count ?? 0} · ${money(v.difference)} debt → ${v.staff_name || 'staff'}`
+        )
+      } else {
+        toast.success(`Approved ${result?.count ?? 0} sale(s) for ${singleDay}`)
+      }
+      setApproveDayOpen(false)
+      await load()
+    } catch (error) {
+      toast.error(`Approve day failed: ${error}`)
+    } finally {
+      setApprovingDay(false)
+    }
+  }
+
   const openShiftReport = async () => {
+
     setShiftOpen(true)
     setShiftLoading(true)
     try {
@@ -1885,6 +1971,8 @@ export function SalesLogDashboard({
       String(r.staff_name || '').toLowerCase().includes(q) ||
       String(r.payment_method || '').toLowerCase().includes(q) ||
       String(r.payment_status || '').toLowerCase().includes(q) ||
+      String(r.items_summary || '').toLowerCase().includes(q) ||
+      String(r.review_status || '').toLowerCase().includes(q) ||
       String(r.id).includes(q) ||
       saleCustomerName(r).toLowerCase().includes(q)
     )
@@ -1912,10 +2000,26 @@ export function SalesLogDashboard({
               Sales log
             </h1>
             <p className="mt-2 text-[#2a3d36]/70">
-              {ownOnly ? 'Your recent sales.' : 'Recent sales for this business.'}
+              {ownOnly
+                ? 'Your recent sales — items shown in the list. Edit normal/staff split or void if needed.'
+                : canApprove
+                  ? 'Review pushed sales, match the manual check & remaining stock, then approve the day.'
+                  : 'Recent sales for this business.'}
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            {canApprove && singleDay && (
+              <button
+                type="button"
+                onClick={() => openApproveDay()}
+                disabled={approvingDay || pendingReviewCount === 0}
+                className="border border-teal-700/30 bg-teal-50 text-teal-900 hover:bg-teal-100 px-4 py-2.5 rounded-md text-sm font-semibold disabled:opacity-50"
+              >
+                {approvingDay
+                  ? 'Approving…'
+                  : `Approve day (${pendingReviewCount} pending)`}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void openShiftReport()}
@@ -2023,7 +2127,10 @@ export function SalesLogDashboard({
         </div>
 
         <div className="md:hidden space-y-3">
-          {filtered.map((sale) => (
+          {filtered.map((sale) => {
+            const approved =
+              String(sale.review_status || '').toUpperCase() === 'APPROVED'
+            return (
             <article key={sale.id} className="rounded-xl border border-[#d4dcd8] bg-white p-4">
               <div className="flex justify-between gap-3 items-start">
                 <p className="font-semibold text-[#121c19]">#{sale.id}</p>
@@ -2031,26 +2138,40 @@ export function SalesLogDashboard({
               </div>
               <p className="text-sm text-[#121c19] mt-1">{saleCustomerName(sale)}</p>
               <p className="text-sm text-[#2a3d36]/60 mt-0.5">{sale.staff_name}</p>
+              <p className="text-xs text-[#2a3d36]/70 mt-2 leading-snug">
+                {sale.items_summary || '—'}
+              </p>
               <p className="text-xs text-[#2a3d36]/45 mt-2">{formatWhen(sale.created_at)}</p>
               <div className="mt-3 flex flex-wrap gap-2 items-center">
                 <PaymentMethodBadge method={sale.payment_method} />
                 <SaleStatusBadge status={sale.payment_status} method={sale.payment_method} />
+                <span
+                  className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${
+                    approved
+                      ? 'border-teal-200 bg-teal-50 text-teal-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-900'
+                  }`}
+                >
+                  {approved ? 'Approved' : 'Pending review'}
+                </span>
                 <div className="ml-auto flex flex-wrap gap-2 justify-end">
-                  <button
-                    type="button"
-                    onClick={() => void handleView(sale)}
-                    disabled={viewingId === Number(sale.id)}
-                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
-                  >
-                    {viewingId === Number(sale.id) ? 'Loading…' : 'View'}
-                  </button>
-                  {canEditSaleDate && (
+                  {canEditSale && (
                     <button
                       type="button"
                       onClick={() => openEditDate(sale)}
                       className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5]"
                     >
                       Edit
+                    </button>
+                  )}
+                  {canApprove && !approved && (
+                    <button
+                      type="button"
+                      onClick={() => void handleApprove(sale)}
+                      disabled={approvingId === Number(sale.id)}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-md border border-teal-200 text-teal-900 hover:bg-teal-50 disabled:opacity-50"
+                    >
+                      {approvingId === Number(sale.id) ? '…' : 'Approve'}
                     </button>
                   )}
                   <button
@@ -2072,7 +2193,8 @@ export function SalesLogDashboard({
                 </div>
               </div>
             </article>
-          ))}
+            )
+          })}
         </div>
 
         <div className="hidden md:block rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
@@ -2081,6 +2203,7 @@ export function SalesLogDashboard({
               <tr>
                 <th className="px-5 py-3 font-semibold">Sale</th>
                 <th className="px-5 py-3 font-semibold">Customer</th>
+                <th className="px-5 py-3 font-semibold">Items</th>
                 <th className="px-5 py-3 font-semibold">Staff</th>
                 <th className="px-5 py-3 font-semibold">Method</th>
                 <th className="px-5 py-3 font-semibold">Status</th>
@@ -2090,16 +2213,35 @@ export function SalesLogDashboard({
               </tr>
             </thead>
             <tbody className="divide-y divide-[#e8ecea]">
-              {filtered.map((sale) => (
+              {filtered.map((sale) => {
+                const approved =
+                  String(sale.review_status || '').toUpperCase() === 'APPROVED'
+                return (
                 <tr key={sale.id} className="hover:bg-[#f4f6f5]/70">
                   <td className="px-5 py-4 font-semibold text-[#121c19]">#{sale.id}</td>
                   <td className="px-5 py-4 text-[#121c19]">{saleCustomerName(sale)}</td>
+                  <td className="px-5 py-4 text-sm text-[#2a3d36]/75 max-w-[14rem]">
+                    <span className="line-clamp-3" title={sale.items_summary || ''}>
+                      {sale.items_summary || '—'}
+                    </span>
+                  </td>
                   <td className="px-5 py-4 text-[#2a3d36]/70">{sale.staff_name}</td>
                   <td className="px-5 py-4">
                     <PaymentMethodBadge method={sale.payment_method} />
                   </td>
                   <td className="px-5 py-4">
-                    <SaleStatusBadge status={sale.payment_status} method={sale.payment_method} />
+                    <div className="flex flex-col gap-1.5 items-start">
+                      <SaleStatusBadge status={sale.payment_status} method={sale.payment_method} />
+                      <span
+                        className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md border ${
+                          approved
+                            ? 'border-teal-200 bg-teal-50 text-teal-800'
+                            : 'border-amber-200 bg-amber-50 text-amber-900'
+                        }`}
+                      >
+                        {approved ? 'Approved' : 'Pending'}
+                      </span>
+                    </div>
                   </td>
                   <td className="px-5 py-4 text-right">
                     <div className="inline-flex justify-end">
@@ -2111,21 +2253,23 @@ export function SalesLogDashboard({
                   </td>
                   <td className="px-5 py-4 text-right">
                     <div className="inline-flex flex-wrap gap-2 justify-end">
-                      <button
-                        type="button"
-                        onClick={() => void handleView(sale)}
-                        disabled={viewingId === Number(sale.id)}
-                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-50"
-                      >
-                        {viewingId === Number(sale.id) ? 'Loading…' : 'View'}
-                      </button>
-                      {canEditSaleDate && (
+                      {canEditSale && (
                         <button
                           type="button"
                           onClick={() => openEditDate(sale)}
                           className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5]"
                         >
                           Edit
+                        </button>
+                      )}
+                      {canApprove && !approved && (
+                        <button
+                          type="button"
+                          onClick={() => void handleApprove(sale)}
+                          disabled={approvingId === Number(sale.id)}
+                          className="text-xs font-semibold px-3 py-1.5 rounded-md border border-teal-200 text-teal-900 hover:bg-teal-50 disabled:opacity-50"
+                        >
+                          {approvingId === Number(sale.id) ? '…' : 'Approve'}
                         </button>
                       )}
                       <button
@@ -2147,7 +2291,8 @@ export function SalesLogDashboard({
                     </div>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
           {filtered.length === 0 && (
@@ -2156,154 +2301,88 @@ export function SalesLogDashboard({
         </div>
       </div>
 
-      {viewReceipt && (
+      {approveDayOpen && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
           <button
             type="button"
             className="absolute inset-0 bg-[#121c19]/55"
-            onClick={() => setViewReceipt(null)}
+            onClick={() => !approvingDay && setApproveDayOpen(false)}
           />
           <div className="relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="font-display text-xl font-bold text-[#121c19]">
-                  Sale #{viewReceipt.id}
-                </h2>
-                <p className="mt-1 text-sm text-[#2a3d36]/70">
-                  {formatWhen(viewReceipt.created_at)}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setViewReceipt(null)}
-                className="text-sm font-semibold px-3 py-1.5 rounded-md border border-[#d4dcd8] hover:bg-[#f4f6f5]"
-              >
-                Close
-              </button>
+            <h2 className="font-display text-xl font-bold text-[#121c19]">
+              Approve day · {singleDay}
+            </h2>
+            <p className="text-sm text-[#2a3d36]/70">
+              Compare POS sales to your manual check. If they differ, enter the manual total —
+              the difference is logged as debt against the staff on duty and keeps growing until paid.
+            </p>
+            <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                Sales total (system)
+              </p>
+              <p className="mt-1 font-display text-2xl font-bold text-[#121c19]">
+                {money(systemTotalForDay)}
+              </p>
+              <p className="mt-1 text-xs text-[#2a3d36]/55">
+                {daySales.length} sale(s) · {pendingReviewCount} pending review
+              </p>
             </div>
-
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
-                  Customer
-                </p>
-                <p className="mt-1 font-semibold text-[#121c19]">
-                  {saleCustomerName(viewReceipt)}
-                </p>
-              </div>
-              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
-                  Staff
-                </p>
-                <p className="mt-1 font-semibold text-[#121c19]">
-                  {viewReceipt.staff_name || '—'}
-                </p>
-              </div>
-              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
-                  Method
-                </p>
-                <div className="mt-2">
-                  <PaymentMethodBadge method={viewReceipt.payment_method} />
-                </div>
-              </div>
-              <div className="rounded-lg border border-[#e8ecea] bg-[#f4f6f5] p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
-                  Status
-                </p>
-                <div className="mt-2">
-                  <SaleStatusBadge
-                    status={viewReceipt.payment_status}
-                    method={viewReceipt.payment_method}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {String(viewReceipt.payment_method || '').toUpperCase() === 'DEBT' && (
-              <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-orange-800/70 mb-3">
-                  Debt progress
-                </p>
-                <div className="flex justify-end">
-                  <DebtProgressBlock sale={viewReceipt} />
-                </div>
-              </div>
-            )}
-
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 mb-2">
-                Items sold
-              </p>
-              <div className="rounded-xl border border-[#d4dcd8] overflow-hidden">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-[#f4f6f5] text-[11px] uppercase tracking-wide text-[#2a3d36]/50">
-                    <tr>
-                      <th className="px-3 py-2.5 text-left font-semibold">Item</th>
-                      <th className="px-3 py-2.5 text-right font-semibold">Qty</th>
-                      <th className="px-3 py-2.5 text-right font-semibold">Price</th>
-                      <th className="px-3 py-2.5 text-right font-semibold">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#e8ecea]">
-                    {(Array.isArray(viewReceipt.items) ? viewReceipt.items : []).map(
-                      (item: any, idx: number) => (
-                        <tr key={`${item.product_id || idx}-${idx}`}>
-                          <td className="px-3 py-3 font-medium text-[#121c19]">
-                            {item.name || `Product #${item.product_id || '—'}`}
-                          </td>
-                          <td className="px-3 py-3 text-right text-[#2a3d36]/80">
-                            {Number(item.quantity || 0)}
-                          </td>
-                          <td className="px-3 py-3 text-right text-[#2a3d36]/80">
-                            {money(item.unit_price)}
-                          </td>
-                          <td className="px-3 py-3 text-right font-semibold text-[#121c19]">
-                            {money(item.total_price)}
-                          </td>
-                        </tr>
-                      )
-                    )}
-                  </tbody>
-                </table>
-                {(!viewReceipt.items || viewReceipt.items.length === 0) && (
-                  <p className="px-3 py-8 text-center text-[#2a3d36]/50">
-                    No line items found for this sale
+              <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                Manual / expected amount
+              </label>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={expectedAmount}
+                onChange={(e) => setExpectedAmount(e.target.value)}
+                placeholder="Leave blank if it matches"
+                className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+              />
+            </div>
+            {varianceDiff > 0.5 && (
+              <>
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                  <p className="text-sm font-semibold text-amber-950">
+                    Difference {money(varianceDiff)} → staff debt
                   </p>
-                )}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between border-t border-[#e8ecea] pt-4">
-              <p className="text-sm font-semibold text-[#2a3d36]/60">Sale total</p>
-              <p className="font-display text-2xl font-bold text-[#121c19]">
-                {money(viewReceipt.total_amount)}
-              </p>
-            </div>
-
-            <div className="flex gap-3">
+                </div>
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                    Staff on duty
+                  </label>
+                  <select
+                    value={staffDebtorId}
+                    onChange={(e) => setStaffDebtorId(e.target.value)}
+                    className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8] bg-white"
+                  >
+                    <option value="">Select staff…</option>
+                    {dayStaffOptions.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            )}
+            <div className="flex gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setViewReceipt(null)}
-                className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold"
+                disabled={approvingDay}
+                onClick={() => setApproveDayOpen(false)}
+                className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold disabled:opacity-50"
               >
-                Close
+                Cancel
               </button>
               <button
                 type="button"
-                onClick={() => void handlePrint(viewReceipt)}
-                disabled={printingId === Number(viewReceipt.id)}
-                className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
+                disabled={approvingDay}
+                onClick={() => void handleApproveDay()}
+                className="flex-1 bg-teal-700 hover:bg-teal-800 text-white py-3 rounded-lg font-semibold disabled:opacity-50"
               >
-                {printingId === Number(viewReceipt.id) ? 'Printing…' : 'Print'}
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleVoid(viewReceipt)}
-                disabled={voidingId === Number(viewReceipt.id)}
-                className="flex-1 border border-rose-200 text-rose-800 py-3 rounded-lg font-semibold disabled:opacity-50"
-              >
-                {voidingId === Number(viewReceipt.id) ? 'Voiding…' : 'Void'}
+                {approvingDay ? 'Approving…' : 'Confirm approve'}
               </button>
             </div>
           </div>
@@ -2386,10 +2465,14 @@ export function SalesLogDashboard({
                 value={editDate}
                 max={toDateInputValue()}
                 onChange={(e) => setEditDate(e.target.value)}
-                className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+                disabled={!canEditSaleDate}
+                readOnly={!canEditSaleDate}
+                className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8] disabled:bg-[#f4f6f5] disabled:text-[#2a3d36]/60"
               />
               <p className="mt-2 text-xs text-[#2a3d36]/50">
-                Current: {formatWhen(editSale.created_at)}. Future dates are not allowed.
+                {canEditSaleDate
+                  ? `Current: ${formatWhen(editSale.created_at)}. Future dates are not allowed.`
+                  : 'Date locked — change staff vs normal qty below.'}
               </p>
             </div>
 
@@ -2544,12 +2627,33 @@ export function DebtManagementDashboard({
   ownOnly?: boolean
 }) {
   const [rows, setRows] = useState<any[]>([])
+  const [staffNames, setStaffNames] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [showAddDebt, setShowAddDebt] = useState(false)
   const [payTarget, setPayTarget] = useState<any | null>(null)
   const [saving, setSaving] = useState(false)
   const businessId = currentUser?.business_id || businessInfo?.id
+  const role = String(currentUser?.role || '')
+  const canManageStaffDebts = ['Secretary', 'SuperAdmin', 'Manager'].includes(role)
+  const isFloorStaff = ['Staff', 'BarStaff', 'KitchenStaff'].includes(role)
+
+  const isProtectedStaffDebt = (debt: any) => {
+    const name = String(debt?.customer_name || '').trim()
+    const lower = name.toLowerCase()
+    if (
+      lower.startsWith('staff ·') ||
+      lower.startsWith('staff -') ||
+      lower.startsWith('staff:')
+    ) {
+      return true
+    }
+    const key = name.toLowerCase().replace(/\s+/g, ' ')
+    return staffNames.some((n) => {
+      const sn = n.toLowerCase().replace(/\s+/g, ' ')
+      return sn === key || `staff · ${sn}` === key || `staff - ${sn}` === key
+    })
+  }
 
   useEffect(() => {
     if (businessId) void load()
@@ -2559,11 +2663,21 @@ export function DebtManagementDashboard({
   const load = async () => {
     try {
       setLoading(true)
-      const data = (await invoke('get_debtors', {
-        businessId,
-        openOnly: true,
-        staffId: ownOnly ? currentUser?.id : null,
-      })) as any[]
+      const [data, users] = await Promise.all([
+        invoke('get_debtors', {
+          businessId,
+          openOnly: true,
+          staffId: ownOnly ? currentUser?.id : null,
+        }) as Promise<any[]>,
+        invoke('get_users_for_business', { businessId }).catch(() => []) as Promise<any[]>,
+      ])
+      const names = (Array.isArray(users) ? users : [])
+        .filter((u) =>
+          ['Staff', 'BarStaff', 'KitchenStaff'].includes(String(u.role || ''))
+        )
+        .map((u) => String(u.name || u.username || '').trim())
+        .filter(Boolean)
+      setStaffNames(names)
       setRows(Array.isArray(data) ? data : [])
     } catch (error) {
       toast.error(`Failed to load debts: ${error}`)
@@ -2593,6 +2707,18 @@ export function DebtManagementDashboard({
   }) => {
     try {
       setSaving(true)
+      if (isFloorStaff && !canManageStaffDebts) {
+        const name = form.customerName.trim()
+        if (
+          isProtectedStaffDebt({ customer_name: name }) ||
+          isProtectedStaffDebt({ customer_name: `Staff · ${name}` })
+        ) {
+          toast.error(
+            'Bar staff cannot add debt against staff names. Ask secretary/admin.'
+          )
+          return
+        }
+      }
       await invoke('add_manual_debt', {
         request: {
           business_id: businessId,
@@ -2617,6 +2743,12 @@ export function DebtManagementDashboard({
 
   const handleRecordPayment = async (amount: string) => {
     if (!payTarget) return
+    if (isFloorStaff && isProtectedStaffDebt(payTarget)) {
+      toast.error(
+        'Bar staff cannot pay staff shortage debts (own or second). Ask secretary/admin.'
+      )
+      return
+    }
     try {
       setSaving(true)
       const updated = (await invoke('record_debt_payment', {
@@ -2646,6 +2778,12 @@ export function DebtManagementDashboard({
     const balance = Number(debt.balance || 0)
     if (!(balance > 0)) {
       toast.error('Nothing left to pay')
+      return
+    }
+    if (isFloorStaff && isProtectedStaffDebt(debt)) {
+      toast.error(
+        'Bar staff cannot clear staff shortage debts. Ask secretary/admin.'
+      )
       return
     }
     if (
@@ -2697,8 +2835,10 @@ export function DebtManagementDashboard({
             </h1>
             <p className="mt-2 text-[#2a3d36]/70">
               {ownOnly
-                ? 'Your debt customers and balances from sales you charged on credit.'
-                : 'Track customer balances, add old debts, and record payments.'}
+                ? 'Your debt customers from credit sales. Staff shortage debts can only be cleared by secretary/admin.'
+                : canManageStaffDebts
+                  ? 'Customer credit and staff till shortages (Staff · name). Shortage balances accumulate until paid.'
+                  : 'Track customer balances, add old debts, and record payments.'}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -2709,13 +2849,15 @@ export function DebtManagementDashboard({
             >
               Refresh
             </button>
-            <button
-              type="button"
-              onClick={() => setShowAddDebt(true)}
-              className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2.5 rounded-md text-sm font-semibold"
-            >
-              + Add old debt
-            </button>
+            {(canManageStaffDebts || !isFloorStaff || ownOnly) && (
+              <button
+                type="button"
+                onClick={() => setShowAddDebt(true)}
+                className="bg-[#121c19] hover:bg-[#1a2924] text-white px-4 py-2.5 rounded-md text-sm font-semibold"
+              >
+                + Add old debt
+              </button>
+            )}
           </div>
         </header>
 
@@ -2750,9 +2892,18 @@ export function DebtManagementDashboard({
         ) : (
           <>
             <div className="md:hidden space-y-3">
-              {filtered.map((debt) => (
+              {filtered.map((debt) => {
+                const protectedDebt = isFloorStaff && isProtectedStaffDebt(debt)
+                return (
                 <article key={debt.id} className="rounded-xl border border-[#d4dcd8] bg-white p-4">
-                  <p className="font-semibold text-[#121c19]">{debt.customer_name}</p>
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-semibold text-[#121c19]">{debt.customer_name}</p>
+                    {isProtectedStaffDebt(debt) && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-900">
+                        Staff shortage
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-[#2a3d36]/45 mt-1">
                     Since {formatWhen(debt.debt_date || debt.created_at)}
                   </p>
@@ -2770,6 +2921,11 @@ export function DebtManagementDashboard({
                       <p className="text-sm font-bold text-[#c4783a]">{money(debt.balance)}</p>
                     </div>
                   </div>
+                  {protectedDebt ? (
+                    <p className="mt-4 text-xs text-[#2a3d36]/55 text-center">
+                      Only secretary/admin can clear staff shortage debts.
+                    </p>
+                  ) : (
                   <div className="mt-4 grid grid-cols-2 gap-2">
                     <button
                       type="button"
@@ -2788,8 +2944,10 @@ export function DebtManagementDashboard({
                       Mark as paid
                     </button>
                   </div>
+                  )}
                 </article>
-              ))}
+                )
+              })}
             </div>
 
             <div className="hidden md:block rounded-xl border border-[#d4dcd8] bg-white overflow-hidden">
@@ -2805,10 +2963,19 @@ export function DebtManagementDashboard({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e8ecea]">
-                  {filtered.map((debt) => (
+                  {filtered.map((debt) => {
+                    const protectedDebt = isFloorStaff && isProtectedStaffDebt(debt)
+                    return (
                     <tr key={debt.id} className="hover:bg-[#f4f6f5]/70">
                       <td className="px-5 py-4 font-semibold text-[#121c19]">
-                        {debt.customer_name}
+                        <div className="flex flex-col gap-1 items-start">
+                          <span>{debt.customer_name}</span>
+                          {isProtectedStaffDebt(debt) && (
+                            <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md border border-amber-200 bg-amber-50 text-amber-900">
+                              Staff shortage
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-5 py-4 text-right">{money(debt.total_charged)}</td>
                       <td className="px-5 py-4 text-right text-teal-800 font-semibold">
@@ -2821,6 +2988,9 @@ export function DebtManagementDashboard({
                         {formatWhen(debt.debt_date || debt.created_at)}
                       </td>
                       <td className="px-5 py-4 text-right">
+                        {protectedDebt ? (
+                          <span className="text-xs text-[#2a3d36]/50">Secretary/admin only</span>
+                        ) : (
                         <div className="inline-flex flex-wrap gap-2 justify-end">
                           <button
                             type="button"
@@ -2839,9 +3009,11 @@ export function DebtManagementDashboard({
                             Mark as paid
                           </button>
                         </div>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

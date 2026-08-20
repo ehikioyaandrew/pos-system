@@ -6,7 +6,9 @@ Update feed:
 
 `https://github.com/ehikioyaandrew/pos-system/releases/latest/download/latest.json`
 
-GitHub Actions builds the MSI and **`latest.json`** — you do not edit the JSON by hand.
+GitHub Actions builds the setup.exe and **`latest.json`** — you do not edit the JSON by hand.
+
+**Private repo note:** If the GitHub repo is private, shop PCs cannot download `latest.json` (they get 404). **Check for updates** then shows a friendly message; the till still works. Fixes: make the repo public, or host `latest.json` + the installer on a public URL and point `tauri.conf.json` `plugins.updater.endpoints` at that URL. Until then, distribute new installs by sharing the `-setup.exe` manually.
 
 ---
 
