@@ -345,6 +345,10 @@ impl SupabaseClient {
         self.upsert_table("activity_logs_backup", rows).await
     }
 
+    pub async fn upsert_inventory_transactions(&self, rows: Vec<Value>) -> Result<(), String> {
+        self.upsert_table("inventory_transactions_backup", rows).await
+    }
+
     pub async fn fetch_activity_logs(&self) -> Result<Vec<Value>, String> {
         self.fetch_table("activity_logs_backup").await
     }

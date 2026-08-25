@@ -619,6 +619,28 @@ impl Database {
         item_iter.collect()
     }
 
+    pub fn get_all_inventory_transactions(&self) -> Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, product_id, transaction_type, quantity, reason, user_id, created_at
+             FROM inventory_transactions
+             ORDER BY id",
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let iter = stmt.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "product_id": row.get::<_, i64>(1)?,
+                "transaction_type": row.get::<_, String>(2)?,
+                "quantity": row.get::<_, i32>(3)?,
+                "reason": row.get::<_, Option<String>>(4)?,
+                "user_id": row.get::<_, i64>(5)?,
+                "created_at": row.get::<_, String>(6)?,
+                "synced_at": now,
+            }))
+        })?;
+        iter.collect()
+    }
+
     pub fn get_all_products(&self) -> Result<Vec<Product>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, business_id, name, description, category, price, cost_price, stock_quantity, min_stock_level, fridge_stock, show_stock, store_stock, barcode, serial_number, image_path, is_active, created_at, COALESCE(staff_price, 0), packaging 

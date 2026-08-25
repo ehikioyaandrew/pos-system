@@ -994,16 +994,17 @@ impl Database {
                         if qty <= 0 {
                             continue;
                         }
-                        let into = t.contains("TO_FRIDGE");
+                        let into_fridge = t.contains("TO_FRIDGE");
+                        let into_show = t.contains("TO_SHOW");
                         let out_store = t.contains("TRANSFER_STORE")
                             || t.contains("TO_FRIDGE")
                             || t.contains("TO_SHOW");
                         if on_day {
-                            if into {
+                            if into_fridge || into_show {
                                 *new_fridge.entry(pid).or_insert(0) += qty;
                             }
                         } else {
-                            if into {
+                            if into_fridge || into_show {
                                 *new_fridge_after.entry(pid).or_insert(0) += qty;
                             }
                             if out_store {
@@ -1120,6 +1121,11 @@ impl Database {
                 sold_ids.push(*id);
             }
         }
+        for id in new_fridge.keys() {
+            if !sold_ids.contains(id) {
+                sold_ids.push(*id);
+            }
+        }
         let mut sold: Vec<Value> = sold_ids
             .into_iter()
             .map(|id| {
@@ -1156,6 +1162,48 @@ impl Database {
             ba.cmp(&aa)
         });
 
+        let mut moves: Vec<Value> = Vec::new();
+        if let Ok(mut mstmt) = self.conn.prepare(
+            "SELECT COALESCE(p.name, 'Item'), it.quantity, it.transaction_type,
+                    COALESCE(NULLIF(u.name, ''), u.username, 'Staff'), it.created_at
+             FROM inventory_transactions it
+             JOIN products p ON p.id = it.product_id
+             LEFT JOIN users u ON u.id = it.user_id
+             WHERE p.business_id = ?1
+               AND date(it.created_at) = date(?2)
+               AND upper(it.transaction_type) LIKE 'TRANSFER%'
+             ORDER BY it.created_at",
+        ) {
+            if let Ok(mrows) = mstmt.query_map(params![business_id, report_date], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            }) {
+                for mr in mrows.flatten() {
+                    let (name, qty, typ, who, at) = mr;
+                    let t = typ.to_uppercase();
+                    let dest = if t.contains("TO_SHOW") {
+                        "show"
+                    } else if t.contains("TO_FRIDGE") {
+                        "fridge"
+                    } else {
+                        "fridge"
+                    };
+                    moves.push(serde_json::json!({
+                        "name": name,
+                        "quantity": qty,
+                        "to": dest,
+                        "staff_name": who,
+                        "created_at": at,
+                    }));
+                }
+            }
+        }
+
         Ok(serde_json::json!({
             "periodLabel": report_date,
             "kind": "daily",
@@ -1164,6 +1212,7 @@ impl Database {
             "normal": { "total": normal_total, "lines": normal_lines },
             "staff": { "total": staff_total, "lines": staff_lines },
             "sold": sold,
+            "stock_moves": moves,
         }))
     }
 
@@ -1461,7 +1510,7 @@ impl Database {
              ORDER BY a.created_at DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![business_id, limit.max(1).min(300)], |row| {
+        let rows = stmt.query_map(params![business_id, limit.max(1).min(400)], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, i64>(0)?,
                 "business_id": row.get::<_, i64>(1)?,
@@ -1485,7 +1534,11 @@ impl Database {
             let after = v.get("after_json").and_then(|x| x.as_str()).unwrap_or("").to_lowercase();
             let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
             let entity = v.get("entity_type").and_then(|x| x.as_str()).unwrap_or("");
-            if action.to_uppercase().starts_with("SALE") || entity.eq_ignore_ascii_case("sale") {
+            let action_u = action.to_uppercase();
+            let sale_audit = action_u == "SALE_VOIDED"
+                || action_u == "SALE_EDITED"
+                || action_u == "SALE_EDITED";
+            if (action_u.starts_with("SALE") || entity.eq_ignore_ascii_case("sale")) && !sale_audit {
                 continue;
             }
             if hidden || summary.contains("admin2") || after.contains("\"username\":\"admin2\"") {
@@ -1529,8 +1582,13 @@ impl Database {
         before_json: Option<&str>,
         after_json: Option<&str>,
     ) -> Result<()> {
-        // Sales stay on the sales log — do not write SALE* to audit
-        if action.to_uppercase().starts_with("SALE") {
+        // Completed sales stay on the sales log. Voids/edits and stock moves go to audit.
+        let action_u = action.to_uppercase();
+        if action_u.starts_with("SALE")
+            && action_u != "SALE_VOIDED"
+            && action_u != "SALE_EDITED"
+            && action_u != "SALE_EDITED"
+        {
             return Ok(());
         }
         // Skip audit for ghost/support users
@@ -1656,10 +1714,12 @@ impl Database {
         if let Some(price_updates) = items {
             if !price_updates.is_empty() {
                 let mut stmt = self.conn.prepare(
-                    "SELECT product_id, quantity FROM sale_items WHERE sale_id = ?1",
+                    "SELECT id, product_id, quantity, unit_price FROM sale_items WHERE sale_id = ?1 ORDER BY id",
                 )?;
-                let existing: Vec<(i64, i32)> = stmt
-                    .query_map([sale_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                let existing: Vec<(i64, i64, i32, f64)> = stmt
+                    .query_map([sale_id], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
                     .collect::<Result<Vec<_>>>()?;
                 if existing.is_empty() {
                     return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1667,7 +1727,7 @@ impl Database {
 
                 let mut original_qty: std::collections::HashMap<i64, i32> =
                     std::collections::HashMap::new();
-                for (pid, qty) in &existing {
+                for (_id, pid, qty, _unit) in &existing {
                     *original_qty.entry(*pid).or_insert(0) += qty;
                 }
 
@@ -1714,29 +1774,72 @@ impl Database {
                     }
                 }
 
-                self.conn
-                    .execute("DELETE FROM sale_items WHERE sale_id = ?1", [sale_id])?;
+                // Date-only (or unchanged split): do not rewrite lines.
+                // Delete+insert with new IDs made sync upsert extra rows in the cloud.
+                let mut existing_sig: Vec<(i64, i32, i64)> = existing
+                    .iter()
+                    .map(|(_id, pid, qty, unit)| (*pid, *qty, (unit * 1000.0).round() as i64))
+                    .collect();
+                let mut next_sig: Vec<(i64, i32, i64)> = next_lines
+                    .iter()
+                    .map(|(pid, qty, unit)| (*pid, *qty, (unit * 1000.0).round() as i64))
+                    .collect();
+                existing_sig.sort();
+                next_sig.sort();
+                let lines_changed = existing_sig != next_sig;
 
-                let base_id = chrono::Utc::now().timestamp_millis();
-                after_total = 0.0;
-                let mut saved = Vec::new();
-                for (i, (pid, qty, unit)) in next_lines.iter().enumerate() {
-                    let line_total = (*qty as f64) * unit;
-                    after_total += line_total;
-                    let item_id = base_id + i as i64 + 1;
-                    self.conn.execute(
-                        "INSERT INTO sale_items (id, sale_id, product_id, quantity, unit_price, total_price)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![item_id, sale_id, pid, qty, unit, line_total],
-                    )?;
-                    saved.push(serde_json::json!({
-                        "product_id": pid,
-                        "quantity": qty,
-                        "unit_price": unit,
-                        "total_price": line_total,
-                    }));
+                if lines_changed {
+                    let mut unused = existing;
+                    after_total = 0.0;
+                    let mut saved = Vec::new();
+                    let mut extra = 0i64;
+                    for (pid, qty, unit) in &next_lines {
+                        let line_total = (*qty as f64) * unit;
+                        after_total += line_total;
+                        let reuse_idx = unused
+                            .iter()
+                            .position(|(_id, epid, _, _)| *epid == *pid)
+                            .or_else(|| if unused.is_empty() { None } else { Some(0) });
+                        if let Some(idx) = reuse_idx {
+                            let (item_id, _, _, _) = unused.remove(idx);
+                            self.conn.execute(
+                                "UPDATE sale_items
+                                 SET product_id = ?1, quantity = ?2, unit_price = ?3, total_price = ?4
+                                 WHERE id = ?5 AND sale_id = ?6",
+                                params![pid, qty, unit, line_total, item_id, sale_id],
+                            )?;
+                            saved.push(serde_json::json!({
+                                "id": item_id,
+                                "product_id": pid,
+                                "quantity": qty,
+                                "unit_price": unit,
+                                "total_price": line_total,
+                            }));
+                        } else {
+                            extra += 1;
+                            let item_id = chrono::Utc::now().timestamp_millis() + extra;
+                            self.conn.execute(
+                                "INSERT INTO sale_items (id, sale_id, product_id, quantity, unit_price, total_price)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                params![item_id, sale_id, pid, qty, unit, line_total],
+                            )?;
+                            saved.push(serde_json::json!({
+                                "id": item_id,
+                                "product_id": pid,
+                                "quantity": qty,
+                                "unit_price": unit,
+                                "total_price": line_total,
+                            }));
+                        }
+                    }
+                    for (leftover_id, _, _, _) in unused {
+                        self.conn.execute(
+                            "DELETE FROM sale_items WHERE id = ?1 AND sale_id = ?2",
+                            params![leftover_id, sale_id],
+                        )?;
+                    }
+                    items_after = Some(saved);
                 }
-                items_after = Some(saved);
             }
         }
 
@@ -2154,7 +2257,7 @@ impl Database {
     /// One-time: keep first line when the same product+price appears twice on a sale.
     /// Does not wipe the DB (would lose unsynced sales).
     pub fn repair_dup_sale_lines_once(&self) -> Result<bool> {
-        const KEY: &str = "repair_dup_sale_lines_v107";
+        const KEY: &str = "repair_dup_sale_lines_v108";
         if self.get_sync_meta(KEY).as_deref() == Some("1") {
             return Ok(false);
         }

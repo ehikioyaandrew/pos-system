@@ -1165,6 +1165,7 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
         sales,
         sale_items,
         activity_logs,
+        inventory_transactions,
         customer_debts,
         debt_entries,
         users_count,
@@ -1186,6 +1187,9 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
         let activity_logs = db
             .get_all_activity_logs()
             .map_err(|e| format!("Failed to get activity logs: {}", e))?;
+        let inventory_transactions = db
+            .get_all_inventory_transactions()
+            .unwrap_or_default();
         let customer_debts = db
             .get_all_customer_debts()
             .map_err(|e| format!("Failed to get debts: {}", e))?;
@@ -1237,6 +1241,7 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
             sales,
             sale_items,
             activity_logs,
+            inventory_transactions,
             customer_debts,
             debt_entries,
             users_count,
@@ -1275,6 +1280,9 @@ async fn sync_to_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, 
     // Soft-fail optional tables so core POS sync still succeeds
     if let Err(e) = client.upsert_activity_logs(activity_logs).await {
         eprintln!("Warning: activity log sync skipped: {}", e);
+    }
+    if let Err(e) = client.upsert_inventory_transactions(inventory_transactions).await {
+        eprintln!("Warning: inventory transaction sync skipped: {}", e);
     }
     if let Err(e) = client.upsert_customer_debts(customer_debts).await {
         eprintln!("Warning: customer debts sync skipped: {}", e);
@@ -1642,7 +1650,7 @@ async fn sync_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value
 }
 
 /// Pull products (and stock) from cloud into the till — for fridge/show moves done online.
-/// Does not pull sales. Prefer Sync now (push) first if you already sold offline.
+/// Pull only: never uploads local products. Does not pull or push sales.
 #[tauri::command]
 async fn sync_products_from_cloud(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let supabase_url = get_supabase_url();

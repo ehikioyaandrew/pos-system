@@ -14,6 +14,7 @@ import {
   StaffPOSInterface,
   StaffInventoryCheck,
   SalesLogDashboard,
+  DaySummaryDashboard,
   DebtManagementDashboard,
   AuditLogDashboard,
 } from './floorViews'
@@ -1349,6 +1350,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Inventory" />
               <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Management" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'day-summary'} onClick={() => goToSection('day-summary')} icon="sales" label="Day Summary" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
@@ -1362,6 +1364,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Inventory" />
               <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Overview" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'day-summary'} onClick={() => goToSection('day-summary')} icon="sales" label="Day Summary" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'reports'} onClick={() => goToSection('reports')} icon="reports" label="Reports" />
@@ -1376,6 +1379,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Inventory Tracking" />
               <NavButton active={currentSection === 'staff'} onClick={() => goToSection('staff')} icon="staff" label="Staff Records" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'day-summary'} onClick={() => goToSection('day-summary')} icon="sales" label="Day Summary" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'audit-log'} onClick={() => goToSection('audit-log')} icon="audit" label="Audit Log" />
               <NavButton active={currentSection === 'email-preview'} onClick={() => goToSection('email-preview')} icon="email" label="Email Preview" />
@@ -1386,6 +1390,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
               <NavButton active={currentSection === 'pos'} onClick={() => goToSection('pos')} icon="pos" label="Point of Sale" />
               <NavButton active={currentSection === 'inventory'} onClick={() => goToSection('inventory')} icon="inventory" label="Stock Check" />
               <NavButton active={currentSection === 'sales-log'} onClick={() => goToSection('sales-log')} icon="sales" label="Sales Log" />
+              <NavButton active={currentSection === 'day-summary'} onClick={() => goToSection('day-summary')} icon="sales" label="Day Summary" />
               <NavButton active={currentSection === 'debt'} onClick={() => goToSection('debt')} icon="debt" label="Debt" />
               <NavButton active={currentSection === 'pending'} onClick={() => goToSection('pending')} icon="pending" label="Pending Items" />
             </>
@@ -1414,7 +1419,7 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
                     inserted?: number
                   }
                   toast.success(
-                    `Products updated · ${result?.products_count ?? 0} catalog (${result?.updated ?? 0} stock refreshed)`,
+                    `Pulled from cloud only · ${result?.products_count ?? 0} products (nothing uploaded)`,
                     { id: 'desktop-pull-products' }
                   )
                 } catch (e: unknown) {
@@ -1551,6 +1556,8 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
           return <StaffInventoryCheck currentUser={currentUser} />
         case 'sales-log':
           return <SalesLogDashboard currentUser={currentUser} businessInfo={businessInfo} ownOnly />
+        case 'day-summary':
+          return <DaySummaryDashboard currentUser={currentUser} businessInfo={businessInfo} />
         case 'debt':
           return (
             <DebtManagementDashboard
@@ -1578,6 +1585,8 @@ function DashboardView({ onLogout, currentUser }: { onLogout: () => void, curren
         return <BusinessSales />
       case 'sales-log':
         return <SalesLogDashboard currentUser={currentUser} businessInfo={businessInfo} />
+      case 'day-summary':
+        return <DaySummaryDashboard currentUser={currentUser} businessInfo={businessInfo} />
       case 'debt':
         if (isSuperAdmin || isManager || isSecretary || isFloorStaff) {
           return <DebtManagementDashboard currentUser={currentUser} businessInfo={businessInfo} />

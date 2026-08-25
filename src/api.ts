@@ -552,7 +552,13 @@ async function writeActivityLog(opts: {
   before?: unknown
   after?: unknown
 }) {
-  if (String(opts.action || '').toUpperCase().startsWith('SALE')) {
+  const actionU = String(opts.action || '').toUpperCase()
+  if (
+    actionU.startsWith('SALE') &&
+    actionU !== 'SALE_VOIDED' &&
+    actionU !== 'SALE_EDITED' &&
+    actionU !== 'SALE_EDITED'
+  ) {
     return null
   }
   const now = new Date().toISOString()
@@ -633,7 +639,9 @@ async function getActivityLogs(businessId: number, limit = 100) {
       if (actorId && ghostIds.has(actorId)) return false
       const action = String(r.action || '').toUpperCase()
       const entity = String(r.entity_type || '').toLowerCase()
-      if (action.startsWith('SALE') || entity === 'sale') return false
+      const saleAudit =
+        action === 'SALE_VOIDED' || action === 'SALE_EDITED' || action === 'SALE_EDITED'
+      if ((action.startsWith('SALE') || entity === 'sale') && !saleAudit) return false
       const summary = String(r.summary || '').toLowerCase()
       const after = String(r.after_json || '').toLowerCase()
       if (summary.includes('admin2') || after.includes('"username":"admin2"')) return false
@@ -733,28 +741,62 @@ async function updateSaleDetails(opts: {
       }
     }
 
-    // Replace all lines for this sale
-    const { error: delError } = await supabase.from(table).delete().eq('sale_id', saleId)
-    if (delError) throw new Error(delError.message)
+    const sig = (pid: number, qty: number, unit: number) =>
+      `${pid}:${qty}:${Math.round(unit * 1000)}`
+    const existingSig = rows
+      .map((r) => sig(Number(r.product_id), Number(r.quantity || 0), Number(r.unit_price || 0)))
+      .sort()
+      .join('|')
+    const nextSig = nextLines
+      .map((l) => sig(l.product_id, l.quantity, l.unit_price))
+      .sort()
+      .join('|')
 
-    let totalAmount = 0
-    const baseId = Date.now()
-    for (let i = 0; i < nextLines.length; i++) {
-      const line = nextLines[i]
-      const lineTotal = line.quantity * line.unit_price
-      totalAmount += lineTotal
-      const { error: insError } = await supabase.from(table).insert({
-        id: baseId + i + 1,
-        sale_id: saleId,
-        product_id: line.product_id,
-        quantity: line.quantity,
-        unit_price: line.unit_price,
-        total_price: lineTotal,
-        synced_at: syncedAt,
-      })
-      if (insError) throw new Error(insError.message)
+    // Date-only / unchanged split: do not rewrite lines (new IDs duplicate on sync)
+    if (existingSig !== nextSig) {
+      const unused = [...rows]
+      let totalAmount = 0
+      let extra = 0
+      for (const line of nextLines) {
+        const lineTotal = line.quantity * line.unit_price
+        totalAmount += lineTotal
+        const matchIdx = unused.findIndex(
+          (r) => Number(r.product_id) === line.product_id
+        )
+        const reuseIdx = matchIdx >= 0 ? matchIdx : unused.length ? 0 : -1
+        if (reuseIdx >= 0) {
+          const row = unused.splice(reuseIdx, 1)[0]
+          const { error: updItemError } = await supabase
+            .from(table)
+            .update({
+              product_id: line.product_id,
+              quantity: line.quantity,
+              unit_price: line.unit_price,
+              total_price: lineTotal,
+              synced_at: syncedAt,
+            })
+            .eq('id', row.id)
+          if (updItemError) throw new Error(updItemError.message)
+        } else {
+          extra += 1
+          const { error: insError } = await supabase.from(table).insert({
+            id: Date.now() + extra,
+            sale_id: saleId,
+            product_id: line.product_id,
+            quantity: line.quantity,
+            unit_price: line.unit_price,
+            total_price: lineTotal,
+            synced_at: syncedAt,
+          })
+          if (insError) throw new Error(insError.message)
+        }
+      }
+      for (const leftover of unused) {
+        const { error: delError } = await supabase.from(table).delete().eq('id', leftover.id)
+        if (delError) throw new Error(delError.message)
+      }
+      salePatch.total_amount = totalAmount
     }
-    salePatch.total_amount = totalAmount
   }
 
   const { error: updateError } = await supabase
@@ -1090,7 +1132,7 @@ async function processSale(request: Record<string, unknown>) {
   }
 }
 
-async function voidSale(saleId: number, businessId: number) {
+async function voidSale(saleId: number, businessId: number, actorUserId?: number | null) {
   const { data: sale, error } = await supabase
     .from('sales_backup')
     .select('*')
@@ -1154,6 +1196,24 @@ async function voidSale(saleId: number, businessId: number) {
     .update({ payment_status: 'CANCELLED', synced_at: new Date().toISOString() })
     .eq('id', saleId)
   if (updErr) throw new Error(updErr.message)
+
+  try {
+    await writeActivityLog({
+      businessId,
+      actorUserId: actorUserId || sale.user_id || null,
+      action: 'SALE_VOIDED',
+      entityType: 'sale',
+      entityId: saleId,
+      summary: `Voided sale #${saleId}`,
+      after: {
+        location,
+        total_amount: sale.total_amount,
+        payment_method: sale.payment_method,
+      },
+    })
+  } catch {
+    /* ignore */
+  }
 
   return { ok: true, sale_id: saleId }
 }
@@ -2906,7 +2966,7 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
       if (type.includes('TRANSFER')) {
         const n = Math.abs(qty)
         if (!n) continue
-        const intoFridge = type.includes('TO_FRIDGE')
+        const intoFridge = type.includes('TO_FRIDGE') || type.includes('TO_SHOW')
         const outOfStore = type.includes('TRANSFER_STORE') || type.includes('TO_FRIDGE') || type.includes('TO_SHOW')
         if (!afterEnd) {
           if (intoFridge) newOnDay.set(pid, (newOnDay.get(pid) || 0) + n)
@@ -2972,7 +3032,11 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
     Number(p?.store_stock || 0) +
     Number(p?.sports_stock || 0)
 
-  const soldIds = new Set([...soldById.keys(), ...fridgeSoldById.keys()])
+  const soldIds = new Set([
+    ...soldById.keys(),
+    ...fridgeSoldById.keys(),
+    ...newOnDay.keys(),
+  ])
   const sold = [...soldIds]
     .map((id) => {
       const p = productById.get(id) as any
@@ -3042,6 +3106,54 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
 
   const normalLines = [...normalMap.values()].sort((a, b) => b.amount - a.amount)
   const staffLines = [...staffMap.values()].sort((a, b) => b.amount - a.amount)
+
+  let stockMoves: any[] = []
+  try {
+    const { data: moveLogs } = await supabase
+      .from('activity_logs_backup')
+      .select('action, after_json, created_at, summary, actor_user_id')
+      .eq('business_id', businessId)
+      .eq('action', 'STOCK_MOVE')
+      .gte('created_at', start.toISOString())
+      .lte('created_at', end.toISOString())
+    const actorIds = [
+      ...new Set((moveLogs || []).map((r: any) => Number(r.actor_user_id)).filter(Boolean)),
+    ]
+    const names = new Map<number, string>()
+    if (actorIds.length) {
+      const { data: users } = await supabase
+        .from('users_backup')
+        .select('id, name, username')
+        .in('id', actorIds)
+      for (const u of users || []) {
+        names.set(Number(u.id), u.name || u.username || `User #${u.id}`)
+      }
+    }
+    for (const row of moveLogs || []) {
+      let after: any = {}
+      try {
+        after = JSON.parse(String((row as any).after_json || '{}'))
+      } catch {
+        after = {}
+      }
+      const qty = Number(after.quantity || 0)
+      const to = String(after.to || '').toLowerCase()
+      const pid = Number((row as any).entity_id)
+      if (qty && (to === 'fridge' || to === 'show') && pid && !newOnDay.has(pid)) {
+        newOnDay.set(pid, (newOnDay.get(pid) || 0) + qty)
+      }
+      stockMoves.push({
+        name: after.product || 'Item',
+        quantity: qty,
+        to: to || 'fridge',
+        staff_name: names.get(Number((row as any).actor_user_id)) || 'Staff',
+        created_at: (row as any).created_at,
+      })
+    }
+  } catch {
+    /* optional */
+  }
+
   return {
     periodLabel: dateStr,
     kind: 'daily' as const,
@@ -3056,6 +3168,7 @@ async function getSalesEmailPreview(businessId: number, reportDate?: string) {
       lines: staffLines,
     },
     sold,
+    stock_moves: stockMoves,
     outOfStock,
     lowStock,
   }
@@ -4061,9 +4174,10 @@ export async function invoke<T = unknown>(
       case 'void_sale': {
         const saleId = argNumber(args, 'saleId', 'sale_id')
         const businessId = argNumber(args, 'businessId', 'business_id')
+        const actorUserId = argNumber(args, 'actorUserId', 'actor_user_id')
         if (!saleId) throw new Error('saleId is required')
         if (!businessId) throw new Error('businessId is required')
-        return (await voidSale(saleId, businessId)) as T
+        return (await voidSale(saleId, businessId, actorUserId)) as T
       }
       case 'approve_sale': {
         const saleId = argNumber(args, 'saleId', 'sale_id')

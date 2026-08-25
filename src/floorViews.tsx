@@ -56,6 +56,9 @@ function auditDetail(row: any): string {
     if (obj.from && obj.to) {
       return `${obj.quantity ?? ''} ${obj.product || ''} · ${obj.from} → ${obj.to}`.trim()
     }
+    if (obj.total_amount != null && obj.payment_method) {
+      return `${obj.payment_method} · ${obj.total_amount}${obj.location ? ` · ${obj.location}` : ''}`
+    }
     if (obj.location && obj.quantity_change != null) {
       const n = Number(obj.quantity_change)
       return `${n >= 0 ? '+' : ''}${n} on ${obj.location}${obj.product ? ` · ${obj.product}` : ''}`
@@ -1412,6 +1415,11 @@ export function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [packagingFilter, setPackagingFilter] = useState('ALL')
+  const [moveTarget, setMoveTarget] = useState<{ product: any; to: 'fridge' | 'show' } | null>(
+    null
+  )
+  const [moveQty, setMoveQty] = useState(1)
+  const [moving, setMoving] = useState(false)
   const businessId = currentUser?.business_id
 
   useEffect(() => {
@@ -1444,6 +1452,49 @@ export function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
       setProducts([])
     } finally {
       setLoading(false)
+    }
+  }
+
+  const openMove = (product: any, to: 'fridge' | 'show') => {
+    const store = Number(product.store_stock || 0)
+    if (store <= 0) {
+      toast.error('No store stock to move. Ask secretary/admin to receive into store first.')
+      return
+    }
+    setMoveTarget({ product, to })
+    setMoveQty(Math.min(1, store) || 1)
+  }
+
+  const handleMoveStock = async () => {
+    if (!moveTarget) return
+    const store = Number(moveTarget.product.store_stock || 0)
+    const qty = Math.floor(Number(moveQty) || 0)
+    if (qty < 1) {
+      toast.error('Enter a quantity')
+      return
+    }
+    if (qty > store) {
+      toast.error(`Store only has ${store}`)
+      return
+    }
+    try {
+      setMoving(true)
+      await invoke('transfer_stock', {
+        productId: moveTarget.product.id,
+        from: 'store',
+        to: moveTarget.to,
+        quantity: qty,
+        userId: currentUser?.id || 0,
+      })
+      toast.success(
+        `Moved ${qty} ${moveTarget.product.name} to ${moveTarget.to} — ready to sell`
+      )
+      setMoveTarget(null)
+      await loadProducts()
+    } catch (error) {
+      toast.error(`Move failed: ${error}`)
+    } finally {
+      setMoving(false)
     }
   }
 
@@ -1491,7 +1542,7 @@ export function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
               Stock check
             </h1>
             <p className="mt-2 text-[#2a3d36]/70 text-base">
-              Read-only view of fridge, show, and store levels.
+              Move store stock into fridge or show so you can sell without calling admin.
             </p>
           </div>
           <button
@@ -1576,6 +1627,24 @@ export function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
                   </div>
                 </div>
                 <p className="mt-2 text-xs text-[#2a3d36]/50">Total {total}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={Number(p.store_stock || 0) <= 0}
+                    onClick={() => openMove(p, 'fridge')}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-40"
+                  >
+                    To fridge
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Number(p.store_stock || 0) <= 0}
+                    onClick={() => openMove(p, 'show')}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-40"
+                  >
+                    To show
+                  </button>
+                </div>
               </article>
             )
           })}
@@ -1630,12 +1699,336 @@ export function StaffInventoryCheck({ currentUser }: { currentUser: any }) {
                   return <span className="font-bold text-[#121c19]">{total}</span>
                 },
               },
+              {
+                key: 'move',
+                header: 'New stock',
+                align: 'right',
+                render: (p: any) => {
+                  const store = Number(p.store_stock || 0)
+                  return (
+                    <div className="inline-flex flex-wrap gap-2 justify-end">
+                      <button
+                        type="button"
+                        disabled={store <= 0}
+                        onClick={() => openMove(p, 'fridge')}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-40"
+                      >
+                        To fridge
+                      </button>
+                      <button
+                        type="button"
+                        disabled={store <= 0}
+                        onClick={() => openMove(p, 'show')}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-[#121c19]/20 hover:bg-[#f4f6f5] disabled:opacity-40"
+                      >
+                        To show
+                      </button>
+                    </div>
+                  )
+                },
+              },
             ]}
             data={filtered}
             rowKey={(p) => p.id}
             emptyMessage="No products found"
           />
         </div>
+      </div>
+
+      {moveTarget && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-[#121c19]/55"
+            onClick={() => !moving && setMoveTarget(null)}
+          />
+          <form
+            className="relative w-full sm:max-w-md bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void handleMoveStock()
+            }}
+          >
+            <h2 className="font-display text-xl font-bold text-[#121c19]">
+              Move to {moveTarget.to}
+            </h2>
+            <p className="text-sm text-[#2a3d36]/70">
+              {moveTarget.product.name} · store has{' '}
+              <span className="font-semibold">{Number(moveTarget.product.store_stock || 0)}</span>
+            </p>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
+                Quantity
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={Number(moveTarget.product.store_stock || 0)}
+                value={moveQty}
+                onChange={(e) => setMoveQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                className="mt-2 w-full px-4 py-3 rounded-lg border border-[#d4dcd8]"
+              />
+            </div>
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                disabled={moving}
+                onClick={() => setMoveTarget(null)}
+                className="flex-1 border border-[#d4dcd8] py-3 rounded-lg font-semibold disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={moving}
+                className="flex-1 bg-[#121c19] text-white py-3 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {moving ? 'Moving…' : 'Move stock'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DaySalesSummaryBody({
+  preview,
+  loading,
+}: {
+  preview: any
+  loading?: boolean
+}) {
+  if (loading) {
+    return <p className="text-sm text-[#2a3d36]/60">Loading day summary…</p>
+  }
+  const normalLines = Array.isArray(preview?.normal?.lines) ? preview.normal.lines : []
+  const staffLines = Array.isArray(preview?.staff?.lines) ? preview.staff.lines : []
+  const sold = Array.isArray(preview?.sold) ? preview.sold : []
+  const byName = new Map<
+    string,
+    {
+      name: string
+      normalQty: number
+      staffQty: number
+      normalAmount: number
+      staffAmount: number
+      fridgeBefore: number
+      fridgeLeft: number
+      newStock: number
+    }
+  >()
+  const row = (name: string) => {
+    const key = String(name || 'Item')
+    if (!byName.has(key)) {
+      byName.set(key, {
+        name: key,
+        normalQty: 0,
+        staffQty: 0,
+        normalAmount: 0,
+        staffAmount: 0,
+        fridgeBefore: 0,
+        fridgeLeft: 0,
+        newStock: 0,
+      })
+    }
+    return byName.get(key)!
+  }
+  for (const l of normalLines) {
+    const r = row(l.name)
+    r.normalQty += Number(l.qty || 0)
+    r.normalAmount += Number(l.amount || 0)
+  }
+  for (const l of staffLines) {
+    const r = row(l.name)
+    r.staffQty += Number(l.qty || 0)
+    r.staffAmount += Number(l.amount || 0)
+  }
+  for (const s of sold) {
+    const r = row(s.name)
+    r.fridgeBefore = Number(s.fridge_before ?? s.before ?? r.fridgeBefore)
+    r.fridgeLeft = Number(s.fridge_left ?? s.left ?? r.fridgeLeft)
+    r.newStock = Number(s.new_stock ?? s.newStock ?? r.newStock)
+    if (!r.normalQty && !r.staffQty) {
+      r.normalQty += Number(s.fridge_sold || s.sold || 0)
+    }
+  }
+  const products = [...byName.values()].sort(
+    (a, b) => b.normalQty + b.staffQty - (a.normalQty + a.staffQty) || a.name.localeCompare(b.name)
+  )
+  const totalItems = products.reduce((s, p) => s + p.normalQty + p.staffQty, 0)
+  const normalTotal = Number(preview?.normal?.total || 0)
+  const staffTotal = Number(preview?.staff?.total || 0)
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Sales</p>
+          <p className="font-display text-xl font-bold">{preview?.salesCount || 0}</p>
+        </div>
+        <div className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Items</p>
+          <p className="font-display text-xl font-bold">{totalItems}</p>
+        </div>
+        <div className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Normal</p>
+          <p className="font-display text-lg font-bold">{money(normalTotal)}</p>
+        </div>
+        <div className="rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">Staff</p>
+          <p className="font-display text-lg font-bold">{money(staffTotal)}</p>
+        </div>
+      </div>
+      <p className="text-xs text-[#2a3d36]/55">
+        Check this before syncing. Fridge before / remaining is from today&apos;s till.
+      </p>
+      <div className="overflow-x-auto rounded-xl border border-[#d4dcd8]">
+        <table className="min-w-full text-left text-sm">
+          <thead className="bg-[#f4f6f5] text-[10px] uppercase tracking-wide text-[#2a3d36]/50">
+            <tr>
+              <th className="px-3 py-2 font-semibold">Product</th>
+              <th className="px-3 py-2 font-semibold text-right">Normal</th>
+              <th className="px-3 py-2 font-semibold text-right">Staff</th>
+              <th className="px-3 py-2 font-semibold text-right">Total qty</th>
+              <th className="px-3 py-2 font-semibold text-right">Fridge before</th>
+              <th className="px-3 py-2 font-semibold text-right">New stock</th>
+              <th className="px-3 py-2 font-semibold text-right">Remaining</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#e8ecea]">
+            {products.map((p) => (
+              <tr key={p.name}>
+                <td className="px-3 py-2 font-medium text-[#121c19]">{p.name}</td>
+                <td className="px-3 py-2 text-right">
+                  {p.normalQty}
+                  {p.normalQty ? (
+                    <span className="block text-[10px] text-[#2a3d36]/45">{money(p.normalAmount)}</span>
+                  ) : null}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {p.staffQty}
+                  {p.staffQty ? (
+                    <span className="block text-[10px] text-indigo-800">{money(p.staffAmount)}</span>
+                  ) : null}
+                </td>
+                <td className="px-3 py-2 text-right font-semibold">{p.normalQty + p.staffQty}</td>
+                <td className="px-3 py-2 text-right">{p.fridgeBefore}</td>
+                <td className="px-3 py-2 text-right">
+                  {p.newStock > 0 ? (
+                    <span className="font-semibold text-teal-800">+{p.newStock}</span>
+                  ) : (
+                    <span className="text-[#2a3d36]/40">—</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right">{p.fridgeLeft}</td>
+              </tr>
+            ))}
+            {products.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-3 py-8 text-center text-[#2a3d36]/50">
+                  No sales for this day
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {Array.isArray(preview?.stock_moves) && preview.stock_moves.length > 0 && (
+        <div className="rounded-xl border border-[#d4dcd8] overflow-hidden">
+          <p className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/50 bg-[#f4f6f5]">
+            Who carried new stock
+          </p>
+          <div className="divide-y divide-[#e8ecea]">
+            {preview.stock_moves.map((m: any, idx: number) => (
+              <div key={`${m.name}-${idx}`} className="px-3 py-2.5 text-sm flex justify-between gap-3">
+                <p>
+                  <span className="font-semibold">{m.staff_name || 'Staff'}</span>
+                  {` moved ${Number(m.quantity || 0)} ${m.name} to ${m.to || 'fridge'}`}
+                </p>
+                <p className="text-xs text-[#2a3d36]/45 whitespace-nowrap">
+                  {formatWhen(m.created_at)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function DaySummaryDashboard({
+  currentUser,
+  businessInfo,
+}: {
+  currentUser: any
+  businessInfo: any
+}) {
+  const [date, setDate] = useState(toDateInputValue())
+  const [preview, setPreview] = useState<any | null>(null)
+  const [loading, setLoading] = useState(true)
+  const businessId = currentUser?.business_id || businessInfo?.id
+
+  const load = async (reportDate = date) => {
+    if (!businessId) return
+    try {
+      setLoading(true)
+      const data = (await invoke('get_sales_email_preview', {
+        businessId,
+        reportDate,
+      })) as any
+      setPreview(data)
+    } catch (error) {
+      toast.error(`Failed to load day summary: ${error}`)
+      setPreview(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (businessId) void load(date)
+  }, [businessId, date])
+
+  return (
+    <div className="min-h-full bg-[#f4f6f5]">
+      <div className="px-4 sm:px-8 xl:px-10 py-6 sm:py-8 max-w-[1100px]">
+        <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-display text-[11px] font-semibold tracking-[0.2em] uppercase text-[#c4783a] mb-2">
+              Till
+            </p>
+            <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#121c19]">
+              Day summary
+            </h1>
+            <p className="mt-2 text-[#2a3d36]/70">
+              Items sold at normal vs staff price, fridge before, and remaining — check before you sync.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 items-end">
+            <div>
+              <label className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                Date
+              </label>
+              <input
+                type="date"
+                value={date}
+                max={toDateInputValue()}
+                onChange={(e) => setDate(e.target.value)}
+                className="mt-1 block px-3 py-2 rounded-md border border-[#d4dcd8] bg-white text-sm"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
+            >
+              Refresh
+            </button>
+          </div>
+        </header>
+        <DaySalesSummaryBody preview={preview} loading={loading} />
       </div>
     </div>
   )
@@ -1659,6 +2052,7 @@ export function SalesLogDashboard({
   const [editSale, setEditSale] = useState<any | null>(null)
   const [editDate, setEditDate] = useState('')
   const [editItems, setEditItems] = useState<any[]>([])
+  const [editItemsSnapshot, setEditItemsSnapshot] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [savingDate, setSavingDate] = useState(false)
   const [voidingId, setVoidingId] = useState<number | null>(null)
@@ -1670,10 +2064,12 @@ export function SalesLogDashboard({
   const [shiftOpen, setShiftOpen] = useState(false)
   const [shiftLoading, setShiftLoading] = useState(false)
   const [shiftPreview, setShiftPreview] = useState<any | null>(null)
+  const [summaryDate, setSummaryDate] = useState(toDateInputValue())
   const businessId = currentUser?.business_id || businessInfo?.id
   const role = String(currentUser?.role || '')
   const canApprove = ['Secretary', 'SuperAdmin', 'Manager'].includes(role)
   const canEditSale = ['Secretary', 'SuperAdmin', 'Manager', 'Staff', 'BarStaff'].includes(role)
+  const canVoidSale = ['Secretary', 'SuperAdmin', 'Manager', 'Staff', 'BarStaff', 'KitchenStaff'].includes(role)
   const canEditSaleDate = ['Secretary', 'SuperAdmin', 'Manager'].includes(role)
   const today = toDateInputValue()
   const singleDay =
@@ -1779,7 +2175,17 @@ export function SalesLogDashboard({
           })
         }
       }
-      setEditItems([...grouped.values()])
+      const groupedItems = [...grouped.values()]
+      setEditItems(groupedItems)
+      setEditItemsSnapshot(
+        JSON.stringify(
+          groupedItems.map((i) => ({
+            product_id: Number(i.product_id),
+            quantity: Number(i.quantity || 0),
+            staffQty: Number(i.staffQty || 0),
+          }))
+        )
+      )
     } catch (error) {
       toast.error(`Failed to load sale items: ${error}`)
     } finally {
@@ -1835,6 +2241,19 @@ export function SalesLogDashboard({
         })
       }
     }
+    const currentSnapshot = JSON.stringify(
+      editItems.map((i) => ({
+        product_id: Number(i.product_id),
+        quantity: Number(i.quantity || 0),
+        staffQty: Math.min(Math.max(0, Number(i.staffQty || 0)), Number(i.quantity || 0)),
+      }))
+    )
+    const itemsChanged = currentSnapshot !== editItemsSnapshot
+    const originalDate = toDateInputValue(editSale.created_at)
+    if (!itemsChanged && dateToSave === originalDate) {
+      toast.error('Nothing to save')
+      return
+    }
     try {
       setSavingDate(true)
       await invoke('update_sale_details', {
@@ -1842,11 +2261,16 @@ export function SalesLogDashboard({
         businessId,
         saleDate: dateToSave,
         actorUserId: currentUser?.id,
-        items: expanded,
+        items: itemsChanged ? expanded : null,
       })
-      toast.success('Sale updated · debt balance synced if linked')
+      toast.success(
+        itemsChanged
+          ? 'Sale updated · debt balance synced if linked'
+          : 'Sale date updated'
+      )
       setEditSale(null)
       setEditItems([])
+      setEditItemsSnapshot('')
       await load()
     } catch (error) {
       toast.error(`Failed to update sale: ${error}`)
@@ -1999,19 +2423,17 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
     }
   }
 
-  const openShiftReport = async () => {
-
+  const openShiftReport = async (reportDate = summaryDate) => {
     setShiftOpen(true)
     setShiftLoading(true)
     try {
-      const today = toDateInputValue()
       const preview = (await invoke('get_sales_email_preview', {
         businessId,
-        reportDate: today,
+        reportDate: reportDate || toDateInputValue(),
       })) as any
       setShiftPreview(preview)
     } catch (error) {
-      toast.error(`Shift report failed: ${error}`)
+      toast.error(`Day summary failed: ${error}`)
       setShiftPreview(null)
     } finally {
       setShiftLoading(false)
@@ -2080,7 +2502,7 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
               onClick={() => void openShiftReport()}
               className="border border-[#121c19]/15 hover:bg-white px-4 py-2.5 rounded-md text-sm font-semibold"
             >
-              Today’s shift
+              Day summary
             </button>
             <button
               type="button"
@@ -2237,14 +2659,16 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
                   >
                     {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleVoid(sale)}
-                    disabled={voidingId === Number(sale.id)}
-                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-200 text-rose-800 hover:bg-rose-50 disabled:opacity-50"
-                  >
-                    {voidingId === Number(sale.id) ? 'Voiding…' : 'Void'}
-                  </button>
+                  {canVoidSale && (
+                    <button
+                      type="button"
+                      onClick={() => void handleVoid(sale)}
+                      disabled={voidingId === Number(sale.id)}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-200 text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+                    >
+                      {voidingId === Number(sale.id) ? 'Voiding…' : 'Void'}
+                    </button>
+                  )}
                 </div>
               </div>
             </article>
@@ -2333,14 +2757,16 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
                       >
                         {printingId === Number(sale.id) ? 'Printing…' : 'Print'}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleVoid(sale)}
-                        disabled={voidingId === Number(sale.id)}
-                        className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-200 text-rose-800 hover:bg-rose-50 disabled:opacity-50"
-                      >
-                        {voidingId === Number(sale.id) ? 'Voiding…' : 'Void'}
-                      </button>
+                      {canVoidSale && (
+                        <button
+                          type="button"
+                          onClick={() => void handleVoid(sale)}
+                          disabled={voidingId === Number(sale.id)}
+                          className="text-xs font-semibold px-3 py-1.5 rounded-md border border-rose-200 text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+                        >
+                          {voidingId === Number(sale.id) ? 'Voiding…' : 'Void'}
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -2450,40 +2876,24 @@ Stock goes back to ${sale.location || 'fridge'}. This cannot be undone.`
             onClick={() => setShiftOpen(false)}
           />
           <div className="relative w-full sm:max-w-lg max-h-[90vh] overflow-y-auto bg-white sm:rounded-2xl border border-[#d4dcd8] shadow-2xl p-6 space-y-4">
-            <h2 className="font-display text-xl font-bold text-[#121c19]">Today’s shift</h2>
-            {shiftLoading ? (
-              <p className="text-sm text-[#2a3d36]/60">Loading…</p>
-            ) : (
-              <>
-                <p className="text-sm text-[#2a3d36]/70">
-                  {shiftPreview?.salesCount || 0} sales · Normal {money(shiftPreview?.normal?.total)} · Staff{' '}
-                  {money(shiftPreview?.staff?.total)} · Total{' '}
-                  {money(
-                    Number(shiftPreview?.normal?.total || 0) + Number(shiftPreview?.staff?.total || 0)
-                  )}
-                </p>
-                <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50">
-                  Same numbers as the daily email
-                </p>
-                {(shiftPreview?.normal?.lines || []).slice(0, 12).map((l: any) => (
-                  <div key={`n-${l.name}`} className="flex justify-between text-sm">
-                    <span>{l.name} × {l.qty}</span>
-                    <span>{money(l.amount)}</span>
-                  </div>
-                ))}
-                {(shiftPreview?.staff?.lines || []).length > 0 && (
-                  <p className="text-xs font-semibold uppercase tracking-wide text-[#2a3d36]/50 pt-2">
-                    Staff price
-                  </p>
-                )}
-                {(shiftPreview?.staff?.lines || []).slice(0, 12).map((l: any) => (
-                  <div key={`s-${l.name}`} className="flex justify-between text-sm">
-                    <span>{l.name} × {l.qty}</span>
-                    <span>{money(l.amount)}</span>
-                  </div>
-                ))}
-              </>
-            )}
+            <h2 className="font-display text-xl font-bold text-[#121c19]">Day summary</h2>
+            <div>
+              <label className="text-[10px] font-semibold uppercase tracking-wide text-[#2a3d36]/45">
+                Date
+              </label>
+              <input
+                type="date"
+                value={summaryDate}
+                max={toDateInputValue()}
+                onChange={(e) => {
+                  const next = e.target.value
+                  setSummaryDate(next)
+                  void openShiftReport(next)
+                }}
+                className="mt-1 w-full px-3 py-2 rounded-md border border-[#d4dcd8] text-sm"
+              />
+            </div>
+            <DaySalesSummaryBody preview={shiftPreview} loading={shiftLoading} />
             <button
               type="button"
               onClick={() => setShiftOpen(false)}
@@ -3319,7 +3729,7 @@ export function AuditLogDashboard({
               Audit log
             </h1>
             <p className="mt-2 text-[#2a3d36]/70">
-              Sale edits stay on the sales log. This list shows stock moves, product edits, staff changes, and logins.
+              Stock moves, sale voids, sale edits, product changes, staff changes, and logins — including work done offline after sync.
             </p>
           </div>
           <button
