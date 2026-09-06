@@ -218,12 +218,22 @@ impl Database {
                 manager_can_view BOOLEAN DEFAULT 0,
                 secretary_can_view BOOLEAN DEFAULT 0,
                 staff_can_view BOOLEAN DEFAULT 0,
+                secretary_can_edit_prices BOOLEAN DEFAULT 0,
+                secretary_can_edit_stock BOOLEAN DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (business_id) REFERENCES businesses (id)
             )",
             [],
         )?;
+        let _ = self.conn.execute(
+            "ALTER TABLE report_permissions ADD COLUMN secretary_can_edit_prices BOOLEAN DEFAULT 0",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE report_permissions ADD COLUMN secretary_can_edit_stock BOOLEAN DEFAULT 0",
+            [],
+        );
         
         // Create inventory_transactions table
         self.conn.execute(
@@ -2159,7 +2169,8 @@ impl Database {
     // Get report permissions for a business
     pub fn get_report_permissions(&self, business_id: i64) -> Result<serde_json::Value> {
         let result = self.conn.query_row(
-            "SELECT manager_can_view, secretary_can_view, staff_can_view 
+            "SELECT manager_can_view, secretary_can_view, staff_can_view,
+                    COALESCE(secretary_can_edit_prices, 0), COALESCE(secretary_can_edit_stock, 0)
              FROM report_permissions 
              WHERE business_id = ?1",
             [business_id],
@@ -2167,7 +2178,9 @@ impl Database {
                 Ok(serde_json::json!({
                     "manager_can_view": row.get::<_, i64>(0)? != 0,
                     "secretary_can_view": row.get::<_, i64>(1)? != 0,
-                    "staff_can_view": row.get::<_, i64>(2)? != 0
+                    "staff_can_view": row.get::<_, i64>(2)? != 0,
+                    "secretary_can_edit_prices": row.get::<_, i64>(3)? != 0,
+                    "secretary_can_edit_stock": row.get::<_, i64>(4)? != 0,
                 }))
             },
         );
@@ -2175,18 +2188,27 @@ impl Database {
         match result {
             Ok(permissions) => Ok(permissions),
             Err(_) => {
-                // Return default permissions if not found (SuperAdmin only)
                 Ok(serde_json::json!({
-                    "manager_can_view": false,
+                    "manager_can_view": true,
                     "secretary_can_view": false,
-                    "staff_can_view": false
+                    "staff_can_view": false,
+                    "secretary_can_edit_prices": false,
+                    "secretary_can_edit_stock": false
                 }))
             }
         }
     }
 
     // Save report permissions for a business
-    pub fn save_report_permissions(&self, business_id: i64, manager_can_view: bool, secretary_can_view: bool, staff_can_view: bool) -> Result<()> {
+    pub fn save_report_permissions(
+        &self,
+        business_id: i64,
+        manager_can_view: bool,
+        secretary_can_view: bool,
+        staff_can_view: bool,
+        secretary_can_edit_prices: bool,
+        secretary_can_edit_stock: bool,
+    ) -> Result<()> {
         // Check if record exists
         let exists = self.conn.query_row(
             "SELECT COUNT(*) FROM report_permissions WHERE business_id = ?1",
@@ -2197,15 +2219,34 @@ impl Database {
         if exists {
             self.conn.execute(
                 "UPDATE report_permissions 
-                 SET manager_can_view = ?1, secretary_can_view = ?2, staff_can_view = ?3, updated_at = CURRENT_TIMESTAMP
-                 WHERE business_id = ?4",
-                [if manager_can_view { 1 } else { 0 }, if secretary_can_view { 1 } else { 0 }, if staff_can_view { 1 } else { 0 }, business_id],
+                 SET manager_can_view = ?1, secretary_can_view = ?2, staff_can_view = ?3,
+                     secretary_can_edit_prices = ?4, secretary_can_edit_stock = ?5,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE business_id = ?6",
+                [
+                    if manager_can_view { 1 } else { 0 },
+                    if secretary_can_view { 1 } else { 0 },
+                    if staff_can_view { 1 } else { 0 },
+                    if secretary_can_edit_prices { 1 } else { 0 },
+                    if secretary_can_edit_stock { 1 } else { 0 },
+                    business_id,
+                ],
             )?;
         } else {
             self.conn.execute(
-                "INSERT INTO report_permissions (business_id, manager_can_view, secretary_can_view, staff_can_view)
-                 VALUES (?1, ?2, ?3, ?4)",
-                [business_id, if manager_can_view { 1 } else { 0 }, if secretary_can_view { 1 } else { 0 }, if staff_can_view { 1 } else { 0 }],
+                "INSERT INTO report_permissions (
+                    business_id, manager_can_view, secretary_can_view, staff_can_view,
+                    secretary_can_edit_prices, secretary_can_edit_stock
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                [
+                    business_id,
+                    if manager_can_view { 1 } else { 0 },
+                    if secretary_can_view { 1 } else { 0 },
+                    if staff_can_view { 1 } else { 0 },
+                    if secretary_can_edit_prices { 1 } else { 0 },
+                    if secretary_can_edit_stock { 1 } else { 0 },
+                ],
             )?;
         }
         Ok(())
@@ -2458,7 +2499,8 @@ impl Database {
         // Get report permissions
         let report_permissions: Vec<serde_json::Value> = {
             let mut stmt = self.conn.prepare(
-                "SELECT business_id, manager_can_view, secretary_can_view, staff_can_view
+                "SELECT business_id, manager_can_view, secretary_can_view, staff_can_view,
+                        COALESCE(secretary_can_edit_prices, 0), COALESCE(secretary_can_edit_stock, 0)
                  FROM report_permissions"
             )?;
             let iter = stmt.query_map([], |row| {
@@ -2467,6 +2509,8 @@ impl Database {
                     "manager_can_view": row.get::<_, i64>(1)? != 0,
                     "secretary_can_view": row.get::<_, i64>(2)? != 0,
                     "staff_can_view": row.get::<_, i64>(3)? != 0,
+                    "secretary_can_edit_prices": row.get::<_, i64>(4)? != 0,
+                    "secretary_can_edit_stock": row.get::<_, i64>(5)? != 0,
                 }))
             })?;
             iter.collect::<Result<Vec<_>>>()?
@@ -2698,10 +2742,24 @@ impl Database {
                 let manager_can_view = perm["manager_can_view"].as_bool().unwrap_or(false);
                 let secretary_can_view = perm["secretary_can_view"].as_bool().unwrap_or(false);
                 let staff_can_view = perm["staff_can_view"].as_bool().unwrap_or(false);
+                let secretary_can_edit_prices =
+                    perm["secretary_can_edit_prices"].as_bool().unwrap_or(false);
+                let secretary_can_edit_stock =
+                    perm["secretary_can_edit_stock"].as_bool().unwrap_or(false);
 
                 self.conn.execute(
-                    "INSERT INTO report_permissions (business_id, manager_can_view, secretary_can_view, staff_can_view) VALUES (?1, ?2, ?3, ?4)",
-                    [&business_id.to_string(), &(manager_can_view as i64).to_string(), &(secretary_can_view as i64).to_string(), &(staff_can_view as i64).to_string()]
+                    "INSERT INTO report_permissions (
+                        business_id, manager_can_view, secretary_can_view, staff_can_view,
+                        secretary_can_edit_prices, secretary_can_edit_stock
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    [
+                        &business_id.to_string(),
+                        &(manager_can_view as i64).to_string(),
+                        &(secretary_can_view as i64).to_string(),
+                        &(staff_can_view as i64).to_string(),
+                        &(secretary_can_edit_prices as i64).to_string(),
+                        &(secretary_can_edit_stock as i64).to_string(),
+                    ],
                 )?;
             }
         }

@@ -2634,9 +2634,38 @@ async function getReportPermissions(businessId: number) {
     manager_can_view: true,
     secretary_can_view: false,
     staff_can_view: false,
+    secretary_can_edit_prices: false,
+    secretary_can_edit_stock: false,
   }
   const key = `pos_report_permissions_${businessId}`
-  // Local-only: optional Supabase table not required (avoids 404 noise)
+
+  if (isSupabaseConfigured) {
+    const { data, error } = await supabase
+      .from('report_permissions_backup')
+      .select(
+        'manager_can_view, secretary_can_view, staff_can_view, secretary_can_edit_prices, secretary_can_edit_stock'
+      )
+      .eq('business_id', businessId)
+      .maybeSingle()
+
+    if (!error && data) {
+      const merged = {
+        ...defaults,
+        manager_can_view: Boolean(data.manager_can_view),
+        secretary_can_view: Boolean(data.secretary_can_view),
+        staff_can_view: Boolean(data.staff_can_view),
+        secretary_can_edit_prices: Boolean(data.secretary_can_edit_prices),
+        secretary_can_edit_stock: Boolean(data.secretary_can_edit_stock),
+      }
+      try {
+        localStorage.setItem(key, JSON.stringify(merged))
+      } catch {
+        // ignore
+      }
+      return merged
+    }
+  }
+
   try {
     const raw = localStorage.getItem(key)
     if (raw) return { ...defaults, ...JSON.parse(raw) }
@@ -2651,14 +2680,42 @@ async function saveReportPermissions(args: Record<string, unknown>) {
   if (!businessId) throw new Error('businessId is required')
   const payload = {
     manager_can_view: Boolean(
-      args.managerCanView ?? args.manager_can_view ?? false
+      args.managerCanView ?? args.manager_can_view ?? true
     ),
     secretary_can_view: Boolean(
       args.secretaryCanView ?? args.secretary_can_view ?? false
     ),
     staff_can_view: Boolean(args.staffCanView ?? args.staff_can_view ?? false),
+    secretary_can_edit_prices: Boolean(
+      args.secretaryCanEditPrices ?? args.secretary_can_edit_prices ?? false
+    ),
+    secretary_can_edit_stock: Boolean(
+      args.secretaryCanEditStock ?? args.secretary_can_edit_stock ?? false
+    ),
   }
   localStorage.setItem(`pos_report_permissions_${businessId}`, JSON.stringify(payload))
+
+  if (isSupabaseConfigured) {
+    const row = {
+      business_id: businessId,
+      ...payload,
+      synced_at: new Date().toISOString(),
+    }
+    let { error } = await supabase
+      .from('report_permissions_backup')
+      .upsert(row, { onConflict: 'business_id' })
+
+    if (error && /secretary_can_edit/i.test(error.message)) {
+      const { secretary_can_edit_prices: _p, secretary_can_edit_stock: _s, ...legacy } =
+        row as Record<string, unknown>
+      const retry = await supabase
+        .from('report_permissions_backup')
+        .upsert(legacy, { onConflict: 'business_id' })
+      error = retry.error
+    }
+    if (error) throw new Error(error.message)
+  }
+
   return true
 }
 
@@ -3976,6 +4033,36 @@ export async function invoke<T = unknown>(
     if (isSupabaseConfigured) {
       return (await getSalesEmailPreview(businessId, reportDate || undefined)) as T
     }
+  }
+
+  if (command === 'get_daily_stock_report') {
+    const businessId = argNumber(args, 'businessId', 'business_id')
+    if (!businessId) throw new Error('businessId is required')
+    const reportDate = String((args as any)?.reportDate || (args as any)?.report_date || '')
+    if (isSupabaseConfigured) {
+      return (await getDailyStockReport(businessId, reportDate || undefined)) as T
+    }
+    throw new Error('Daily stock report requires cloud connection (Supabase).')
+  }
+
+  if (
+    isSupabaseConfigured &&
+    (command === 'get_report_permissions' ||
+      command === 'save_report_permissions' ||
+      command === 'can_user_view_reports')
+  ) {
+    if (command === 'get_report_permissions') {
+      const businessId = argNumber(args, 'businessId', 'business_id')
+      if (!businessId) throw new Error('businessId is required')
+      return (await getReportPermissions(businessId)) as T
+    }
+    if (command === 'save_report_permissions') {
+      return (await saveReportPermissions((args || {}) as Record<string, unknown>)) as T
+    }
+    const businessId = argNumber(args, 'businessId', 'business_id')
+    const userRole = String((args as any)?.userRole ?? (args as any)?.user_role ?? '')
+    if (!businessId) throw new Error('businessId is required')
+    return (await canUserViewReports(businessId, userRole)) as T
   }
 
   if (isTauriApp()) {

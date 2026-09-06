@@ -2474,10 +2474,19 @@ async fn save_report_permissions(
     business_id: i64,
     manager_can_view: bool,
     secretary_can_view: bool,
-    staff_can_view: bool
+    staff_can_view: bool,
+    secretary_can_edit_prices: Option<bool>,
+    secretary_can_edit_stock: Option<bool>,
 ) -> Result<(), String> {
     let db = state.db.lock().unwrap();
-    db.save_report_permissions(business_id, manager_can_view, secretary_can_view, staff_can_view)
+    db.save_report_permissions(
+        business_id,
+        manager_can_view,
+        secretary_can_view,
+        staff_can_view,
+        secretary_can_edit_prices.unwrap_or(false),
+        secretary_can_edit_stock.unwrap_or(false),
+    )
         .map_err(|e| format!("Failed to save report permissions: {}", e))
 }
 

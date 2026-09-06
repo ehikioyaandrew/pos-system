@@ -3715,16 +3715,43 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
   const [itemsPerPage] = useState(10)
   const [searchQuery, setSearchQuery] = useState('')
   const [packagingFilter, setPackagingFilter] = useState('ALL')
+  const [rolePermissions, setRolePermissions] = useState({
+    secretary_can_edit_prices: false,
+    secretary_can_edit_stock: false,
+  })
 
   const businessId = currentUser?.business_id || businessInfo?.id
+  const isSuperAdmin = currentUser?.role === 'SuperAdmin'
+  const isSecretary = currentUser?.role === 'Secretary'
+  const canEditPrices =
+    isSuperAdmin || (isSecretary && rolePermissions.secretary_can_edit_prices)
+  const canEditStock =
+    isSuperAdmin || (isSecretary && rolePermissions.secretary_can_edit_stock)
 
   useEffect(() => {
     if (businessId) {
       void loadAll()
+      void loadRolePermissions()
     } else {
       setLoading(false)
     }
   }, [businessId])
+
+  const loadRolePermissions = async () => {
+    if (!businessId) return
+    try {
+      const perms = (await invoke('get_report_permissions', { businessId })) as any
+      setRolePermissions({
+        secretary_can_edit_prices: Boolean(perms?.secretary_can_edit_prices),
+        secretary_can_edit_stock: Boolean(perms?.secretary_can_edit_stock),
+      })
+    } catch {
+      setRolePermissions({
+        secretary_can_edit_prices: false,
+        secretary_can_edit_stock: false,
+      })
+    }
+  }
 
   const loadAll = async () => {
     setLoading(true)
@@ -3815,7 +3842,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         return
       }
 
-      const isAdmin = currentUser?.role === 'SuperAdmin'
+      const isAdmin = isSuperAdmin
       await invoke('create_product', {
         request: {
           business_id: id,
@@ -3827,13 +3854,13 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           price: productData.price || 0,
           staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
           cost_price: productData.costPrice || productData.cost_price || 0,
-          stock_quantity: isAdmin
+          stock_quantity: isAdmin || canEditStock
             ? (productData.fridgeStock || 0) + (productData.showStock || 0) + (productData.storeStock || 0)
             : 0,
           min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
-          fridge_stock: isAdmin ? Number(productData.fridgeStock || 0) : 0,
-          show_stock: isAdmin ? Number(productData.showStock || 0) : 0,
-          store_stock: isAdmin ? Number(productData.storeStock || 0) : 0,
+          fridge_stock: isAdmin || canEditStock ? Number(productData.fridgeStock || 0) : 0,
+          show_stock: isAdmin || canEditStock ? Number(productData.showStock || 0) : 0,
+          store_stock: isAdmin || canEditStock ? Number(productData.storeStock || 0) : 0,
           sports_stock: 0,
           duration_value: productData.durationValue ?? productData.duration_value ?? null,
           duration_unit: productData.durationUnit || productData.duration_unit || null,
@@ -3856,7 +3883,7 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         toast.error('Missing product or business id')
         return
       }
-      const isAdmin = currentUser?.role === 'SuperAdmin'
+      const isAdmin = isSuperAdmin
       await invoke('update_product', {
         request: {
           id: productData.id,
@@ -3868,18 +3895,36 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
           packaging: productData.packaging || null,
           min_stock_level: productData.minStockLevel || productData.min_stock_level || 0,
           image_path: productData.image_path || productData.imagePath || null,
-          update_prices: isAdmin,
-          update_stock: isAdmin,
-          ...(isAdmin
+          update_prices: isAdmin || canEditPrices,
+          update_stock: isAdmin || canEditStock,
+          ...((isAdmin || canEditPrices || canEditStock)
             ? {
-                price: productData.price || 0,
-                staff_price: productData.staffPrice ?? productData.staff_price ?? productData.price ?? 0,
-                cost_price: productData.costPrice || productData.cost_price || 0,
-                duration_value: productData.durationValue ?? productData.duration_value ?? null,
-                duration_unit: productData.durationUnit || productData.duration_unit || null,
-                fridge_stock: Number(productData.fridgeStock ?? productData.fridge_stock ?? 0),
-                show_stock: Number(productData.showStock ?? productData.show_stock ?? 0),
-                store_stock: Number(productData.storeStock ?? productData.store_stock ?? 0),
+                ...(isAdmin || canEditPrices
+                  ? {
+                      price: productData.price || 0,
+                      staff_price:
+                        productData.staffPrice ??
+                        productData.staff_price ??
+                        productData.price ??
+                        0,
+                      cost_price: productData.costPrice || productData.cost_price || 0,
+                      duration_value:
+                        productData.durationValue ?? productData.duration_value ?? null,
+                      duration_unit:
+                        productData.durationUnit || productData.duration_unit || null,
+                    }
+                  : {}),
+                ...(isAdmin || canEditStock
+                  ? {
+                      fridge_stock: Number(
+                        productData.fridgeStock ?? productData.fridge_stock ?? 0
+                      ),
+                      show_stock: Number(productData.showStock ?? productData.show_stock ?? 0),
+                      store_stock: Number(
+                        productData.storeStock ?? productData.store_stock ?? 0
+                      ),
+                    }
+                  : {}),
               }
             : {}),
         },
@@ -4204,7 +4249,8 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         {showAddModal && (
           <ProductFormModal
             mode="add"
-            isAdmin={currentUser?.role === 'SuperAdmin'}
+            canEditPrices={canEditPrices}
+            canEditStock={canEditStock}
             onClose={() => setShowAddModal(false)}
             onSave={addProduct}
             businessId={businessId}
@@ -4219,7 +4265,8 @@ function ProductManagement({ businessInfo, currentUser }: { businessInfo: any, c
         {editingProduct && (
           <ProductFormModal
             mode="edit"
-            isAdmin={currentUser?.role === 'SuperAdmin'}
+            canEditPrices={canEditPrices}
+            canEditStock={canEditStock}
             product={editingProduct}
             onClose={() => setEditingProduct(null)}
             onSave={saveProductEdit}
@@ -4399,6 +4446,8 @@ function ProductFormModal({
   businessId,
   packagingTypes,
   onManagePackaging,
+  canEditPrices: canEditPricesProp,
+  canEditStock: canEditStockProp,
   isAdmin = false,
 }: {
   mode: 'add' | 'edit'
@@ -4408,6 +4457,8 @@ function ProductFormModal({
   businessId: number
   packagingTypes: string[]
   onManagePackaging: () => void
+  canEditPrices?: boolean
+  canEditStock?: boolean
   isAdmin?: boolean
 }) {
   const [formData, setFormData] = useState({
@@ -4504,8 +4555,8 @@ function ProductFormModal({
 
   const fieldClass =
     'w-full px-4 py-3 text-base bg-white border border-[#d4dcd8] rounded-md text-[#121c19] placeholder:text-[#2a3d36]/35 focus:outline-none focus:border-[#c4783a] focus:ring-2 focus:ring-[#c4783a]/20 transition-colors'
-  const canEditPrices = isAdmin || mode === 'add'
-  const canEditStock = isAdmin
+  const canEditPrices = canEditPricesProp ?? (isAdmin || mode === 'add')
+  const canEditStock = canEditStockProp ?? isAdmin
   const lockedClass = `${fieldClass} bg-[#f4f6f5] text-[#2a3d36]/70 cursor-not-allowed`
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -6130,7 +6181,7 @@ function SettingsDashboard({ currentUser, businessInfo }: { currentUser: any, bu
   const tabs: { id: typeof activeTab; label: string; desc: string; adminOnly?: boolean }[] = [
     { id: 'business', label: 'Business', desc: 'Profile & branding' },
     { id: 'email', label: 'Email', desc: 'Outgoing mail' },
-    { id: 'reports', label: 'Report access', desc: 'Who can view reports', adminOnly: true },
+    { id: 'reports', label: 'Access', desc: 'Reports & secretary rights', adminOnly: true },
     { id: 'notifications', label: 'Notifications', desc: 'Alerts & reminders' },
   ]
 
@@ -6678,6 +6729,8 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
     manager_can_view: true,
     secretary_can_view: false,
     staff_can_view: false,
+    secretary_can_edit_prices: false,
+    secretary_can_edit_stock: false,
   })
 
   const businessId = currentUser?.business_id || businessInfo?.id
@@ -6699,6 +6752,8 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
         manager_can_view: Boolean(safe.manager_can_view),
         secretary_can_view: Boolean(safe.secretary_can_view),
         staff_can_view: Boolean(safe.staff_can_view),
+        secretary_can_edit_prices: Boolean(safe.secretary_can_edit_prices),
+        secretary_can_edit_stock: Boolean(safe.secretary_can_edit_stock),
       })
     } catch (error) {
       console.error('Failed to load report permissions:', error)
@@ -6707,6 +6762,8 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
         manager_can_view: true,
         secretary_can_view: false,
         staff_can_view: false,
+        secretary_can_edit_prices: false,
+        secretary_can_edit_stock: false,
       })
     } finally {
       setLoading(false)
@@ -6722,6 +6779,8 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
         managerCanView: permissions.manager_can_view,
         secretaryCanView: permissions.secretary_can_view,
         staffCanView: permissions.staff_can_view,
+        secretaryCanEditPrices: permissions.secretary_can_edit_prices,
+        secretaryCanEditStock: permissions.secretary_can_edit_stock,
       })
       toast.success('Report permissions saved')
     } catch (error) {
@@ -6742,12 +6801,17 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
 
   return (
     <div>
-      <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Report access</h2>
+      <h2 className="font-display text-xl font-bold text-[#121c19] mb-1">Access & permissions</h2>
       <p className="text-sm text-[#2a3d36]/55 mb-6">
-        Control which roles can view reports. SuperAdmin always has access.
+        Control who can view reports and what Secretaries can change on products. SuperAdmin always has full access.
       </p>
 
-      <form onSubmit={handleSave} className="space-y-4">
+      <form onSubmit={handleSave} className="space-y-6">
+        <div>
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/55 mb-3">
+            Report access
+          </h3>
+          <div className="space-y-4">
         {(
           [
             { key: 'manager_can_view' as const, title: 'Manager', desc: 'Allow Managers to view reports and analytics' },
@@ -6771,6 +6835,46 @@ function ReportPermissionsSettings({ currentUser, businessInfo }: { currentUser:
             </div>
           </label>
         ))}
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-[#2a3d36]/55 mb-3">
+            Secretary · products
+          </h3>
+          <div className="space-y-4">
+        {(
+          [
+            {
+              key: 'secretary_can_edit_prices' as const,
+              title: 'Edit prices',
+              desc: 'Allow Secretary to change normal, staff, and cost prices when editing products',
+            },
+            {
+              key: 'secretary_can_edit_stock' as const,
+              title: 'Edit stock quantities',
+              desc: 'Allow Secretary to change fridge, show, and store stock levels',
+            },
+          ]
+        ).map((item) => (
+          <label
+            key={item.key}
+            className="flex items-center cursor-pointer p-4 rounded-lg border border-[#d4dcd8] bg-[#f4f6f5] hover:bg-white transition-colors"
+          >
+            <input
+              type="checkbox"
+              checked={Boolean(permissions[item.key])}
+              onChange={(e) => setPermissions({ ...permissions, [item.key]: e.target.checked })}
+              className="w-5 h-5 accent-[#121c19] rounded"
+            />
+            <div className="ml-3 flex-1">
+              <p className="font-semibold text-[#121c19]">{item.title}</p>
+              <p className="text-sm text-[#2a3d36]/55">{item.desc}</p>
+            </div>
+          </label>
+        ))}
+          </div>
+        </div>
 
         <div className="flex justify-end pt-2">
           <button
@@ -7306,8 +7410,6 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
 
   const businessId = currentUser?.business_id || businessInfo?.id
   const userRole = currentUser?.role || ''
-  const roleAllows =
-    userRole === 'SuperAdmin' || userRole === 'Manager' || userRole === 'Secretary'
 
   const formatMoney = (n: number) =>
     `₦${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -7342,10 +7444,10 @@ function ReportsDashboard({ currentUser, businessInfo }: { currentUser: any, bus
       const canView = await invoke('can_user_view_reports', {
         businessId,
         userRole,
-      }) as boolean | null
-      setHasAccess(canView === true || (canView == null && roleAllows))
+      }) as boolean
+      setHasAccess(canView === true)
     } catch {
-      setHasAccess(roleAllows)
+      setHasAccess(userRole === 'SuperAdmin')
     }
   }
 

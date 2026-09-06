@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS report_permissions_backup (
   manager_can_view BOOLEAN DEFAULT TRUE,
   secretary_can_view BOOLEAN DEFAULT FALSE,
   staff_can_view BOOLEAN DEFAULT FALSE,
+  secretary_can_edit_prices BOOLEAN DEFAULT FALSE,
+  secretary_can_edit_stock BOOLEAN DEFAULT FALSE,
   synced_at TIMESTAMP DEFAULT NOW()
 );
 
